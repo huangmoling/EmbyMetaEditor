@@ -2,6 +2,10 @@
 
 一个用 Go 写的 Emby 媒体库管理工具。单文件 exe，双击即用，界面跑在本机浏览器里（默认只监听 `127.0.0.1`，不会暴露到局域网）。
 
+> **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.3 MB，无需安装任何运行库）
+>
+> 不想下载也可以从源码构建，见[「从源码构建」](#从源码构建)。
+
 围绕五件事：
 
 | 模块 | 能力 |
