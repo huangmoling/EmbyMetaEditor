@@ -11,14 +11,20 @@ import (
 	"testing"
 )
 
-// 本文件是三个线上 bug 的回归测试。
+// 本文件是线上 bug 与真实环境行为的回归测试。
+//
+// 起因是三个线上 bug：
 //
 // 1. 演员头像刮削 500：The input is not a valid Base-64 string…
 // 2. 媒体库刮削 / 详情 404：找不到文件 "/Items/xxx"
 // 3. 番号补全页缺失番号没有图片（javbus Referer 防盗链）
 //
-// mockEmby 已经按真实 4.9 构建的行为建模：读走用户作用域、写走全局作用域、
-// 图片上传只认 base64 文本。所以下面每个用例都直接对应线上现象。
+// 后来陆续补进了同类的「按真实服务器行为建模」的用例：
+// 番号归一化与列表回填、图片代理的分类与缓存、演员按媒体库过滤。
+//
+// mockEmby 按真实 4.9 构建的行为建模：读走用户作用域、写走全局作用域、
+// POST /Items/{id} 是整对象替换、图片上传只认 base64 文本、/Items 不返回 SortName、
+// /Persons 支持 ParentId 过滤。所以下面每个用例都直接对应线上现象。
 
 // ---------- Bug 2：条目详情 404 ----------
 
@@ -557,5 +563,159 @@ func TestImageProxyCaches(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Errorf("同一地址应命中缓存，上游被打了 %d 次", hits)
+	}
+}
+
+// ---------- 演员按媒体库过滤 ----------
+
+// mock 的 /Persons 必须照抄真实 Emby 的 ParentId 行为。
+// 实测（4.9.0.42，10592 个演员）：不传 ParentId 是全局，传了就只算该库出现过的演员。
+func TestEmbyPersonsScopesToParent(t *testing.T) {
+	m := newMockEmby(t)
+	m.persons = []Person{{Id: "p1", Name: "甲"}, {Id: "p2", Name: "乙"}, {Id: "p3", Name: "丙"}}
+	m.personParent = map[string]string{"p1": "502847", "p2": "502847", "p3": "502849"}
+
+	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", UserID: "u1"})
+	ctx := context.Background()
+
+	all, err := e.Persons(ctx, 0, 50, "", "")
+	if err != nil {
+		t.Fatalf("全局查询失败: %v", err)
+	}
+	if all.TotalRecordCount != 3 {
+		t.Errorf("不传 ParentId 应返回全部 3 人，实际 %d", all.TotalRecordCount)
+	}
+
+	got, err := e.Persons(ctx, 0, 50, "", "502847")
+	if err != nil {
+		t.Fatalf("按库查询失败: %v", err)
+	}
+	if got.TotalRecordCount != 2 || len(got.Items) != 2 {
+		t.Errorf("502847 应有 2 人，实际 total=%d items=%d", got.TotalRecordCount, len(got.Items))
+	}
+	if m.lastParentID != "502847" {
+		t.Errorf("ParentId 应发给服务端，服务端实际收到 %q", m.lastParentID)
+	}
+
+	empty, err := e.Persons(ctx, 0, 50, "", "502850")
+	if err != nil {
+		t.Fatalf("查询空库失败: %v", err)
+	}
+	if empty.TotalRecordCount != 0 || len(empty.Items) != 0 {
+		t.Errorf("502850 里没有演员，实际 total=%d items=%d", empty.TotalRecordCount, len(empty.Items))
+	}
+}
+
+// 前端下拉选的媒体库必须一路传到 Emby —— 中间任何一层漏掉，
+// 用户看到的就是「选了库但列表没变」。
+func TestHandlePersonsPassesParentID(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+	m.persons = []Person{
+		{Id: "p1", Name: "甲"},
+		{Id: "p2", Name: "乙", ImageTags: map[string]string{"Primary": "t"}},
+		{Id: "p3", Name: "丙"},
+	}
+	m.personParent = map[string]string{"p1": "502847", "p2": "502847", "p3": "502849"}
+
+	srv := httptest.NewServer(app.route())
+	defer srv.Close()
+
+	get := func(query string) (int, []string) {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/api/persons?limit=10" + query)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Data struct {
+				Items []struct {
+					Name string `json:"Name"`
+				} `json:"items"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("解析失败: %v", err)
+		}
+		names := make([]string, 0, len(out.Data.Items))
+		for _, it := range out.Data.Items {
+			names = append(names, it.Name)
+		}
+		return out.Data.Total, names
+	}
+
+	total, names := get("")
+	if total != 3 || len(names) != 3 {
+		t.Errorf("不选媒体库应返回全部 3 人，实际 total=%d names=%v", total, names)
+	}
+
+	total, names = get("&parent_id=502847")
+	if total != 2 || len(names) != 2 {
+		t.Errorf("502847 应有 2 人，实际 total=%d names=%v", total, names)
+	}
+	if m.lastParentID != "502847" {
+		t.Errorf("parent_id 应透传到 Emby，服务端实际收到 %q", m.lastParentID)
+	}
+
+	// 「只看无头像」叠在库过滤之上：502847 里乙有头像，应只剩甲。
+	total, names = get("&parent_id=502847&missing_image=true")
+	if total != 2 {
+		t.Errorf("total 仍是库内演员数 2，实际 %d", total)
+	}
+	if len(names) != 1 || names[0] != "甲" {
+		t.Errorf("502847 里只有甲缺头像，实际 names=%v", names)
+	}
+}
+
+// 批量刮削也要受媒体库限制，否则用户选了「国产传媒」却把全库演员都刮了。
+func TestHandlePersonAvatarBatchPassesParentID(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+	m.persons = []Person{{Id: "p1", Name: "甲"}, {Id: "p2", Name: "乙"}}
+	m.personParent = map[string]string{"p1": "502847", "p2": "502849"}
+
+	srv := httptest.NewServer(app.route())
+	defer srv.Close()
+
+	body := `{"mode":"missing","limit":10,"source":"gfriends","parent_id":"502847"}`
+	resp, err := http.Post(srv.URL+"/api/persons/avatars", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("应返回 200，实际 %d", resp.StatusCode)
+	}
+	if m.lastParentID != "502847" {
+		t.Errorf("批量刮削也要把 parent_id 传给 Emby，服务端实际收到 %q", m.lastParentID)
+	}
+}
+
+// 真实 Emby 对格式非法的 ParentId 是 500，不是返回空列表。
+// 这条用来钉住 mock 的复现能力 —— 否则「客户端传了坏 GUID」这类问题在单测里永远看不见。
+func TestMockPersonsRejectsMalformedParent(t *testing.T) {
+	m := newMockEmby(t)
+	m.persons = []Person{{Id: "p1", Name: "甲"}}
+	m.personParent = map[string]string{"p1": "502847"}
+
+	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", UserID: "u1"})
+	ctx := context.Background()
+
+	if _, err := e.Persons(ctx, 0, 50, "", "502847"); err != nil {
+		t.Fatalf("真实短写形式的库 Id 不应报错: %v", err)
+	}
+	if _, err := e.Persons(ctx, 0, 50, "", strings.Repeat("0", 32)); err != nil {
+		t.Fatalf("全零 GUID 格式合法（只是查不到），不应报错: %v", err)
+	}
+	_, err := e.Persons(ctx, 0, 50, "", "__no_such_library__")
+	if err == nil {
+		t.Fatal("格式非法的 ParentId 应当报错（线上是 500 Unrecognized Guid format.）")
+	}
+	if !strings.Contains(err.Error(), "Unrecognized Guid format") {
+		t.Errorf("报错应带上服务端原因，实际: %v", err)
 	}
 }

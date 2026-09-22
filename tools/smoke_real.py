@@ -185,6 +185,39 @@ try:
 except Exception as e:
     check("演员接口", False, str(e))
 
+# --- 6b. 演员按媒体库过滤（验证真实 Emby 的 /Persons 支持 ParentId）---
+print("\n[6b] 演员按媒体库过滤")
+try:
+    libs = get("/api/libraries")["data"]
+    check("媒体库列表", len(libs) > 0, "%d 个库" % len(libs))
+
+    g_all = get("/api/persons?limit=1", timeout=180)["data"].get("total", 0)
+    check("全局演员数", g_all > 0, "%d 位" % g_all)
+
+    sample = libs[:4]
+    counts = []
+    for lib in sample:
+        d = get("/api/persons?limit=1&parent_id=" + urllib.parse.quote(lib["Id"]), timeout=180)["data"]
+        counts.append((lib.get("Name", lib["Id"]), d.get("total", 0)))
+
+    non_zero = [c for c in counts if c[1] > 0]
+    check("按库过滤生效", len(non_zero) >= 1,
+          " / ".join("%s=%d" % c for c in counts))
+
+    # 任何一个库的演员数都不该等于全局数，否则说明 ParentId 根本没被服务端采纳
+    same_as_global = [c for c in counts if c[1] == g_all and g_all > 0]
+    check("过滤确实缩小了范围", not same_as_global,
+          ("以下库返回了与全局相同的数量：" + str(same_as_global)) if same_as_global
+          else "全局 %d，抽样库均小于全局" % g_all)
+
+    # 真实行为（实测）：ParentId 格式非法（含非十六进制字符）→ Emby 直接
+    # 500 "Unrecognized Guid format."；格式合法但库不存在 → 200 且 0 人。
+    # 前端只会传 "" 或真实库 Id，两种都安全，所以这里验后者。
+    bogus = get("/api/persons?limit=1&parent_id=" + "0" * 32, timeout=180)["data"].get("total", 0)
+    check("不存在的库返回 0", bogus == 0, "实际 %d" % bogus)
+except Exception as e:
+    check("演员按库过滤", False, str(e))
+
 print("\n" + "=" * 70)
 bad = [r for r in results if not r[1]]
 print("共 %d 项，通过 %d，失败 %d" % (len(results), len(results) - len(bad), len(bad)))

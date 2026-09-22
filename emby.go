@@ -570,7 +570,10 @@ type PersonsResult struct {
 }
 
 // Persons 分页查询人物库。
-func (e *Emby) Persons(ctx context.Context, start, limit int, search string) (*PersonsResult, error) {
+//
+// parentID 非空时只返回该媒体库下出现过的演员（实测 Emby 4.9 支持 `ParentId`：
+// 全局 10592 人 → 按库过滤后 464 / 2664 / 594 人）。传空串即全局。
+func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID string) (*PersonsResult, error) {
 	q := url.Values{}
 	q.Set("StartIndex", itoa(start))
 	if limit > 0 {
@@ -579,6 +582,9 @@ func (e *Emby) Persons(ctx context.Context, start, limit int, search string) (*P
 	q.Set("Fields", "ImageTags,ProviderIds")
 	if search != "" {
 		q.Set("SearchTerm", search)
+	}
+	if parentID != "" {
+		q.Set("ParentId", parentID)
 	}
 	if e.UserID != "" {
 		q.Set("UserId", e.UserID)
@@ -592,7 +598,7 @@ func (e *Emby) Persons(ctx context.Context, start, limit int, search string) (*P
 
 // PersonByName 按名字精确查询人物。
 func (e *Emby) PersonByName(ctx context.Context, name string) (*Person, error) {
-	res, err := e.Persons(ctx, 0, 50, name)
+	res, err := e.Persons(ctx, 0, 50, name, "")
 	if err != nil {
 		return nil, err
 	}

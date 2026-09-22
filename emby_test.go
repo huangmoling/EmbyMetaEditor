@@ -22,8 +22,13 @@ type mockEmby struct {
 	deleted  []string // "itemID/type"
 	patched  map[string]map[string]any
 	persons  []Person
-	refresh  int
-	srv      *httptest.Server
+	// personParent 模拟「演员 → 所属媒体库」的关系。真实 Emby 的 /Persons
+	// 支持 ParentId 过滤（实测：全局 10592 人 → 按库过滤后 464 / 2664 / 594 人），
+	// mock 必须照抄这个行为，否则「按库查看演员」的功能在单测里是假的。
+	personParent map[string]string
+	lastParentID string // 记录最近一次 /Persons 收到的 ParentId，供断言客户端确实传了
+	refresh      int
+	srv          *httptest.Server
 }
 
 // mockServerManaged 是 POST /Items/{id} 不会改动的服务端托管字段。
@@ -32,10 +37,32 @@ var mockServerManaged = []string{
 	"MediaSources", "MediaStreams", "Chapters",
 }
 
+// isGUIDish 判断字符串是否是 Emby 能解析的 GUID 表示。
+//
+// Emby 接受「去横线、可短写」的形式 —— 真实媒体库 Id 就是 `502847` 这种 6 位十六进制。
+// 所以规则是「非空时全部由十六进制字符或横线组成」。空串表示不按库过滤，也算合法。
+func isGUIDish(s string) bool {
+	if s == "" {
+		return true
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		case c >= 'A' && c <= 'F':
+		case c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func newMockEmby(t *testing.T) *mockEmby {
 	m := &mockEmby{
-		items:   map[string]map[string]any{},
-		patched: map[string]map[string]any{},
+		items:        map[string]map[string]any{},
+		patched:      map[string]map[string]any{},
+		personParent: map[string]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +183,29 @@ func newMockEmby(t *testing.T) *mockEmby {
 	mux.HandleFunc("GET /Persons", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		writeJSON(w, 200, map[string]any{"Items": m.persons, "TotalRecordCount": len(m.persons)})
+		parent := r.URL.Query().Get("ParentId")
+		m.lastParentID = parent
+		// 照抄线上怪癖：ParentId 不是 GUID 时 Emby 直接 500，而不是返回空列表。
+		// 实测 `__no_such_library__` → 500 "Unrecognized Guid format."，
+		// 而 `00000000000000000000000000000000` → 200 且 0 条。
+		if !isGUIDish(parent) {
+			http.Error(w, "Unrecognized Guid format.", http.StatusInternalServerError)
+			return
+		}
+		items := m.persons
+		if parent != "" {
+			filtered := make([]Person, 0, len(items))
+			for _, p := range items {
+				if m.personParent[p.Id] == parent {
+					filtered = append(filtered, p)
+				}
+			}
+			items = filtered
+		}
+		if items == nil {
+			items = []Person{}
+		}
+		writeJSON(w, 200, map[string]any{"Items": items, "TotalRecordCount": len(items)})
 	})
 	m.srv = httptest.NewServer(mux)
 	t.Cleanup(m.srv.Close)

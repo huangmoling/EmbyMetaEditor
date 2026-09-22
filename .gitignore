@@ -10,12 +10,24 @@ cache/
 .workbuddy-ai/
 
 # ===== 真实环境截图 =====
-# 这几张是在真实 Emby 上截的，含真实媒体库内容，不入库。
-# 01–09 是 mock 环境截图，README 引用的也是那批。
-screenshots/10-*.png
-screenshots/11-*.png
-screenshots/12-*.png
-screenshots/13-*.png
+# 只保留 01–09 这批 mock 环境截图（README 引用的就是它们）。
+# 其余一律不入库 —— 10 号之后都是在真实 Emby 上截的，含真实媒体库内容。
+# 用「白名单」写法而不是逐个列黑名单：以后新截图默认被忽略，不会漏。
+screenshots/*
+!screenshots/01-*.png
+!screenshots/02-*.png
+!screenshots/03-*.png
+!screenshots/04-*.png
+!screenshots/05-*.png
+!screenshots/06-*.png
+!screenshots/07-*.png
+!screenshots/08-*.png
+!screenshots/09-*.png
+
+# ===== 构建副产物 =====
+# 正式产物是 EmbyMetaEditor.exe（构建命令见 README）。
+# 顺手跑 `go build ./...` 会按模块名再生成一个不带 -trimpath 的，别提交进来。
+emby-meta-editor.exe
 
 # ===== 编辑器 / 系统产生的备份与杂物 =====
 *~

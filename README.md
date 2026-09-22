@@ -12,7 +12,7 @@
 |---|---|
 | **Emby 登录** | 用户名 / 密码 或 API Key 两种方式，凭据本地保存 |
 | **MetaTube 刮削** | 单个 / 批量刮削元数据与图片，**服务地址自行配置**（公共后端已下线，建议自建） |
-| **gfriends 头像库** | 10 万+ 张头像索引，演员头像单个挑、批量刮 |
+| **gfriends 头像库** | 10 万+ 张头像索引；演员列表可**按媒体库筛选**，缺头像的一眼看完，单个挑或批量刮 |
 | **javbus 番号统计** | 按演员抓取全部番号，与本地媒体库比对找出缺失，抓取磁力列表；**带连通性诊断** |
 | **媒体库统计** | 各媒体库条目数、电影 / 剧集 / 集数、可选统计占用体积 |
 
@@ -42,7 +42,7 @@ EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注�
    API Key 在 Emby 后台「高级 → API 密钥」里生成。
 2. **概览统计** —— 看媒体库数量分布、缺头像演员数；勾「统计体积」会扫描文件大小（较慢）。
 3. **媒体库刮削** —— 选媒体库、筛「只看无海报」、批量刮削；点单个卡片的「刮削」或「详情」可手动搜索匹配。
-4. **演员头像** —— 默认列出无头像演员，点「刮削」单个处理，「批量刮削头像」按数量批量跑。
+4. **演员头像** —— 先选媒体库（默认全部），默认只列出无头像的演员，点「刮削」单个处理，「批量刮削头像」按数量批量跑。
 5. **番号补全** —— 填演员名（或 javbus 演员页地址），统计后得到缺失番号网格，勾选后抓磁力。
 
 ---
@@ -163,10 +163,13 @@ curl -I "http://127.0.0.1:8097/api/img?u=https%3A%2F%2Fwww.javbus.com%2Fpics%2Fc
 ## 从源码构建
 
 ```bash
-go build -trimpath -ldflags "-s -w" -o EmbyMetaEditor.exe .
+go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 ```
 
 单文件 exe，前端资源（`web/`）和图标（`rsrc_windows_amd64.syso`）都通过 `go:embed` / PE 资源嵌进去了，拷走 exe 就能跑。
+
+加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（md5 `88fa31520f8a3979e93a3476a2c851db`）。
+不加这个参数的话 Go 会往产物里嵌当前 commit 的 VCS 信息，体积和哈希都会变 —— 那是正常的，不是源码漂移。
 
 跑测试：
 
@@ -174,9 +177,9 @@ go build -trimpath -ldflags "-s -w" -o EmbyMetaEditor.exe .
 go test ./...
 ```
 
-90 个用例，覆盖番号归一化、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
+94 个用例，覆盖番号归一化、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、图片代理的主机分类与缓存、演员按媒体库过滤、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
-其中 mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径返回 404）、写操作只认全局路径、`POST /Items/{id}` 是整对象替换、图片上传只收 base64 文本、列表接口不返回 `SortName`。线上踩过的坑因此都能在单元测试里复现，而不是等上线才发现。
+其中 mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径返回 404）、写操作只认全局路径、`POST /Items/{id}` 是整对象替换、图片上传只收 base64 文本、列表接口不返回 `SortName`、`/Persons` 支持 `ParentId` 但传非法 GUID 会 500。线上踩过的坑因此都能在单元测试里复现，而不是等上线才发现。
 
 界面回归（可选）：起一个模拟 javbus 站点，用无头浏览器真实点击验证诊断按钮的渲染。
 
@@ -215,6 +218,16 @@ python tools/verify_images.py
 `<img>` 都走了服务端代理且 `naturalWidth > 0`，最后截图到 `screenshots/`。
 覆盖三处：番号补全的缺失番号封面、MetaTube 搜索结果的封面、gfriends 头像库的缩略图。
 
+演员按媒体库筛选的**交互**回归（同样需要无头 Edge + 真实 config.json）：
+
+```bash
+python tools/verify_person_lib.py
+```
+
+它会真实点击进入「演员头像」，记录「全部媒体库」的演员总数与卡片，
+再逐个切换媒体库下拉，断言：分页说明里出现所选库名、该库演员数小于全局、
+卡片确实换了一批人、能切回全部媒体库，且全程没有 console 报错。
+
 > 「接口返回了 JPEG」和「页面上看得到图」是两件事，这个脚本验证的是后者。
 
 ---
@@ -235,7 +248,7 @@ jobs.go              后台任务与进度
 util.go              番号归一化、HTML 辅助、HTTP 客户端
 console_windows.go   Windows 控制台切 UTF-8
 web/                 前端（原生 JS，无构建步骤）
-tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 实机冒烟
+tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 演员按库筛选 / 实机冒烟
 app.ico              图标源文件
 ```
 
@@ -244,8 +257,9 @@ app.ico              图标源文件
 | 脚本 | 验什么 | 需要什么 |
 |---|---|---|
 | `check_frontend.py` | HTML / JS / 后端路由静态对照 | 无 |
-| `smoke_real.py` | 真实环境只读冒烟 23 项 | 起 exe + 真实 config |
+| `smoke_real.py` | 真实环境只读冒烟 28 项 | 起 exe + 真实 config |
 | `verify_images.py` | 页面图片**真的渲染出来**（番号补全 / MetaTube 搜索 / gfriends 三处） | 起 exe + 无头 Edge |
+| `verify_person_lib.py` | 演员按媒体库筛选的**交互**（切库、总数、卡片换批、切回） | 起 exe + 无头 Edge |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
 | `live_test.go`（`EMBY_LIVE=1 go test -run TestLive`） | 实机**写**路径，幂等不改变数据 | 真实 config |
 
@@ -260,6 +274,10 @@ app.ico              图标源文件
 - 工具默认只监听本机。用 `-host 0.0.0.0` 开放出去等于把 Emby 凭据摊在网上，自己掂量。
 - `SortName` / `ForcedSortName` 在部分 Emby 构建上设不进去，详见下面「一个改不回来的字段」。
 - 封面代理只放行白名单主机。要加自己的图床，改 `imageproxy.go` 里的 `imageCDNHosts`。
+- **演员列表的内容取决于你的 Emby 数据。** `/Persons` 返回的是 Emby 索引为 `Person` 的条目，
+  有些刮削器会把**片商 / 系列名**也写进条目的 `People` 字段，于是它们会以「演员」身份出现
+  （例如某些 JAV 库里的 `プレミアムビデオ`、`ハメンタリズム` 这类）。工具只如实展示，
+  不猜哪些是真人 —— 想只看某个库的演员，用「演员头像」页的媒体库下拉缩小范围。
 
 ---
 
@@ -281,6 +299,7 @@ app.ico              图标源文件
 | MetaTube 报「解析 providers 失败」 | v1 实际返回 `{"data":{"movie_providers":{…}}}`，不是文档里的扁平数组 | 三种结构都兼容 |
 | 刮削后制作商 / 简介为空 | 实际字段名是 `maker` / `summary`，代码里写的是 `studio` / `plot` | 两套都留，取值用 `firstNonEmpty` 兜底 |
 | 番号统计偶发抓不到演员 | 搜索接口有时返回 JSON、有时返回 HTML | 两种都解析，且失败时落盘原始响应 |
+| 按媒体库查演员，库 ID 写错时整个请求 500 | `/Persons` 的 `ParentId` 不是 GUID 时 Emby 直接 500 `Unrecognized Guid format.`，**不是**返回空列表；而全零 GUID 这种「格式合法但不存在」的会正常返回 0 条 | 前端只传真实库 Id 或空串，两种都安全；mock 也照抄了这个 500 行为，避免以后误传坏 ID 时单测看不出来 |
 
 ### 一个改不回来的字段
 

@@ -337,7 +337,7 @@ func (a *App) personStats(ctx context.Context, e *Emby, maxScan int) map[string]
 	const pageSize = 500
 	total, withImg, missing, scanned := 0, 0, 0, 0
 	for {
-		pr, err := e.Persons(ctx, start, pageSize, "")
+		pr, err := e.Persons(ctx, start, pageSize, "", "")
 		if err != nil {
 			res["error"] = err.Error()
 			break
@@ -587,7 +587,7 @@ func (a *App) handlePersons(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 60
 	}
-	pr, err := e.Persons(r.Context(), start, limit, q.Get("q"))
+	pr, err := e.Persons(r.Context(), start, limit, q.Get("q"), q.Get("parent_id"))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
@@ -656,6 +656,7 @@ func (a *App) handlePersonAvatarBatch(w http.ResponseWriter, r *http.Request) {
 		Limit     int      `json:"limit"`
 		Source    string   `json:"source"`
 		Overwrite bool     `json:"overwrite"`
+		ParentID  string   `json:"parent_id"` // 限定媒体库，空串为全部
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -682,7 +683,7 @@ func (a *App) handlePersonAvatarBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		start := 0
 		for len(targets) < limit {
-			pr, err := e.Persons(ctx, start, 500, "")
+			pr, err := e.Persons(ctx, start, 500, "", in.ParentID)
 			if err != nil {
 				writeErr(w, http.StatusBadGateway, err)
 				return

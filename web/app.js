@@ -153,7 +153,7 @@ function switchView(v) {
   $('#viewTitle').textContent = VIEW_TITLES[v] || v;
   if (v === 'stats') loadStats();
   if (v === 'library') { ensureLibs(); loadItems(0); }
-  if (v === 'persons') { loadPersons(0); refreshGfState(); }
+  if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); }
   if (v === 'settings') fillSettings();
 }
 
@@ -221,6 +221,7 @@ async function ensureLibs() {
     const opts = S.libs.map((l) => '<option value="' + esc(l.Id) + '">' + esc(l.Name) + '</option>').join('');
     $('#lbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#jbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
+    $('#psLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
   } catch (e) { /* 未登录时忽略 */ }
 }
 
@@ -371,18 +372,26 @@ async function loadPersons(start) {
   const ps = S.ps;
   ps.start = start || 0;
   $('#psList').innerHTML = '<div class="empty"><span class="spin"></span> 加载中…</div>';
+  const libOpt = $('#psLib').selectedOptions[0];
+  const libName = libOpt ? libOpt.textContent : '全部媒体库';
+  const onlyMissing = $('#psMissing').checked;
   const params = new URLSearchParams({
     q: $('#psQ').value.trim(), start: ps.start, limit: ps.limit,
-    missing_image: $('#psMissing').checked ? 'true' : 'false',
+    parent_id: $('#psLib').value,
+    missing_image: onlyMissing ? 'true' : 'false',
   });
   try {
     const d = await api('/api/persons?' + params.toString());
     ps.items = d.items || [];
     ps.total = d.total || 0;
-    if (!ps.items.length) $('#psList').innerHTML = '<div class="empty">没有符合条件的演员</div>';
-    else $('#psList').innerHTML = ps.items.map(renderPersonCard).join('');
+    if (!ps.items.length) {
+      $('#psList').innerHTML = '<div class="empty">' +
+        (onlyMissing ? '「' + esc(libName) + '」里没有缺头像的演员' : '没有符合条件的演员') + '</div>';
+    } else {
+      $('#psList').innerHTML = ps.items.map(renderPersonCard).join('');
+    }
     renderPager('#psPager', ps, loadPersons,
-      $('#psMissing').checked ? ('本页 ' + ps.items.length + ' 位无头像 / 演员总数 ' + num(ps.total)) : null);
+      onlyMissing ? ('本页 ' + ps.items.length + ' 位无头像 / ' + esc(libName) + ' 共 ' + num(ps.total) + ' 位演员') : null);
   } catch (e) {
     $('#psList').innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
     $('#psPager').innerHTML = '';
@@ -829,6 +838,7 @@ function bind() {
   $('#psSearch').onclick = () => loadPersons(0);
   $('#psQ').onkeydown = (e) => { if (e.key === 'Enter') loadPersons(0); };
   $('#psMissing').onchange = () => loadPersons(0);
+  $('#psLib').onchange = () => loadPersons(0);
   $('#psList').onclick = (e) => {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
@@ -843,6 +853,7 @@ function bind() {
         body: {
           mode: 'missing', limit: Number($('#psLimit').value) || 100,
           source: $('#psSource').value, overwrite: $('#psOverwrite').checked,
+          parent_id: $('#psLib').value,
         },
       });
       watchJob(r.job_id, '批量刮削演员头像', () => loadPersons(S.ps.start));
