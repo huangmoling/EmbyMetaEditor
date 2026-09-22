@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Emby 元数据编辑器</title>
+<!-- 和 exe 图标同源（app.ico 的 32x32）。没有它浏览器会一直请求 /favicon.ico 报 404，
+     会把回归测试的报错列表污染掉。 -->
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ================= 登录 / 初始化 ================= -->
+<div id="login" class="login-wrap">
+  <div class="login-card">
+    <div class="login-head">
+      <div class="logo">Em</div>
+      <div>
+        <h1>Emby 元数据编辑器</h1>
+        <p>MetaTube 刮削 · gfriends 头像库 · javbus 番号统计</p>
+      </div>
+    </div>
+
+    <div class="login-body">
+      <div class="seg" id="loginMode">
+        <button data-mode="password" class="on">用户名 / 密码</button>
+        <button data-mode="apikey">API Key</button>
+      </div>
+
+      <div class="field">
+        <label>Emby 服务器地址</label>
+        <input class="input" id="lgUrl" placeholder="http://192.168.1.10:8096" autocomplete="off">
+      </div>
+
+      <div id="lgPwdBox">
+        <div class="row">
+          <div class="field">
+            <label>用户名</label>
+            <input class="input" id="lgUser" placeholder="Emby 用户名" autocomplete="off">
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input class="input" id="lgPass" type="password" placeholder="留空表示无密码" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div id="lgKeyBox" class="hidden">
+        <div class="field">
+          <label>API Key</label>
+          <input class="input" id="lgKey" placeholder="Emby 后台 → 高级 → API 密钥" autocomplete="off">
+          <div class="hint">API Key 拥有管理员权限，可读写元数据与图片。</div>
+        </div>
+      </div>
+
+      <details class="adv">
+        <summary>高级配置（MetaTube / gfriends / javbus / 代理）</summary>
+        <div class="row">
+          <div class="field">
+            <label>MetaTube 服务地址</label>
+            <input class="input" id="lgMt" placeholder="http://127.0.0.1:8080">
+            <div class="hint">自建 MetaTube Server 的地址，官方公共后端已下线。</div>
+          </div>
+          <div class="field">
+            <label>MetaTube Token（可选）</label>
+            <input class="input" id="lgMtToken" placeholder="实例开启鉴权时填写">
+          </div>
+        </div>
+        <div class="field">
+          <label>gfriends 索引地址</label>
+          <input class="input" id="lgGfTree" placeholder="https://cdn.jsdelivr.net/gh/gfriends/gfriends@master/Filetree.json">
+        </div>
+        <div class="field">
+          <label>gfriends 图片 CDN 前缀</label>
+          <input class="input" id="lgGfCdn" placeholder="https://cdn.jsdelivr.net/gh/gfriends/gfriends@master">
+          <div class="hint">raw.githubusercontent.com 在国内常被墙，默认用 jsdelivr。</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>javbus 地址</label>
+            <input class="input" id="lgJb" placeholder="https://www.javbus.com">
+          </div>
+          <div class="field">
+            <label>javbus Cookie</label>
+            <input class="input" id="lgJbCookie" placeholder="age=verified; dv=1; existmag=mag">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>HTTP 代理（可选）</label>
+            <input class="input" id="lgProxy" placeholder="http://127.0.0.1:7890">
+          </div>
+          <div class="field">
+            <label>并发数</label>
+            <input class="input" id="lgConc" type="number" min="1" max="32" value="4">
+          </div>
+        </div>
+        <label class="switch"><input type="checkbox" id="lgInsecure"> 忽略 HTTPS 证书错误（自签证书）</label>
+      </details>
+
+      <div id="lgAlert" class="alert hidden"></div>
+
+      <div class="login-actions">
+        <button class="btn btn-primary" id="lgBtn">连接并进入</button>
+        <button class="btn btn-ghost" id="lgSkip">跳过登录，仅用本地功能</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 主界面 ================= -->
+<div id="app" class="app hidden">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">Em</div>
+      <div>
+        <b>Emby 元数据编辑器</b>
+        <span id="sbServer">未连接</span>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-view="stats" class="on"><span class="ico">▦</span>概览统计</button>
+      <button data-view="library"><span class="ico">▤</span>媒体库刮削</button>
+      <button data-view="persons"><span class="ico">☺</span>演员头像</button>
+      <button data-view="javbus"><span class="ico">✓</span>番号补全</button>
+      <button data-view="settings"><span class="ico">⚙</span>设置</button>
+    </nav>
+    <div class="foot">
+      <div><span class="dot" id="sbDot"></span><span id="sbState">检测中…</span></div>
+      <div class="mono" id="sbVer" style="margin-top:4px"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h2 id="viewTitle">概览统计</h2>
+      <div class="spacer"></div>
+      <div id="topActions" style="display:flex;gap:8px"></div>
+    </div>
+    <div class="content">
+
+      <!-- ---- 概览 ---- -->
+      <section class="view on" id="view-stats">
+        <div class="stat-grid" id="statGrid"></div>
+        <div class="card">
+          <h3>媒体库明细 <span class="spacer"></span>
+            <label class="switch"><input type="checkbox" id="stSize"> 统计体积（较慢）</label>
+            <button class="btn btn-sm" id="stReload">刷新</button>
+          </h3>
+          <div class="scroll-x" id="stLibs"><div class="empty">尚未加载</div></div>
+        </div>
+        <div class="card">
+          <h3>组件状态</h3>
+          <div id="stComp"><div class="empty">尚未加载</div></div>
+        </div>
+      </section>
+
+      <!-- ---- 媒体库 ---- -->
+      <section class="view" id="view-library">
+        <div class="toolbar">
+          <select class="select" id="lbLib" style="width:190px"><option value="">全部媒体库</option></select>
+          <input class="input grow" id="lbQ" placeholder="搜索片名 / 番号…">
+          <label class="switch"><input type="checkbox" id="lbNoPoster"> 只看无海报</label>
+          <div class="sep"></div>
+          <button class="btn" id="lbSearch">查询</button>
+        </div>
+        <div class="toolbar">
+          <span class="tag" id="lbCount">—</span>
+          <div class="grow"></div>
+          <label class="switch"><input type="checkbox" id="lbOverwrite"> 覆盖已有图片</label>
+          <label class="switch"><input type="checkbox" id="lbRefresh" checked> 刮削后刷新</label>
+          <input class="input" id="lbBatchLimit" type="number" value="50" min="1" style="width:82px" title="批量数量上限">
+          <button class="btn btn-primary" id="lbBatch">批量刮削当前条件</button>
+        </div>
+        <div class="grid" id="lbGrid"><div class="empty">尚未加载</div></div>
+        <div class="pager" id="lbPager"></div>
+      </section>
+
+      <!-- ---- 演员 ---- -->
+      <section class="view" id="view-persons">
+        <div class="toolbar">
+          <input class="input grow" id="psQ" placeholder="搜索演员名…">
+          <label class="switch"><input type="checkbox" id="psMissing" checked> 只看无头像</label>
+          <div class="sep"></div>
+          <select class="select" id="psSource" style="width:150px">
+            <option value="auto">来源：自动</option>
+            <option value="gfriends">仅 gfriends</option>
+            <option value="metatube">仅 MetaTube</option>
+          </select>
+          <label class="switch"><input type="checkbox" id="psOverwrite"> 覆盖已有头像</label>
+          <input class="input" id="psLimit" type="number" value="100" min="1" style="width:82px">
+          <button class="btn" id="psSearch">查询</button>
+          <button class="btn btn-primary" id="psBatch">批量刮削头像</button>
+        </div>
+        <div class="card">
+          <h3>gfriends 头像库 <span class="spacer"></span>
+            <span class="tag" id="gfState">未加载</span>
+            <button class="btn btn-sm" id="gfReload">重新下载索引</button>
+          </h3>
+          <div class="row">
+            <input class="input" id="gfQ" placeholder="在 10 万+ 头像库里搜演员名，例如：三上悠亜">
+            <button class="btn" id="gfSearch" style="flex:none">搜索</button>
+          </div>
+          <div id="gfResult" style="margin-top:12px"></div>
+        </div>
+        <div class="plist" id="psList"><div class="empty">尚未加载</div></div>
+        <div class="pager" id="psPager"></div>
+      </section>
+
+      <!-- ---- 番号补全 ---- -->
+      <section class="view" id="view-javbus">
+        <div class="toolbar">
+          <input class="input grow" id="jbStar" placeholder="演员名，或 javbus 演员页地址 https://www.javbus.com/star/xxxx">
+          <select class="select" id="jbLib" style="width:170px"><option value="">全部媒体库</option></select>
+          <input class="input" id="jbPages" type="number" value="20" min="1" style="width:82px" title="最多抓取页数">
+          <button class="btn btn-primary" id="jbScan">统计番号 / 找缺失</button>
+          <button class="btn" id="jbProbe" title="抓不到番号时先点这里：判断是网络不通、被验证码拦，还是页面改版">连通性诊断</button>
+        </div>
+        <div id="jbSummary"></div>
+        <div id="jbBody">
+          <div class="card">
+            <h3>怎么用</h3>
+            <div style="font-size:13px;line-height:2;color:var(--text-2)">
+              1. 在上面的输入框里填<b>演员名</b>（例如 <span class="mono">三上悠亜</span>），或直接粘 javbus 演员页地址<br>
+              2. 点「统计番号 / 找缺失」——会抓取该演员在 javbus 上的全部作品，再和本地 Emby 媒体库比对<br>
+              3. 得到缺失番号列表后，勾选想要的，点「抓取所选磁力」拿到磁力链接
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---- 设置 ---- -->
+      <section class="view" id="view-settings">
+        <div class="card">
+          <h3>Emby 连接</h3>
+          <div class="row">
+            <div class="field"><label>服务器地址</label><input class="input" id="stUrl"></div>
+            <div class="field"><label>用户名</label><input class="input" id="stUser"></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>密码</label><input class="input" id="stPass" type="password" placeholder="留空则不修改"></div>
+            <div class="field"><label>API Key</label><input class="input" id="stKey" placeholder="可直接用 API Key 鉴权"></div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary" id="stLogin">用以上信息重新登录</button>
+            <button class="btn" id="stTest">测试连接</button>
+            <button class="btn btn-danger" id="stLogout">退出登录</button>
+          </div>
+          <div id="stMsg" class="alert hidden"></div>
+        </div>
+
+        <div class="card">
+          <h3>MetaTube</h3>
+          <div class="field"><label>服务地址</label><input class="input" id="stMt"></div>
+          <div class="field"><label>Token（可选）</label><input class="input" id="stMtToken"></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn" id="stMtTest">获取 provider 列表</button>
+            <span id="stMtProviders" class="mono" style="color:var(--muted)"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>gfriends 头像库</h3>
+          <div class="field"><label>索引地址（Filetree.json）</label><input class="input" id="stGfTree"></div>
+          <div class="field"><label>图片 CDN 前缀</label><input class="input" id="stGfCdn"></div>
+        </div>
+
+        <div class="card">
+          <h3>javbus</h3>
+          <div class="field"><label>站点地址</label><input class="input" id="stJb"></div>
+          <div class="field">
+            <label>Cookie</label>
+            <input class="input" id="stJbCookie">
+            <div class="hint">javbus 需要 age 验证与磁力开关：<span class="mono">age=verified; dv=1; existmag=mag</span>。若被 Cloudflare 拦截，请从浏览器复制完整 Cookie（含 cf_clearance）。</div>
+          </div>
+          <div class="row">
+            <div class="field"><label>请求间隔（毫秒）</label><input class="input" id="stJbInterval" type="number" min="300"></div>
+            <div class="field"><label>并发数</label><input class="input" id="stConc" type="number" min="1" max="32"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>网络与行为</h3>
+          <div class="field"><label>HTTP 代理</label><input class="input" id="stProxy" placeholder="http://127.0.0.1:7890"></div>
+          <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:14px">
+            <label class="switch"><input type="checkbox" id="stInsecure"> 忽略 HTTPS 证书错误</label>
+            <label class="switch"><input type="checkbox" id="stAutoRefresh"> 刮削后自动触发 Emby 刷新</label>
+            <label class="switch"><input type="checkbox" id="stOverwrite"> 默认覆盖已有图片</label>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-primary" id="stSave">保存全部设置</button>
+            <span class="mono" id="stPath" style="color:var(--muted)"></span>
+          </div>
+          <div id="stSaveMsg" class="alert hidden"></div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div id="drawerHost"></div>
+<div id="jobHost"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# ===== 用户配置与凭据：绝对不要提交 =====
+# 里面有 Emby 地址、用户名、密码 / API 令牌、MetaTube 地址等
+config.json
+
+# ===== 运行时缓存 =====
+# gfriends 索引约 10 MB，首次启动会自动重新下载
+cache/
+
+# ===== 工具内部数据 =====
+.workbuddy-ai/
+
+# ===== 真实环境截图 =====
+# 这几张是在真实 Emby 上截的，含真实媒体库内容，不入库。
+# 01–09 是 mock 环境截图，README 引用的也是那批。
+screenshots/10-*.png
+screenshots/11-*.png
+screenshots/12-*.png
+screenshots/13-*.png
+
+# ===== 编辑器 / 系统产生的备份与杂物 =====
+*~
+*.exe~
+*.bak
+*.orig
+*.tmp
+
+# ===== 操作系统文件 =====
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,636 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+)
+
+// ---------- 影片刮削 ----------
+
+// ScrapeOptions 是影片刮削的选项。
+type ScrapeOptions struct {
+	Provider        string `json:"provider"`
+	MovieID         string `json:"movie_id"`
+	OverwriteImages bool   `json:"overwrite_images"`
+	Refresh         bool   `json:"refresh"`
+}
+
+// ScrapeResult 描述一次刮削的结果。
+type ScrapeResult struct {
+	ItemID   string   `json:"item_id"`
+	ItemName string   `json:"item_name"`
+	Provider string   `json:"provider"`
+	MovieID  string   `json:"movie_id"`
+	Number   string   `json:"number"`
+	Title    string   `json:"title"`
+	Fields   []string `json:"fields"`
+	Images   []string `json:"images"`
+	Skipped  bool     `json:"skipped"`
+	Message  string   `json:"message"`
+}
+
+// ScrapeMovie 对单个条目执行一次 MetaTube 刮削（元数据 + 图片）。
+func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions) (*ScrapeResult, error) {
+	cfg := a.store.Get()
+	e := NewEmby(cfg)
+	mt := NewMetaTube(cfg)
+	res := &ScrapeResult{ItemID: itemID}
+
+	item, err := e.ItemDetail(ctx, itemID)
+	if err != nil {
+		return nil, fmt.Errorf("读取条目失败：%w", err)
+	}
+	res.ItemName, _ = item["Name"].(string)
+
+	provider, movieID := opts.Provider, opts.MovieID
+	if provider == "" || movieID == "" {
+		keyword := searchKeyword(item)
+		if keyword == "" {
+			return nil, fmt.Errorf("条目「%s」无法推断番号，请手动指定 provider:id", res.ItemName)
+		}
+		list, err := mt.Search(ctx, keyword, "", true)
+		if err != nil {
+			return nil, fmt.Errorf("MetaTube 搜索失败：%w", err)
+		}
+		if len(list) == 0 {
+			return nil, fmt.Errorf("MetaTube 未搜到「%s」的结果", keyword)
+		}
+		best := pickBestMatch(list, keyword)
+		provider, movieID = best.Provider, best.ID
+	}
+	mv, err := mt.Movie(ctx, provider, movieID)
+	if err != nil {
+		return nil, fmt.Errorf("获取 MetaTube 详情失败：%w", err)
+	}
+	res.Provider, res.MovieID = provider, movieID
+	res.Number = firstNonEmpty(mv.Number, canonNumber(searchKeyword(item)))
+	res.Title = firstNonEmpty(mv.TitleZh, mv.Title, mv.Number)
+
+	patch := buildItemPatch(item, mv, res.Number)
+	if err := e.UpdateItem(ctx, itemID, patch); err != nil {
+		return nil, fmt.Errorf("写入元数据失败：%w", err)
+	}
+	res.Fields = sortedKeys(patch)
+
+	// 图片：海报 + 剧照
+	hasPrimary := imageTagExists(item, "Primary")
+	hasBackdrop := imageTagExists(item, "Backdrop")
+	if opts.OverwriteImages || !hasPrimary {
+		data, ct, err := mt.FetchImage(ctx, "primary", provider, movieID, mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
+		if err != nil {
+			res.Message = "海报下载失败：" + err.Error()
+		} else if err := e.UploadImage(ctx, itemID, "Primary", -1, data, ct); err != nil {
+			res.Message = "海报上传失败：" + err.Error()
+		} else {
+			res.Images = append(res.Images, "Primary")
+		}
+	}
+	if opts.OverwriteImages || !hasBackdrop {
+		for i := 0; i < 3; i++ {
+			data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, previewURLAt(mv, i))
+			if err != nil {
+				break
+			}
+			if err := e.UploadImage(ctx, itemID, "Backdrop", i, data, ct); err != nil {
+				break
+			}
+			res.Images = append(res.Images, "Backdrop/"+itoa(i))
+		}
+	}
+	if opts.Refresh {
+		_ = e.Refresh(ctx, itemID, false)
+	}
+	if res.Message == "" {
+		res.Message = "刮削完成"
+	}
+	return res, nil
+}
+
+// previewURLAt 取第 i 张剧照的直链（用于 MetaTube 代理失败时回退）。
+func previewURLAt(mv *MTMovie, i int) string {
+	if i < len(mv.PreviewImages) {
+		return mv.PreviewImages[i]
+	}
+	return ""
+}
+
+// buildItemPatch 把 MetaTube 影片信息转成 Emby 更新字段。
+func buildItemPatch(item Item, mv *MTMovie, number string) map[string]any {
+	patch := map[string]any{}
+	title := firstNonEmpty(mv.TitleZh, mv.Title, mv.Number, number)
+	if title != "" {
+		patch["Name"] = title
+	}
+	if orig := firstNonEmpty(mv.Title, mv.TitleJa); orig != "" && orig != title {
+		patch["OriginalTitle"] = orig
+	}
+	if p := mv.plot(); p != "" {
+		patch["Overview"] = p
+	}
+	if number != "" {
+		// 注意：实测 Emby 4.9.0.42 会**忽略** POST 里的 SortName / ForcedSortName，
+		// 一律按 Name 重新计算，所以这一条在这个构建上是空操作。
+		// 留着是因为标准 Emby 上它是有效的（按番号排序），删掉反而会改变那边的行为。
+		patch["SortName"] = number
+	}
+	if d := normalizeDate(mv.ReleaseDate); d != "" {
+		patch["PremiereDate"] = d
+		if len(d) >= 4 {
+			patch["ProductionYear"] = atoiSafe(d[:4])
+		}
+	}
+	if len(mv.Genres) > 0 {
+		patch["Genres"] = mv.Genres
+	}
+	tags := []string{}
+	if number != "" {
+		tags = append(tags, number)
+	}
+	if mv.Label != "" && mv.Label != mv.studio() {
+		tags = append(tags, mv.Label)
+	}
+	if len(tags) > 0 {
+		patch["Tags"] = tags
+	}
+	studios := []map[string]any{}
+	for _, s := range []string{mv.studio(), mv.Label, mv.Series} {
+		if strings.TrimSpace(s) != "" {
+			studios = append(studios, map[string]any{"Name": strings.TrimSpace(s)})
+		}
+	}
+	if len(studios) > 0 {
+		patch["Studios"] = studios
+	}
+	people := []map[string]any{}
+	for _, act := range mv.Actors {
+		act = strings.TrimSpace(act)
+		if act == "" {
+			continue
+		}
+		people = append(people, map[string]any{"Name": act, "Type": "Actor", "Role": ""})
+	}
+	if d := strings.TrimSpace(mv.Director); d != "" {
+		people = append(people, map[string]any{"Name": d, "Type": "Director", "Role": ""})
+	}
+	if len(people) > 0 {
+		patch["People"] = people
+	}
+	if mv.Score > 0 {
+		patch["CommunityRating"] = mv.Score
+	}
+	if mv.Runtime > 0 {
+		patch["RunTimeTicks"] = int64(mv.Runtime) * 60 * 10_000_000
+	}
+	if mv.Provider != "" && mv.ID != "" {
+		patch["ProviderIds"] = map[string]any{"MetaTube": mv.Provider + ":" + mv.ID}
+	}
+	return patch
+}
+
+// itemNumber 从条目推断番号，推断不出返回空串。
+//
+// 为什么要在服务端算：Emby 的 **/Items 列表不返回 SortName**（实测全是 null），
+// 前端原本拿 SortName 当番号，于是卡片角标永远拿不到值、退化成显示年份。
+// 用和刮削同一套归一化逻辑算好，前端直接用。
+func itemNumber(item Item) string {
+	parts := []string{}
+	for _, k := range []string{"Name", "OriginalTitle", "Path", "SortName"} {
+		if s, ok := item[k].(string); ok {
+			parts = append(parts, s)
+		}
+	}
+	if ks := numKeys(strings.Join(parts, " ")); len(ks) > 0 {
+		return displayNumber(ks[0])
+	}
+	return ""
+}
+
+// searchKeyword 从条目推断搜索关键词（优先番号，没有就用名字）。
+func searchKeyword(item Item) string {
+	if n := itemNumber(item); n != "" {
+		return n
+	}
+	if s, ok := item["Name"].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// pickBestMatch 在搜索结果里挑最匹配的一条（优先番号一致）。
+func pickBestMatch(list []MTMovie, keyword string) MTMovie {
+	want := canonNumber(keyword)
+	for _, m := range list {
+		if canonNumber(m.Number) == want && want != "" {
+			return m
+		}
+	}
+	best := list[0]
+	for _, m := range list {
+		if m.Score > best.Score {
+			best = m
+		}
+	}
+	return best
+}
+
+func imageTagExists(item Item, kind string) bool {
+	tags, ok := item["ImageTags"].(map[string]any)
+	if !ok {
+		return false
+	}
+	v, ok := tags[kind].(string)
+	return ok && strings.TrimSpace(v) != ""
+}
+
+func normalizeDate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) >= 10 && s[4] == '-' && s[7] == '-' {
+		return s[:10] + "T00:00:00.0000000Z"
+	}
+	return ""
+}
+
+func atoiSafe(s string) int {
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return n
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+func sortedKeys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ---------- 演员头像刮削 ----------
+
+// AvatarOptions 是头像刮削选项。
+type AvatarOptions struct {
+	Source    string `json:"source"` // auto / gfriends / metatube
+	Group     string `json:"group"`  // 指定 gfriends 分组
+	File      string `json:"file"`   // 指定 gfriends 文件
+	Overwrite bool   `json:"overwrite"`
+}
+
+// AvatarResult 描述一次头像刮削结果。
+type AvatarResult struct {
+	PersonID string `json:"person_id"`
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+	Detail   string `json:"detail"`
+	Skipped  bool   `json:"skipped"`
+	Message  string `json:"message"`
+}
+
+// ScrapePersonAvatar 为单个演员抓取并上传头像。
+func (a *App) ScrapePersonAvatar(ctx context.Context, personID, name string, opts AvatarOptions) (*AvatarResult, error) {
+	cfg := a.store.Get()
+	e := NewEmby(cfg)
+	res := &AvatarResult{PersonID: personID, Name: name}
+
+	if personID == "" {
+		p, err := e.PersonByName(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		personID = p.Id
+		res.PersonID = p.Id
+		res.Name = p.Name
+	}
+	if !opts.Overwrite {
+		if p, err := e.ItemDetail(ctx, personID); err == nil {
+			if imageTagExists(p, "Primary") {
+				res.Skipped = true
+				res.Message = "已有头像，跳过"
+				return res, nil
+			}
+		}
+	}
+
+	source := opts.Source
+	if source == "" {
+		source = "auto"
+	}
+	var imgData []byte
+	var contentType string
+	var detail string
+	var lastErr error
+
+	tryGfriends := source == "auto" || source == "gfriends"
+	tryMetaTube := source == "auto" || source == "metatube"
+
+	if tryGfriends {
+		if err := a.gf.EnsureLoaded(ctx, false); err != nil {
+			lastErr = err
+		} else {
+			entries := a.gf.Lookup(res.Name)
+			if opts.File != "" {
+				for _, en := range entries {
+					if strings.EqualFold(en.File, opts.File) {
+						entries = []GfriendEntry{en}
+						break
+					}
+				}
+			} else if opts.Group != "" {
+				filtered := entries[:0:0]
+				for _, en := range entries {
+					if en.Group == opts.Group {
+						filtered = append(filtered, en)
+					}
+				}
+				if len(filtered) > 0 {
+					entries = filtered
+				}
+			}
+			for _, en := range entries {
+				u := en.URL(cfg.GfriendsCDN)
+				data, ct, err := fetchImageBytes(ctx, e.HTTP, u, "")
+				if err != nil || len(data) == 0 {
+					lastErr = err
+					continue
+				}
+				imgData, contentType = data, ct
+				detail = en.Group + "/" + en.File
+				break
+			}
+		}
+	}
+
+	if imgData == nil && tryMetaTube {
+		mt := NewMetaTube(cfg)
+		if actors, err := mt.SearchActor(ctx, res.Name, ""); err == nil {
+			for _, ac := range actors {
+				if normName(ac.Name) != normName(res.Name) {
+					continue
+				}
+				for _, iu := range ac.Images {
+					data, ct, err := fetchImageBytes(ctx, e.HTTP, iu, "")
+					if err == nil && len(data) > 0 {
+						imgData, contentType = data, ct
+						detail = "MetaTube/" + ac.Provider + ":" + ac.ID
+						break
+					}
+				}
+				if imgData != nil {
+					break
+				}
+			}
+		} else {
+			lastErr = err
+		}
+	}
+
+	if imgData == nil {
+		msg := "未找到可用头像"
+		if lastErr != nil {
+			msg += "：" + lastErr.Error()
+		}
+		return nil, fmt.Errorf("%s（演员：%s）", msg, res.Name)
+	}
+
+	if err := e.UploadImage(ctx, res.PersonID, "Primary", -1, imgData, contentType); err != nil {
+		return nil, fmt.Errorf("上传头像失败：%w", err)
+	}
+	res.Source = source
+	res.Detail = detail
+	res.Message = fmt.Sprintf("已更新头像（%s，%d KB）", detail, len(imgData)/1024)
+	return res, nil
+}
+
+// ---------- 番号统计与缺失比对 ----------
+
+// LocalItemRef 是本地媒体库中的条目摘要。
+type LocalItemRef struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Number     string `json:"number"`
+	Path       string `json:"path"`
+	HasPrimary bool   `json:"has_primary"`
+	Year       int    `json:"year"`
+}
+
+// LocalIndex 是本地番号索引。
+type LocalIndex struct {
+	Items   []LocalItemRef
+	ByKey   map[string]LocalItemRef
+	Scanned int
+}
+
+// BuildLocalIndex 扫描媒体库，建立「番号 -> 条目」索引。
+func (a *App) BuildLocalIndex(ctx context.Context, parentID string) (*LocalIndex, error) {
+	cfg := a.store.Get()
+	e := NewEmby(cfg)
+	idx := &LocalIndex{ByKey: map[string]LocalItemRef{}}
+	start := 0
+	const pageSize = 500
+	for {
+		q := ItemQuery{
+			ParentID:         parentID,
+			Recursive:        true,
+			IncludeItemTypes: "Movie",
+			Fields:           []string{"Path,ProviderIds,ImageTags,OriginalTitle,ProductionYear,SortName"},
+			StartIndex:       start,
+			Limit:            pageSize,
+		}
+		res, err := e.Items(ctx, q)
+		if err != nil {
+			return nil, fmt.Errorf("扫描媒体库失败：%w", err)
+		}
+		for _, it := range res.Items {
+			ref := LocalItemRef{}
+			ref.ID, _ = it["Id"].(string)
+			ref.Name, _ = it["Name"].(string)
+			ref.Path, _ = it["Path"].(string)
+			ref.HasPrimary = imageTagExists(it, "Primary")
+			if y, ok := it["ProductionYear"].(float64); ok {
+				ref.Year = int(y)
+			}
+			joined := ref.Name + " " + ref.Path
+			if o, ok := it["OriginalTitle"].(string); ok {
+				joined += " " + o
+			}
+			if s, ok := it["SortName"].(string); ok {
+				joined += " " + s
+			}
+			keys := numKeys(joined)
+			if len(keys) > 0 {
+				ref.Number = displayNumber(keys[0])
+			}
+			idx.Items = append(idx.Items, ref)
+			for _, k := range keys {
+				if _, exists := idx.ByKey[k]; !exists {
+					idx.ByKey[k] = ref
+				}
+			}
+		}
+		start += pageSize
+		if start >= res.TotalRecordCount || len(res.Items) == 0 {
+			break
+		}
+	}
+	idx.Scanned = len(idx.Items)
+	return idx, nil
+}
+
+// ScanMovie 是番号统计里的一条作品。
+type ScanMovie struct {
+	Number string `json:"number"`
+	Title  string `json:"title"`
+	Date   string `json:"date"`
+	Cover  string `json:"cover"`
+	URL    string `json:"url"`
+	Local  bool   `json:"local"`
+	ItemID string `json:"item_id"`
+}
+
+// ScanResult 是一次番号统计的结果。
+type ScanResult struct {
+	Star           JBStar      `json:"star"`
+	Candidates     []JBStar    `json:"candidates"`
+	Total          int         `json:"total"`
+	Matched        int         `json:"matched"`
+	Movies         []ScanMovie `json:"movies"`
+	Missing        []ScanMovie `json:"missing"`
+	LocalCount     int         `json:"local_count"`
+	LocalUnmatched []string    `json:"local_unmatched"`
+	Pages          int         `json:"pages"`
+}
+
+// ScanActorNumbers 统计某演员的全部番号，并与本地媒体库比对找出缺失。
+func (a *App) ScanActorNumbers(ctx context.Context, starInput, parentID string, maxPages int, job *Job) (*ScanResult, error) {
+	cfg := a.store.Get()
+	jb := NewJavBus(cfg)
+
+	logf := func(level, msg string) {
+		if job != nil {
+			job.addLog(level, msg)
+		}
+	}
+
+	logf("info", "解析演员："+starInput)
+	stars, err := jb.ResolveStar(ctx, starInput)
+	if err != nil {
+		return nil, err
+	}
+	res := &ScanResult{Candidates: stars, Star: stars[0]}
+	logf("info", fmt.Sprintf("命中演员：%s（star id: %s）", res.Star.Name, res.Star.ID))
+
+	logf("info", "抓取 javbus 演员页作品列表…")
+	movies, err := jb.StarMovies(ctx, res.Star.ID, maxPages)
+	if err != nil {
+		return nil, err
+	}
+	res.Total = len(movies)
+	logf("info", fmt.Sprintf("javbus 共 %d 部作品", len(movies)))
+
+	logf("info", "扫描本地媒体库…")
+	idx, err := a.BuildLocalIndex(ctx, parentID)
+	if err != nil {
+		return nil, err
+	}
+	res.LocalCount = idx.Scanned
+	logf("info", fmt.Sprintf("本地媒体库共 %d 个影片条目", idx.Scanned))
+
+	localUsed := map[string]bool{}
+	for _, mv := range movies {
+		sm := ScanMovie{Number: mv.Number, Title: mv.Title, Date: mv.Date, Cover: mv.Cover, URL: mv.URL}
+		if ref, ok := idx.ByKey[canonNumber(mv.Number)]; ok {
+			sm.Local = true
+			sm.ItemID = ref.ID
+			localUsed[ref.ID] = true
+		}
+		res.Movies = append(res.Movies, sm)
+	}
+	for _, sm := range res.Movies {
+		if sm.Local {
+			res.Matched++
+		} else {
+			res.Missing = append(res.Missing, sm)
+		}
+	}
+	for _, it := range idx.Items {
+		if !localUsed[it.ID] && it.Number != "" {
+			res.LocalUnmatched = append(res.LocalUnmatched, it.Number)
+		}
+	}
+	sort.Slice(res.Missing, func(i, j int) bool { return res.Missing[i].Date > res.Missing[j].Date })
+	sort.Strings(res.LocalUnmatched)
+	logf("info", fmt.Sprintf("已收录 %d 部，缺失 %d 部", res.Matched, len(res.Missing)))
+	return res, nil
+}
+
+// MagnetResult 是某个番号的磁力抓取结果。
+type MagnetResult struct {
+	Number  string     `json:"number"`
+	URL     string     `json:"url"`
+	Title   string     `json:"title"`
+	Magnets []JBMagnet `json:"magnets"`
+	Error   string     `json:"error,omitempty"`
+}
+
+// FetchMagnetsFor 并发抓取一批番号的磁力列表。
+func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurrency int, job *Job) []MagnetResult {
+	cfg := a.store.Get()
+	if concurrency <= 0 {
+		concurrency = cfg.Concurrency
+	}
+	if concurrency <= 0 {
+		concurrency = 4
+	}
+	// javbus 需要限速，这里限制并发为 2 以避免被封
+	if concurrency > 2 {
+		concurrency = 2
+	}
+	results := make([]MagnetResult, len(targets))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(i int, t ScanMovie) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			jb := NewJavBus(cfg)
+			out := MagnetResult{Number: t.Number, URL: t.URL, Title: t.Title}
+			mv, err := jb.MovieDetail(ctx, firstNonEmpty(t.URL, t.Number))
+			if err != nil {
+				out.Error = err.Error()
+			} else {
+				out.Magnets = mv.Magnets
+				if mv.Title != "" {
+					out.Title = mv.Title
+				}
+				if len(mv.Magnets) == 0 {
+					out.Error = "该作品暂无磁力链接"
+				}
+			}
+			results[i] = out
+			if job != nil {
+				job.mu.Lock()
+				job.Done++
+				job.mu.Unlock()
+				if out.Error != "" {
+					job.addLog("warn", fmt.Sprintf("%s：%s", t.Number, out.Error))
+				} else {
+					job.addLog("ok", fmt.Sprintf("%s：%d 条磁力", t.Number, len(out.Magnets)))
+				}
+			}
+		}(i, t)
+	}
+	wg.Wait()
+	return results
+}
