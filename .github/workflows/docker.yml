@@ -1,0 +1,57 @@
+name: Docker 镜像
+
+# 打 tag 自动构建并推送 Docker Hub；也可以在 Actions 页面手动触发。
+#
+# 需要先在仓库里配两个 secret（Settings → Secrets and variables → Actions）：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名
+#   DOCKERHUB_TOKEN     Docker Hub 访问令牌（Account Settings → Personal access tokens，权限选 Read & Write）
+#
+# 镜像名 = <DOCKERHUB_USERNAME>/emby-meta-editor。
+# 首次推送时 Docker Hub 会自动创建这个仓库（令牌需有写权限）。
+
+on:
+  push:
+    tags:
+      - "v*"
+  # 手动触发：改完 Dockerfile 想立刻验证一次，不用等发版
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # arm64 那一半交给 QEMU；amd64 是原生跑，不受影响
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 从 tag 推导镜像标签：v1.0.8 → 1.0.8 / 1.0 / 1 / latest
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/emby-meta-editor
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 同时出 amd64 / arm64，NAS 和树莓派都能直接拉
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
