@@ -83,6 +83,7 @@ func (a *App) route() *http.ServeMux {
 	// ---- 配置 ----
 	mux.HandleFunc("GET /api/config", a.handleGetConfig)
 	mux.HandleFunc("POST /api/config", a.handleSaveConfig)
+	mux.HandleFunc("POST /api/openai/test", a.handleOpenAITest)
 
 	// ---- Emby 登录与状态 ----
 	mux.HandleFunc("POST /api/emby/login", a.handleLogin)
@@ -204,6 +205,44 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w, a.store.Get())
+}
+
+// handleOpenAITest 探测 OpenAI / 中转接口的连通性：地址可达 + Key 有效 + 模型可用。
+// 不修改任何配置，也不依赖「启用翻译」开关 —— 即使翻译关着也能先测通再开。
+// 请求体可只带 openai 字段；若某项留空，自动回落到已保存的配置（方便「填完直接点测试」）。
+func (a *App) handleOpenAITest(w http.ResponseWriter, r *http.Request) {
+	var in Config
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg := OpenAIConfig{
+		BaseURL: strings.TrimRight(in.OpenAI.BaseURL, "/"),
+		APIKey:  in.OpenAI.APIKey,
+		Model:   in.OpenAI.Model,
+	}
+	// 留空项回落到已保存配置：用户填了地址和 Key 但通常不会先点「保存」再测。
+	if cfg.BaseURL == "" || cfg.APIKey == "" || cfg.Model == "" {
+		saved := a.store.Get()
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = saved.OpenAI.BaseURL
+		}
+		if cfg.APIKey == "" {
+			cfg.APIKey = saved.OpenAI.APIKey
+		}
+		if cfg.Model == "" {
+			cfg.Model = saved.OpenAI.Model
+		}
+	}
+	if cfg.BaseURL == "" || strings.TrimSpace(cfg.APIKey) == "" {
+		writeOK(w, map[string]any{"ok": false, "message": "请先填写接口地址与 API Key（或先保存配置再测试）"})
+		return
+	}
+	cli := newOpenAIClient(cfg, newHTTPClient(a.store.Get()))
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	ok, msg := cli.Test(ctx)
+	writeOK(w, map[string]any{"ok": ok, "message": msg})
 }
 
 // ---------- 登录 ----------

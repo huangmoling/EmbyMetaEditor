@@ -1012,6 +1012,33 @@ async function saveSettings() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+// testOpenAI 把当前输入框里的接口地址 / Key / 模型发给后端做连通性探测。
+// 即使「启用翻译」没勾也能测（探测不依赖开关）。
+async function testOpenAI() {
+  const el = $('#oaiTestResult');
+  const btn = $('#btnOaiTest');
+  el.textContent = '测试中…';
+  el.style.color = '';
+  btn.disabled = true;
+  const body = {
+    openai: {
+      base_url: $('#stOaiUrl').value.trim(),
+      api_key: $('#stOaiKey').value,
+      model: $('#stOaiModel').value.trim(),
+    },
+  };
+  try {
+    const r = await api('/api/openai/test', { method: 'POST', body });
+    el.textContent = r.message;
+    el.style.color = r.ok ? 'var(--ok,#2e8b57)' : 'var(--err,#c0392b)';
+  } catch (e) {
+    el.textContent = '测试请求失败：' + e.message;
+    el.style.color = 'var(--err,#c0392b)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------------- 配置与启动 ----------------
 async function loadConfig() {
   S.cfg = await api('/api/config');

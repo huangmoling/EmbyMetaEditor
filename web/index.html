@@ -324,6 +324,10 @@
           <div class="field"><label>API Key</label><input class="input" id="stOaiKey" type="password" placeholder="sk-…（留空则不修改已保存的）"></div>
           <div class="field"><label>模型</label><input class="input" id="stOaiModel" placeholder="gpt-4o-mini"></div>
           <label class="switch" style="margin-top:6px"><input type="checkbox" id="stOaiOn"> 启用翻译（关掉则刮削不调用翻译）</label>
+          <div class="row" style="align-items:center;margin-top:12px;gap:12px">
+            <button class="btn" id="btnOaiTest" onclick="testOpenAI()">测试连接</button>
+            <span id="oaiTestResult" class="hint" style="margin:0"></span>
+          </div>
         </div>
 
         <div class="card">

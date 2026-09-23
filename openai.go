@@ -53,6 +53,7 @@ type openAIChatRequest struct {
 	Model       string              `json:"model"`
 	Messages    []openAIChatMessage `json:"messages"`
 	Temperature float64             `json:"temperature"`
+	MaxTokens   int                 `json:"max_tokens,omitempty"`
 }
 
 type openAIChatMessage struct {
@@ -124,6 +125,59 @@ func (o *openAIClient) Translate(ctx context.Context, text string) (string, erro
 		return "", errOpenAIEmpty
 	}
 	return cleanTranslation(out.Choices[0].Message.Content), nil
+}
+
+// Test 用一次极小的对话探测连通性：验证「地址可达 + Key 有效 + 模型存在」三件事。
+// 返回 (ok, 人类可读信息)。它不修改任何配置，也不依赖 cfg.Enabled —— 即使翻译开关关着也能测。
+func (o *openAIClient) Test(ctx context.Context) (bool, string) {
+	url := normalizeChatURL(o.cfg.BaseURL)
+	if url == "" {
+		return false, "未填写接口地址（Base URL）"
+	}
+	if strings.TrimSpace(o.cfg.APIKey) == "" {
+		return false, "未填写 API Key"
+	}
+	model := o.cfg.Model
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+	body, err := json.Marshal(openAIChatRequest{
+		Model:       model,
+		Messages:    []openAIChatMessage{{Role: "user", Content: "ping"}},
+		Temperature: 0,
+		MaxTokens:   1,
+	})
+	if err != nil {
+		return false, "构造请求失败：" + err.Error()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return false, "构造请求失败：" + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(o.cfg.APIKey))
+	req.Header.Set("User-Agent", cnUserAgent)
+
+	resp, err := o.http.Do(req)
+	if err != nil {
+		return false, "连接失败：" + err.Error()
+	}
+	defer resp.Body.Close()
+	var out openAIChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, "响应解析失败（HTTP " + resp.Status + "）：" + err.Error()
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg := out.ErrorMessage()
+		if msg == "" {
+			msg = http.StatusText(resp.StatusCode)
+		}
+		return false, "接口返回错误（HTTP " + itoa(resp.StatusCode) + "）：" + msg
+	}
+	if len(out.Choices) == 0 {
+		return false, "接口返回为空（未生成内容，可能是模型不可用）"
+	}
+	return true, "连通成功，模型可用：" + model
 }
 
 // cleanTranslation 去掉模型偶尔多返回的引号 / 空白 / 前缀。

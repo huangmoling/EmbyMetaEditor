@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -135,6 +136,162 @@ func TestOpenAICleanTranslationStripsQuotes(t *testing.T) {
 	}
 	if strings.ContainsAny(got, "\"'") {
 		t.Errorf("译文不应含引号：%q", got)
+	}
+}
+
+// ---------- openAIClient.Test（连通性探测）----------
+
+// testEndpoint 是一个能按需返回 200 / 401 / 500 的假 chat 服务，用于测连通性。
+func testEndpoint(t *testing.T, status int) (*httptest.Server, *int) {
+	t.Helper()
+	count := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "Incorrect API key"}})
+			return
+		}
+		if status != http.StatusOK {
+			writeJSON(w, status, map[string]any{"error": map[string]any{"message": "server boom"}})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "pong"}}}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &count
+}
+
+// 注意：chatMock 里 wantAuth=true 时要求 Bearer test-key，这里复用 testEndpoint 更可控。
+
+func TestOpenAITestOK(t *testing.T) {
+	srv, count := testEndpoint(t, http.StatusOK)
+	cli := newOpenAIClient(OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Model: "gpt-4o-mini"}, nil)
+	ok, msg := cli.Test(context.Background())
+	if !ok {
+		t.Errorf("应连通成功，实际失败：%s", msg)
+	}
+	if *count != 1 {
+		t.Errorf("应发 1 次探测请求，实际 %d", *count)
+	}
+	if !strings.Contains(msg, "gpt-4o-mini") {
+		t.Errorf("成功信息应含模型名，实际 %q", msg)
+	}
+}
+
+func TestOpenAITestUnauthorized(t *testing.T) {
+	srv, _ := testEndpoint(t, http.StatusOK)
+	// Key 错误 → 后端返回 401
+	cli := newOpenAIClient(OpenAIConfig{BaseURL: srv.URL, APIKey: "wrong-key", Model: "m"}, nil)
+	ok, msg := cli.Test(context.Background())
+	if ok {
+		t.Fatal("Key 错误应探测失败")
+	}
+	if !strings.Contains(msg, "401") {
+		t.Errorf("错误信息应含状态码 401，实际 %q", msg)
+	}
+}
+
+func TestOpenAITestServerError(t *testing.T) {
+	srv, _ := testEndpoint(t, http.StatusInternalServerError)
+	cli := newOpenAIClient(OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Model: "m"}, nil)
+	ok, msg := cli.Test(context.Background())
+	if ok {
+		t.Fatal("500 应探测失败")
+	}
+	if !strings.Contains(msg, "500") {
+		t.Errorf("错误信息应含状态码 500，实际 %q", msg)
+	}
+}
+
+func TestOpenAITestMissingConfig(t *testing.T) {
+	cli := newOpenAIClient(OpenAIConfig{}, nil)
+	if ok, _ := cli.Test(context.Background()); ok {
+		t.Error("未配置不应报成功")
+	}
+	cli2 := newOpenAIClient(OpenAIConfig{BaseURL: "http://x", APIKey: ""}, nil)
+	if ok, _ := cli2.Test(context.Background()); ok {
+		t.Error("缺 Key 不应报成功")
+	}
+}
+
+func TestOpenAITestEmptyChoice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"choices": []map[string]any{}})
+	}))
+	t.Cleanup(srv.Close)
+	cli := newOpenAIClient(OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Model: "m"}, nil)
+	if ok, _ := cli.Test(context.Background()); ok {
+		t.Error("返回空 choices 应视为失败（模型不可用）")
+	}
+}
+
+// ---------- handler: handleOpenAITest ----------
+
+func TestHandleOpenAITestOK(t *testing.T) {
+	srv, _ := testEndpoint(t, http.StatusOK)
+	app := openaiApp(t, OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Enabled: false}, "http://e", "http://m")
+	rec := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"openai": map[string]any{"base_url": srv.URL, "api_key": "test-key", "model": "gpt-4o-mini"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/openai/test", bytes.NewReader(body))
+	app.handleOpenAITest(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d", rec.Code)
+	}
+	var out struct {
+		Data struct {
+			OK      bool   `json:"ok"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Data.OK {
+		t.Errorf("应连通成功，实际：%s", out.Data.Message)
+	}
+}
+
+func TestHandleOpenAITestFallsBackToSaved(t *testing.T) {
+	srv, count := testEndpoint(t, http.StatusOK)
+	// 已保存配置里有 base_url + key；请求体只带 openai 但字段留空 → 应回落到已保存。
+	app := openaiApp(t, OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Enabled: false}, "http://e", "http://m")
+	rec := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"openai": map[string]any{}}) // 全空
+	req := httptest.NewRequest(http.MethodPost, "/api/openai/test", bytes.NewReader(body))
+	app.handleOpenAITest(rec, req)
+	var out struct {
+		Data struct {
+			OK bool `json:"ok"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&out)
+	if !out.Data.OK {
+		t.Error("空请求体应回落到已保存配置并连通成功")
+	}
+	if *count != 1 {
+		t.Errorf("回落后应发 1 次探测，实际 %d", *count)
+	}
+}
+
+func TestHandleOpenAITestBadKey(t *testing.T) {
+	srv, _ := testEndpoint(t, http.StatusOK) // 要求 Bearer test-key
+	app := openaiApp(t, OpenAIConfig{}, "http://e", "http://m")
+	rec := httptest.NewRecorder()
+	body, _ := json.Marshal(map[string]any{"openai": map[string]any{"base_url": srv.URL, "api_key": "nope", "model": "m"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/openai/test", bytes.NewReader(body))
+	app.handleOpenAITest(rec, req)
+	var out struct {
+		Data struct {
+			OK      bool   `json:"ok"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&out)
+	if out.Data.OK {
+		t.Error("错误 Key 应探测失败")
+	}
+	if !strings.Contains(out.Data.Message, "401") {
+		t.Errorf("错误信息应含 401，实际 %q", out.Data.Message)
 	}
 }
 
