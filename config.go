@@ -37,6 +37,12 @@ type Config struct {
 	// 留空则用 defaultCNSites() 里的默认值，方便换镜像域名。
 	CNSites map[string]string `json:"cn_sites"`
 
+	// ---- OpenAI / 翻译 ----
+	// 刮削番号时把非中文的标题、简介翻成中文。base_url 填官方
+	// https://api.openai.com/v1 或任意 OpenAI 兼容的中转（如 api.gptgod.online/v1）。
+	// Enabled 是总开关；即使配了 key，关掉就不翻译。
+	OpenAI OpenAIConfig `json:"openai"`
+
 	// ---- 通用 ----
 	Proxy           string `json:"proxy"`
 	InsecureTLS     bool   `json:"insecure_tls"`
@@ -44,6 +50,23 @@ type Config struct {
 	OverwriteImages bool   `json:"overwrite_images"`
 	Concurrency     int    `json:"concurrency"`
 	JavBusInterval  int    `json:"javbus_interval_ms"`
+}
+
+// OpenAIConfig 是翻译功能的配置。
+//
+// 兼容官方与各类中转：base_url 只填到「接口根」即可（如 https://api.openai.com/v1
+// 或 https://api.gptgod.online/v1），代码会自动拼上 /chat/completions。
+// 兼容中转经常换域名、改路径，所以这里不强制约定具体厂商。
+type OpenAIConfig struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
+	Enabled bool   `json:"enabled"` // 翻译总开关
+}
+
+// Ready 表示翻译可以真正发起（开关开 + 地址和 key 都在）。
+func (o OpenAIConfig) Ready() bool {
+	return o.Enabled && strings.TrimSpace(o.BaseURL) != "" && strings.TrimSpace(o.APIKey) != ""
 }
 
 // DefaultConfig 返回带默认值的配置。
@@ -94,6 +117,10 @@ func (c *Config) normalize() {
 	if c.Concurrency <= 0 || c.Concurrency > 32 {
 		c.Concurrency = d.Concurrency
 	}
+	if c.OpenAI.Model == "" {
+		c.OpenAI.Model = "gpt-4o-mini"
+	}
+	c.OpenAI.BaseURL = strings.TrimRight(strings.TrimSpace(c.OpenAI.BaseURL), "/")
 	if c.JavBusInterval <= 0 {
 		c.JavBusInterval = d.JavBusInterval
 	}

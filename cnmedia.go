@@ -805,6 +805,13 @@ func (a *App) scrapeCNWith(ctx context.Context, cn *CNMedia, e *Emby, itemID, nu
 	res.TitleFrom, res.CoverFrom = pick.TitleFrom, pick.CoverFrom
 	res.TagFrom, res.DateFrom = pick.TagFrom, pick.DateFrom
 
+	// 翻译：把非中文标题翻成中文。dry-run 也翻，这样「命中预览」里就能看到中文标题，
+	// 方便判断要不要写。错误（配置缺失 / 接口挂）静默降级为原文，不影响刮削。
+	if t, _, _ := a.translateMeta(ctx, pick.Title, ""); t != "" && t != pick.Title {
+		pick.Title = t
+		res.Title = t
+	}
+
 	if len(matched) == 0 {
 		res.Message = "四个站点都没有该番号的精确结果"
 		return res, nil

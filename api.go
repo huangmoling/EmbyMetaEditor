@@ -188,6 +188,16 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if in.JavBusInterval > 0 {
 			c.JavBusInterval = in.JavBusInterval
 		}
+		if in.OpenAI.BaseURL != "" || in.OpenAI.Model != "" || in.OpenAI.Enabled {
+			c.OpenAI.BaseURL = strings.TrimRight(in.OpenAI.BaseURL, "/")
+			if in.OpenAI.APIKey != "" {
+				c.OpenAI.APIKey = in.OpenAI.APIKey
+			}
+			if in.OpenAI.Model != "" {
+				c.OpenAI.Model = in.OpenAI.Model
+			}
+			c.OpenAI.Enabled = in.OpenAI.Enabled
+		}
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)

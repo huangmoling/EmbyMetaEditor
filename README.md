@@ -66,6 +66,10 @@ EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注�
 | `concurrency` | 4 | 批量任务并发数 |
 | `javbus_interval_ms` | 1500 | javbus 请求间隔，别调太小 |
 | `cn_sites` | 四个站点的官方地址 | 国产传媒专项刮削的站点地址表，可换镜像；留空项自动回落到默认 |
+| `openai.base_url` | 空 | 翻译用的 OpenAI 接口地址（填到「接口根」即可，如 `https://api.openai.com/v1`） |
+| `openai.api_key` | 空 | OpenAI / 中转的 API Key |
+| `openai.model` | `gpt-4o-mini` | 翻译用的模型名 |
+| `openai.enabled` | false | **翻译总开关**：关掉则刮削不调用翻译 |
 | `insecure_tls` | false | 自签证书的 Emby 勾上 |
 
 ### 关于 MetaTube
@@ -177,6 +181,23 @@ curl -I "http://127.0.0.1:8097/api/img?u=https%3A%2F%2Fwww.javbus.com%2Fpics%2Fc
 ```bash
 curl "http://127.0.0.1:8097/api/cn/search?q=91CM-014"
 ```
+
+---
+
+### 关于翻译（OpenAI）
+
+刮削番号（国产传媒 / MetaTube / javbus 路径）时，把**非中文的标题、简介**翻成简体中文，
+方便在 Emby 里直接看中文名。
+
+- **开关在「设置 → OpenAI / 翻译」**：填接口地址（官方 `https://api.openai.com/v1` 或任意兼容中转，
+  如 `https://api.gptgod.online/v1`）、API Key、模型，再勾「启用翻译」即可。
+- **兼容官方与各类中转**：代码只认 OpenAI 的 `chat/completions` 协议，地址里填「接口根」就行，
+  拼路径（`/v1/chat/completions`）由程序自动处理。
+- **只翻非中文**：含日文假名 / 韩文 / 纯英文的才翻；已经是中文的（或中日混排里带汉字的）不动，
+  避免把中文片名再翻一遍。纯汉字的日文标题（没有假名）会被当成中文跳过——这类极少，
+  且翻错比不翻更糟。
+- **翻译失败不影响刮削**：接口超时 / 报错 / 没配 Key，一律静默退回原文，绝不阻断或拖慢刮削。
+- 翻译是逐条调接口，批量任务里会跟着条目走；中转站有速率限制的话，慢一点是正常的。
 
 ---
 

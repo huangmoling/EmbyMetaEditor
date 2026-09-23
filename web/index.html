@@ -317,6 +317,16 @@
         </div>
 
         <div class="card">
+          <h3>OpenAI / 翻译</h3>
+          <div class="hint" style="margin-bottom:10px">刮削番号时，把非中文的<b>标题</b>、<b>简介</b>翻成中文。填官方
+            <span class="mono">https://api.openai.com/v1</span> 或任意 OpenAI 兼容中转（如 <span class="mono">https://api.gptgod.online/v1</span>）的地址与 Key，再打开下面的开关即可。翻译失败不影响刮削（自动退回原文）。</div>
+          <div class="field"><label>接口地址（Base URL）</label><input class="input" id="stOaiUrl" placeholder="https://api.openai.com/v1"></div>
+          <div class="field"><label>API Key</label><input class="input" id="stOaiKey" type="password" placeholder="sk-…（留空则不修改已保存的）"></div>
+          <div class="field"><label>模型</label><input class="input" id="stOaiModel" placeholder="gpt-4o-mini"></div>
+          <label class="switch" style="margin-top:6px"><input type="checkbox" id="stOaiOn"> 启用翻译（关掉则刮削不调用翻译）</label>
+        </div>
+
+        <div class="card">
           <h3>网络与行为</h3>
           <div class="field"><label>HTTP 代理</label><input class="input" id="stProxy" placeholder="http://127.0.0.1:7890"></div>
           <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:14px">

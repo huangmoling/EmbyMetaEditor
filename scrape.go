@@ -70,6 +70,23 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 	res.Title = firstNonEmpty(mv.TitleZh, mv.Title, mv.Number)
 
 	patch := buildItemPatch(item, mv, res.Number)
+
+	// 翻译：把非中文的标题、简介翻成中文。错误降级为原文，翻译失败绝不放慢 / 阻断刮削。
+	if cfg.OpenAI.Ready() {
+		name, _ := patch["Name"].(string)
+		ov, _ := patch["Overview"].(string)
+		if name != "" || ov != "" {
+			if nt, no, _ := a.translateMeta(ctx, name, ov); nt != "" || no != "" {
+				if name != "" {
+					patch["Name"] = nt
+				}
+				if ov != "" {
+					patch["Overview"] = no
+				}
+			}
+		}
+	}
+
 	if err := e.UpdateItem(ctx, itemID, patch); err != nil {
 		return nil, fmt.Errorf("写入元数据失败：%w", err)
 	}

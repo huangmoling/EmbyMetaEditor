@@ -963,6 +963,11 @@ function fillSettings() {
   set('#stCnXchina', cn.xchina); set('#stCnMadouqu', cn.madouqu);
   set('#stCnMadou', cn.madou); set('#stCn7mmtv', cn['7mmtv']);
   set('#stProxy', c.proxy);
+  const oai = c.openai || {};
+  set('#stOaiUrl', oai.base_url);
+  set('#stOaiKey', oai.api_key);
+  set('#stOaiModel', oai.model);
+  $('#stOaiOn').checked = !!oai.enabled;
   $('#stInsecure').checked = !!c.insecure_tls;
   $('#stAutoRefresh').checked = !!c.auto_refresh;
   $('#stOverwrite').checked = !!c.overwrite_images;
@@ -993,6 +998,12 @@ async function saveSettings() {
     insecure_tls: $('#stInsecure').checked,
     auto_refresh: $('#stAutoRefresh').checked,
     overwrite_images: $('#stOverwrite').checked,
+    openai: {
+      base_url: $('#stOaiUrl').value.trim(),
+      api_key: $('#stOaiKey').value,
+      model: $('#stOaiModel').value.trim(),
+      enabled: $('#stOaiOn').checked,
+    },
   };
   try {
     await api('/api/config', { method: 'POST', body });
