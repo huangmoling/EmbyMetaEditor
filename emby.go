@@ -624,12 +624,10 @@ type LibraryStat struct {
 	MovieCount     int    `json:"movie_count"`
 	SeriesCount    int    `json:"series_count"`
 	EpisodeCount   int    `json:"episode_count"`
-	TotalSize      int64  `json:"total_size"`
-	SizeComputed   bool   `json:"size_computed"`
 }
 
-// LibraryStats 汇总各媒体库数量（可选择性统计体积）。
-func (e *Emby) LibraryStats(ctx context.Context, withSize bool) ([]LibraryStat, error) {
+// LibraryStats 汇总各媒体库条目数量。
+func (e *Emby) LibraryStats(ctx context.Context) ([]LibraryStat, error) {
 	libs, err := e.Views(ctx)
 	if err != nil {
 		return nil, err
@@ -653,48 +651,7 @@ func (e *Emby) LibraryStats(ctx context.Context, withSize bool) ([]LibraryStat, 
 		st.MovieCount = countByType("Movie")
 		st.SeriesCount = countByType("Series")
 		st.EpisodeCount = countByType("Episode")
-		if withSize {
-			st.TotalSize = e.librarySize(ctx, lb.Id)
-			st.SizeComputed = true
-		}
 		out = append(out, st)
 	}
 	return out, nil
-}
-
-// librarySize 累加媒体库内条目的文件体积。
-func (e *Emby) librarySize(ctx context.Context, parentID string) int64 {
-	var total int64
-	start := 0
-	const pageSize = 500
-	for {
-		q := ItemQuery{
-			ParentID:   parentID,
-			Recursive:  true,
-			Fields:     []string{"MediaSources,Path"},
-			StartIndex: start,
-			Limit:      pageSize,
-		}
-		var res ItemsResult
-		if err := e.getJSON(ctx, "/Items", q.values(), &res); err != nil {
-			break
-		}
-		for _, it := range res.Items {
-			ms, _ := it["MediaSources"].([]any)
-			for _, m := range ms {
-				mm, ok := m.(map[string]any)
-				if !ok {
-					continue
-				}
-				if sz, ok := mm["Size"].(float64); ok {
-					total += int64(sz)
-				}
-			}
-		}
-		start += pageSize
-		if start >= res.TotalRecordCount || len(res.Items) == 0 {
-			break
-		}
-	}
-	return total
 }

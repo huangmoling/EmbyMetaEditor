@@ -36,6 +36,10 @@ emby-meta-editor.exe
 *.orig
 *.tmp
 
+# Python 脚本（tools/）跑过之后的字节码缓存
+__pycache__/
+*.pyc
+
 # ===== 操作系统文件 =====
 Thumbs.db
 Desktop.ini

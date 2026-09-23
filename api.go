@@ -19,6 +19,11 @@ type App struct {
 	jobs   *JobRegistry
 	images *ImageProxy
 	web    fs.FS
+
+	// 国产传媒客户端按站点地址缓存：同一个批次里必须复用同一个实例，
+	// 否则每次请求都新建，限速器（按站点共享）就成了摆设。
+	cnMu sync.Mutex
+	cn   *CNMedia
 }
 
 // NewApp 构造应用。
@@ -32,6 +37,18 @@ func NewApp(store *Store, web fs.FS) *App {
 		images: NewImageProxy(newHTTPClient(store.Get())),
 		web:    web,
 	}
+}
+
+// cnMedia 返回国产传媒客户端；站点地址改了会重建（同时重置限速器）。
+func (a *App) cnMedia() *CNMedia {
+	cfg := a.store.Get()
+	a.cnMu.Lock()
+	defer a.cnMu.Unlock()
+	if a.cn != nil && a.cn.sig == cnSitesSig(cfg.CNSites) {
+		return a.cn
+	}
+	a.cn = NewCNMedia(cfg)
+	return a.cn
 }
 
 // ---------- HTTP 辅助 ----------
@@ -77,6 +94,7 @@ func (a *App) route() *http.ServeMux {
 	// ---- 媒体库 ----
 	mux.HandleFunc("GET /api/items", a.handleItems)
 	mux.HandleFunc("GET /api/items/detail", a.handleItemDetail)
+	mux.HandleFunc("POST /api/items/update", a.handleItemUpdate)
 	mux.HandleFunc("POST /api/items/scrape", a.handleScrapeItem)
 	mux.HandleFunc("POST /api/items/scrape-batch", a.handleScrapeBatch)
 
@@ -99,6 +117,12 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("POST /api/javbus/scan", a.handleJavbusScan)
 	mux.HandleFunc("POST /api/javbus/magnets", a.handleJavbusMagnets)
 	mux.HandleFunc("GET /api/javbus/probe", a.handleJavbusProbe)
+
+	// ---- 国产传媒专项刮削 ----
+	mux.HandleFunc("GET /api/cn/sites", a.handleCNSites)
+	mux.HandleFunc("GET /api/cn/search", a.handleCNSearch)
+	mux.HandleFunc("POST /api/cn/scrape", a.handleCNScrape)
+	mux.HandleFunc("POST /api/cn/scrape-batch", a.handleCNScrapeBatch)
 
 	// ---- 图片代理（javbus 等有 Referer 防盗链）----
 	mux.HandleFunc("GET /api/img", a.handleImageProxy)
@@ -146,6 +170,14 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		c.GfriendsCDN = in.GfriendsCDN
 		c.JavBusURL = in.JavBusURL
 		c.JavBusCookie = in.JavBusCookie
+		if in.CNSites != nil {
+			if c.CNSites == nil {
+				c.CNSites = map[string]string{}
+			}
+			for k, v := range in.CNSites {
+				c.CNSites[k] = v
+			}
+		}
 		c.Proxy = in.Proxy
 		c.InsecureTLS = in.InsecureTLS
 		c.AutoRefresh = in.AutoRefresh
@@ -311,15 +343,8 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	out["counts"] = counts
 
-	withSize := r.URL.Query().Get("size") == "true"
-	libs, err := e.LibraryStats(ctx, withSize)
-	if err == nil {
+	if libs, err := e.LibraryStats(ctx); err == nil {
 		out["libraries"] = libs
-		var total int64
-		for _, l := range libs {
-			total += l.TotalSize
-		}
-		out["total_size"] = total
 	}
 
 	if r.URL.Query().Get("persons") != "false" {
@@ -443,6 +468,131 @@ func (a *App) handleItemDetail(w http.ResponseWriter, r *http.Request) {
 	// 拿来当番号显示/预填搜索框都是错的。
 	it["Number"] = itemNumber(it)
 	writeOK(w, it)
+}
+
+// handleItemUpdate 手动编辑条目元数据。
+//
+// 这里最容易踩的坑是**「没填」和「清空」分不清**：
+// Emby 的 POST /Items/{id} 是整对象替换（见 Emby.UpdateItem），
+// 如果前端把空表单原样提交，用户没碰过的字段就会被一起抹掉。
+// 所以入参一律用指针：nil = 这次没提交这一项，不动它。
+//
+// 字段取舍：
+//   - 文本类（名称/原始标题/简介/分级）允许清空 —— 空串是合法值；
+//   - 发行日期只接受 `YYYY-MM-DD`，**留空表示不修改**（不给 Emby 发空日期，
+//     免得它 400 或者把日期抹掉）；年份同理，0 或留空 = 不修改；
+//   - 标签/类型是数组，提交空数组等于清空。
+func (a *App) handleItemUpdate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ID             string    `json:"id"`
+		Name           *string   `json:"name"`
+		OriginalTitle  *string   `json:"original_title"`
+		Overview       *string   `json:"overview"`
+		OfficialRating *string   `json:"official_rating"`
+		PremiereDate   *string   `json:"premiere_date"`
+		ProductionYear *int      `json:"production_year"`
+		Tags           *[]string `json:"tags"`
+		Genres         *[]string `json:"genres"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少条目 id"))
+		return
+	}
+
+	patch := map[string]any{}
+	if in.Name != nil {
+		n := strings.TrimSpace(*in.Name)
+		if n == "" {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("名称不能为空"))
+			return
+		}
+		patch["Name"] = n
+	}
+	if in.OriginalTitle != nil {
+		patch["OriginalTitle"] = strings.TrimSpace(*in.OriginalTitle)
+	}
+	if in.Overview != nil {
+		patch["Overview"] = strings.TrimSpace(*in.Overview)
+	}
+	if in.OfficialRating != nil {
+		patch["OfficialRating"] = strings.TrimSpace(*in.OfficialRating)
+	}
+	if in.PremiereDate != nil {
+		raw := strings.TrimSpace(*in.PremiereDate)
+		if raw != "" {
+			if !isDateOnly(raw) {
+				writeErr(w, http.StatusBadRequest, fmt.Errorf("发行日期要写成 YYYY-MM-DD"))
+				return
+			}
+			d := normalizeDate(raw)
+			patch["PremiereDate"] = d
+			// 日期和年份是配套的：只改日期不改年份，列表里会出现年份对不上的条目。
+			if in.ProductionYear == nil {
+				patch["ProductionYear"] = atoiSafe(d[:4])
+			}
+		}
+	}
+	if in.ProductionYear != nil && *in.ProductionYear > 0 {
+		patch["ProductionYear"] = *in.ProductionYear
+	}
+	if in.Tags != nil {
+		patch["Tags"] = dedupeStrings(trimAll(*in.Tags))
+	}
+	if in.Genres != nil {
+		patch["Genres"] = dedupeStrings(trimAll(*in.Genres))
+	}
+	if len(patch) == 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有要修改的字段"))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := NewEmby(a.store.Get()).UpdateItem(ctx, id, patch); err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	// 回读一次，让前端拿到服务端归一化之后的真实值（顺带带回算好的番号）。
+	it, err := NewEmby(a.store.Get()).ItemDetail(ctx, id)
+	if err != nil {
+		writeOK(w, map[string]any{"id": id, "updated": sortedKeys(patch)})
+		return
+	}
+	it["Number"] = itemNumber(it)
+	writeOK(w, map[string]any{"id": id, "updated": sortedKeys(patch), "item": it})
+}
+
+// isDateOnly 判断是不是严格的 YYYY-MM-DD（normalizeDate 只检查了短横线的位置，
+// 不检查数字，所以这里补一道）。
+func isDateOnly(s string) bool {
+	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	for i, r := range s {
+		if i == 4 || i == 7 {
+			continue
+		}
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// trimAll 去掉每项首尾空白并丢掉空项。
+func trimAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (a *App) handleScrapeItem(w http.ResponseWriter, r *http.Request) {
@@ -938,6 +1088,274 @@ func (a *App) handleJavbusProbe(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, jb.Probe(ctx, keyword))
 }
 
+// ---------- 国产传媒专项刮削 ----------
+
+// handleCNSites 返回站点列表（含当前配置的地址），前端用来展示与排障。
+func (a *App) handleCNSites(w http.ResponseWriter, r *http.Request) {
+	cn := a.cnMedia()
+	out := make([]map[string]any, 0, len(cnSiteOrder))
+	for _, m := range cnSiteOrder {
+		out = append(out, map[string]any{"key": m.Key, "name": m.Name, "url": cn.sites[m.Key]})
+	}
+	writeOK(w, out)
+}
+
+// handleCNSearch 是只读预览：给一个番号，返回四个站点的原始搜索结果。
+// 不碰 Emby，也不写任何数据。
+func (a *App) handleCNSearch(w http.ResponseWriter, r *http.Request) {
+	number := strings.TrimSpace(r.URL.Query().Get("q"))
+	if number == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少番号参数 q"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	hits := a.cnMedia().SearchAll(ctx, number)
+	pick, matched := pickCN(hits, number)
+	writeOK(w, map[string]any{
+		"number":  number,
+		"sites":   hits,
+		"matched": matched,
+		"picked":  pick,
+	})
+}
+
+// handleCNScrape 对单个条目刮削一次并写入。
+//
+// 字段固定全开（封面/标题/标签/日期），界面上不再给勾选；
+// `dry_run` 只为只读的冒烟脚本保留，界面不传，默认即写入。
+func (a *App) handleCNScrape(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ID              string   `json:"id"`
+		Number          string   `json:"number"`
+		Fields          []string `json:"fields"`
+		OverwriteImages bool     `json:"overwrite_images"`
+		OverwriteTitle  bool     `json:"overwrite_title"`
+		DryRun          bool     `json:"dry_run"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(in.ID) == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少条目 id"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	res, err := a.ScrapeCN(ctx, in.ID, in.Number, CNOptions{
+		Fields:          cnFieldsFrom(in.Fields),
+		OverwriteImages: in.OverwriteImages,
+		OverwriteTitle:  in.OverwriteTitle,
+		DryRun:          in.DryRun,
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeOK(w, res)
+}
+
+// handleCNScrapeBatch 批量刮削国产传媒条目，异步执行。
+//
+// 目标有两种给法：
+//   - `ids`：界面里勾选的那些条目，按用户选的精确处理（最常用）；
+//   - `parent_id`：整个媒体库按条件扫一批（配合 only_missing_cover / limit）。
+//
+// 范围必须落到某个媒体库或明确的 id 上 —— 国产传媒番号只在这个库里成立，
+// 拿全库跑会把「91CM-014」这种番号往日本片库里乱套。
+func (a *App) handleCNScrapeBatch(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		IDs              []string `json:"ids"`
+		ParentID         string   `json:"parent_id"`
+		Limit            int      `json:"limit"`
+		OnlyMissingCover bool     `json:"only_missing_cover"`
+		Fields           []string `json:"fields"`
+		OverwriteImages  bool     `json:"overwrite_images"`
+		OverwriteTitle   bool     `json:"overwrite_title"`
+		// DryRun 界面已不再暴露（国产传媒页直接写入），保留是为了让
+		// 只读的冒烟脚本还能安全地跑一遍完整链路。
+		DryRun bool `json:"dry_run"`
+	}
+	if err := decodeBody(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg := a.store.Get()
+	e := NewEmby(cfg)
+	ctx := r.Context()
+
+	type cnTarget struct{ ID, Name, Number string }
+	var targets []cnTarget
+	noNumber := 0
+	var skipped []string
+
+	if ids := in.IDs; len(ids) > 0 {
+		// 勾选路径：逐个取详情。勾选数量由界面控制，这里再兜一道上限，
+		// 免得手搓请求一次塞几千个 id 把站点打挂。
+		for _, id := range ids {
+			if strings.TrimSpace(id) == "" {
+				continue
+			}
+			if len(targets) >= maxCNBatchTargets {
+				skipped = append(skipped, fmt.Sprintf("超过 %d 条上限，其余已忽略", maxCNBatchTargets))
+				break
+			}
+			it, err := e.ItemDetail(ctx, id)
+			if err != nil {
+				skipped = append(skipped, fmt.Sprintf("%s：读取条目失败（%v）", id, err))
+				continue
+			}
+			name, _ := it["Name"].(string)
+			num := cnItemNumber(it)
+			if num == "" {
+				noNumber++
+				skipped = append(skipped, fmt.Sprintf("「%s」推断不出番号", name))
+				continue
+			}
+			targets = append(targets, cnTarget{ID: id, Name: name, Number: num})
+		}
+	} else {
+		limit := in.Limit
+		if limit <= 0 {
+			limit = 30
+		}
+		if limit > maxCNBatchTargets {
+			limit = maxCNBatchTargets
+		}
+		// 「只看缺封面」要在服务端筛，所以一次多拉一些再截断，
+		// 否则前 N 条都有封面时会白跑一趟。
+		scan := limit
+		if in.OnlyMissingCover {
+			scan = maxInt(limit*4, 200)
+			if scan > 1000 {
+				scan = 1000
+			}
+		}
+		res, err := e.Items(ctx, ItemQuery{
+			ParentID:         in.ParentID,
+			Recursive:        true,
+			IncludeItemTypes: "Movie",
+			Fields:           []string{"Path,ImageTags,OriginalTitle,SortName,ProductionYear"},
+			Limit:            scan,
+			SortBy:           "SortName",
+			SortOrder:        "Ascending",
+		})
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		for _, it := range res.Items {
+			if in.OnlyMissingCover && imageTagExists(it, "Primary") {
+				continue
+			}
+			id, _ := it["Id"].(string)
+			if id == "" {
+				continue
+			}
+			name, _ := it["Name"].(string)
+			// 用国产传媒的提取规则：itemNumber() 会把 91CM-014 压成 CM-014，
+			// 拿去搜索必然一无所获。
+			num := cnItemNumber(it)
+			if num == "" {
+				noNumber++
+				continue // 推断不出番号就没法搜，直接跳过
+			}
+			targets = append(targets, cnTarget{ID: id, Name: name, Number: num})
+			if len(targets) >= limit {
+				break
+			}
+		}
+	}
+
+	if len(targets) == 0 {
+		if len(in.IDs) > 0 {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("选中的条目里没有能刮削的（%d 条推断不出番号）", noNumber))
+			return
+		}
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("没有可刮削的条目（该范围内推断不出番号的条目有 %d 个）", noNumber))
+		return
+	}
+
+	opts := CNOptions{
+		Fields:          cnFieldsFrom(in.Fields),
+		OverwriteImages: in.OverwriteImages,
+		OverwriteTitle:  in.OverwriteTitle,
+		DryRun:          in.DryRun,
+	}
+	cn := a.cnMedia()
+
+	job, jobCtx := a.jobs.New("cn-scrape", fmt.Sprintf("国产传媒刮削（%d 个条目）", len(targets)), len(targets))
+	if in.DryRun {
+		job.addLog("info", "试运行：只搜索并展示结果，不会写入 Emby")
+	}
+	job.addLog("info", fmt.Sprintf("共 %d 个条目待处理，跳过 %d 个推断不出番号的条目", len(targets), noNumber))
+	for _, s := range skipped {
+		job.addLog("warn", s)
+	}
+
+	go func() {
+		var rmu sync.Mutex
+		results := make([]*CNScrape, 0, len(targets))
+		// 站点是小站，并发压低一点，配合每站点的请求间隔
+		sem := make(chan struct{}, maxInt(1, minInt(cfg.Concurrency, 4)))
+		var wg sync.WaitGroup
+		for _, t := range targets {
+			if jobCtx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			go func(t cnTarget) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				octx, cancel := context.WithTimeout(jobCtx, 3*time.Minute)
+				defer cancel()
+				res, err := a.scrapeCNWith(octx, cn, e, t.ID, t.Number, opts)
+				job.mu.Lock()
+				if err != nil {
+					job.Failed++
+					job.mu.Unlock()
+					job.addLog("error", fmt.Sprintf("%s：%v", t.Name, err))
+					return
+				}
+				if res.Applied {
+					job.Done++
+				} else {
+					job.Skipped++
+				}
+				job.mu.Unlock()
+				job.addLog(cnLogLevel(res), fmt.Sprintf("%s [%s] %s", t.Name, res.Number, res.Message))
+				rmu.Lock()
+				results = append(results, res)
+				rmu.Unlock()
+			}(t)
+		}
+		wg.Wait()
+		job.mu.Lock()
+		job.Result = results
+		job.mu.Unlock()
+		if jobCtx.Err() != nil {
+			job.setStatus("canceled")
+		} else {
+			job.setStatus("done")
+		}
+	}()
+	writeOK(w, map[string]any{"job_id": job.ID})
+}
+
+// cnLogLevel 让日志一眼能看出「命中了」和「没命中」。
+func cnLogLevel(res *CNScrape) string {
+	switch {
+	case res.Applied:
+		return "ok"
+	case len(res.Matched) > 0:
+		return "info"
+	default:
+		return "warn"
+	}
+}
+
 // handleImageProxy 统一处理页面里的外部图片。
 //
 // javbus 的图片按 Referer 防盗链，浏览器直接引用会 403，
@@ -1004,6 +1422,13 @@ func (a *App) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

@@ -18,13 +18,24 @@ def get(path, timeout=90):
         return json.loads(r.read().decode())
 
 
-def fetch_raw(path, timeout=60):
+def fetch_raw(path, timeout=60, headers=None):
     """取原始响应，返回 (状态码, Content-Type, 字节)。不解析 JSON。"""
+    req = urllib.request.Request(BASE + path, headers=headers or {})
     try:
-        with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.headers.get("Content-Type", ""), r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.headers.get("Content-Type", ""), e.read()
+
+
+# 浏览器 UA：国产传媒几家图床会按 UA 拦非浏览器请求（实测 upload.xchina.io
+# 对 Python-urllib 直接 403，换浏览器 UA 就 200）。验「浏览器能不能拿到图」
+# 就得用浏览器的身份去要。
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+}
 
 
 def q(s):
@@ -77,7 +88,7 @@ except Exception as e:
 # --- 2. 媒体库统计 ---
 print("\n[2] 媒体库统计")
 try:
-    st = get("/api/stats?size=false", timeout=120)["data"]
+    st = get("/api/stats", timeout=120)["data"]
     c = st["counts"]
     check("总量统计", c.get("MovieCount", 0) > 0, "影片 %d 部" % c.get("MovieCount", 0))
     check("分库统计", len(st.get("libraries", [])) > 0,
@@ -217,6 +228,124 @@ try:
     check("不存在的库返回 0", bogus == 0, "实际 %d" % bogus)
 except Exception as e:
     check("演员按库过滤", False, str(e))
+
+# --- 7. 国产传媒专项刮削 ---
+#
+# 这一段全是**只读**的：搜索接口不写 Emby，批量接口一律带 dry_run=true。
+# 用来确认四家站点真能连上、番号真能精确命中、模糊命中真被丢掉。
+print("\n[7] 国产传媒专项刮削")
+cn_lib = None
+cn_cover = ""
+try:
+    sites = get("/api/cn/sites", timeout=30)["data"]
+    check("站点配置", len(sites) == 4,
+          " / ".join("%s=%s" % (s["name"], s["url"]) for s in sites))
+
+    d = get("/api/cn/search?q=" + q("91CM-014"), timeout=180)["data"]
+    ok_sites = [s for s in d["sites"] if s.get("ok")]
+    check("四家站点都能抓", len(ok_sites) == 4,
+          " / ".join("%s=%d 条" % (s["site"], len(s.get("hits") or [])) for s in d["sites"]))
+
+    # xChina 的搜索页是服务端渲染的，91CM-014 在它那里有唯一精确命中
+    xc = next((s for s in d["sites"] if s["site"] == "xchina"), {})
+    xc_exact = [h for h in (xc.get("hits") or []) if h.get("exact")]
+    check("xChina 精确命中 91CM-014", len(xc_exact) == 1,
+          (xc_exact[0].get("title") if xc_exact else "没命中"))
+
+    # 麻豆区的搜索是**模糊**的：搜 91CM-014 会返回 91CM074/084/094。
+    # 这些一条都不能被判成精确命中，否则会把别的作品的封面写进去。
+    mq = next((s for s in d["sites"] if s["site"] == "madouqu"), {})
+    mq_hits = mq.get("hits") or []
+    mq_exact = [h for h in mq_hits if h.get("exact")]
+    check("麻豆区模糊结果被排除", len(mq_exact) == 0,
+          "共 %d 条模糊结果（%s），精确 0 条" % (
+              len(mq_hits), " / ".join((h.get("number") or "?") for h in mq_hits[:3])))
+
+    check("合并结果只取精确命中", d["matched"] == ["xchina"], "matched=%s" % d["matched"])
+    p = d["picked"]
+    cn_cover = p.get("cover") or ""
+    check("合并出标题与封面", bool(p.get("title")) and bool(cn_cover),
+          "%s | %s" % (p.get("title"), cn_cover[:60]))
+
+    # 麻豆社自己的番号（xChina / 麻豆区 / 麻豆社 三家都该命中）
+    d2 = get("/api/cn/search?q=" + q("MDHG0010"), timeout=180)["data"]
+    check("多站点命中同一番号", len(d2["matched"]) >= 2,
+          "matched=%s，标题=%s" % (d2["matched"], d2["picked"].get("title")))
+
+    # 条目上的番号要能正确识别「数字开头的番号」
+    libs = get("/api/libraries", timeout=30)["data"]
+    cn_lib = next((l for l in libs if "国产" in (l.get("Name") or "")), None)
+    if cn_lib:
+        lst = get("/api/items?parent=%s&limit=40&sort=SortName" % q(cn_lib["Id"]), timeout=120)["data"]
+        nums = [it.get("Number") or "" for it in (lst.get("items") or [])]
+        bad = [n for n in nums if n and n.startswith("CM-")]
+        check("数字开头的番号没被砍前缀", not bad,
+              "抽样 %d 条，形如 %s" % (len(nums), " / ".join([n for n in nums if n][:4])))
+        # 扩展名误报：`.mp4` 会被番号正则拆成 "MP"+"4"，`.CD1.mkv` 会变成 "CD-1"。
+        # 出过一次 —— 修之前 200 条里有 196 条「有番号」，相当一部分是这种。
+        ext = [n for n in nums if n in ("MP-4", "MP-3", "MP-2", "CD-1", "CD-2")]
+        check("文件扩展名没被当成番号", not ext,
+              "抽样 %d 条，误报 %s" % (len(nums), ext[:5] or "无"))
+except Exception as e:
+    check("国产传媒接口", False, str(e))
+
+# --- 7b. 国产传媒试运行批量（dry_run，绝不写数据）---
+print("\n[7b] 国产传媒批量刮削（dry_run）")
+if not cn_lib:
+    check("找到国产传媒库", False, "上一节没定位到库，跳过")
+else:
+    try:
+        jid = post("/api/cn/scrape-batch", {
+            "parent_id": cn_lib["Id"], "limit": 3, "only_missing_cover": False,
+            "fields": ["cover", "title", "tags", "date"], "dry_run": True,
+        }, timeout=60)["data"]["job_id"]
+        j = wait_job(jid, timeout=300)
+        check("任务完成", j["status"] == "done", "进度 %s/%s" % (j.get("done"), j.get("total")))
+        res = j.get("result") or []
+        check("返回逐条结果", len(res) > 0, "%d 条" % len(res))
+        wrote = [r for r in res if r.get("applied")]
+        check("试运行没有写入任何条目", not wrote, "已写入 %d 条" % len(wrote))
+        if res:
+            r0 = res[0]
+            check("结果带番号与站点明细", bool(r0.get("number")) and len(r0.get("sites") or []) == 4,
+                  "%s [%s] %s" % (r0.get("item_name", "")[:24], r0.get("number"), r0.get("message")))
+    except Exception as e:
+        check("国产传媒批量", False, str(e))
+
+# --- 7c. 国产传媒封面（这些主机在白名单里：对浏览器是 Cloudflare 挑战页，
+#          服务端带浏览器 UA 才能取到，所以必须走 /api/img 代取）---
+print("\n[7c] 国产传媒封面")
+if not cn_cover:
+    check("拿到待测封面", False, "上一节没合并出封面，跳过")
+else:
+    st, ct, body = fetch_raw("/api/img?u=" + q(cn_cover), timeout=90, headers=BROWSER_HEADERS)
+    check("封面可渲染", st == 200 and ct.startswith("image/"),
+          "HTTP %d / %s / %d 字节" % (st, ct, len(body)))
+
+# --- 7d. 按勾选的 id 批量：界面「刮削选中」走的就是这条路。
+#          仍然带 dry_run，绝不能因为改了接口就把冒烟脚本变成写操作。---
+print("\n[7d] 国产传媒批量（按勾选的 id）")
+if not cn_lib:
+    check("找到国产传媒库", False, "前面没定位到库，跳过")
+else:
+    try:
+        lst = get("/api/items?parent=%s&limit=40" % q(cn_lib["Id"]), timeout=120)["data"]
+        pick = [it for it in (lst.get("items") or []) if it.get("Number")][:2]
+        if not pick:
+            check("库里有带番号的条目", False, "抽样 40 条都没有番号")
+        else:
+            ids = [str(it["Id"]) for it in pick]
+            jid = post("/api/cn/scrape-batch", {"ids": ids, "dry_run": True}, timeout=60)["data"]["job_id"]
+            j = wait_job(jid, timeout=300)
+            check("任务完成", j["status"] == "done", "进度 %s/%s" % (j.get("done"), j.get("total")))
+            res = j.get("result") or []
+            got = sorted(str(r.get("item_id")) for r in res)
+            check("只处理勾选的那几条", got == sorted(ids),
+                  "勾选 %s，实际处理 %s" % (ids, got))
+            wrote = [r for r in res if r.get("applied")]
+            check("dry_run 没有写入任何条目", not wrote, "已写入 %d 条" % len(wrote))
+    except Exception as e:
+        check("国产传媒按 id 批量", False, str(e))
 
 print("\n" + "=" * 70)
 bad = [r for r in results if not r[1]]

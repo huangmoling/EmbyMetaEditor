@@ -267,6 +267,15 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .mcard .acts { display: flex; gap: 6px; margin-top: auto; }
 .mcard .acts .btn { flex: 1; justify-content: center; padding: 4px 6px; font-size: 11.5px; }
 
+/* 可勾选的卡片（国产传媒）：勾选框放右上角，避开左上角的番号角标。 */
+.mcard .pick {
+  position: absolute; top: 7px; right: 7px; width: 22px; height: 22px;
+  display: grid; place-items: center; border-radius: 6px; cursor: pointer;
+  background: rgba(255,255,255,.94); border: 1px solid var(--border);
+}
+.mcard .pick input { margin: 0; cursor: pointer; }
+.mcard.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
 /* ---------- 演员列表 ---------- */
 .plist { display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 11px; }
 .pcard {
@@ -315,6 +324,99 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .magrow .n i { font-style: normal; color: var(--muted); font-family: var(--mono); font-size: 11px; }
 .magrow .sz { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); flex: none; }
 .magrow .dt { font-size: 11px; color: var(--muted); flex: none; }
+
+/* 磁力按番号分页：上面一排番号标签，点哪个看哪个 */
+.magtabs {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 11px;
+  border-bottom: 1px solid var(--border); background: var(--surface-2);
+  position: sticky; top: 0; z-index: 2;
+}
+.magtab {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 11px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--text-2); font-family: var(--mono);
+  font-size: 12px; line-height: 1.5; cursor: pointer; transition: .15s;
+}
+.magtab:hover { border-color: var(--accent); color: var(--text); }
+.magtab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.magtab i {
+  font-style: normal; font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+  background: var(--border); color: var(--text-2);
+}
+.magtab.on i { background: rgba(255, 255, 255, .3); color: #fff; }
+.magtab.bad { opacity: .65; }
+.magtab.bad i { background: var(--warn-soft); color: var(--warn); }
+.magpanel { display: none; }
+.magpanel.on { display: block; }
+.magpanel .maghead {
+  padding: 8px 11px; font-size: 12px; color: var(--text-2);
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  word-break: break-word;
+}
+.magempty { padding: 18px 11px; text-align: center; color: var(--muted); font-size: 13px; }
+
+/* ---------- 国产传媒专项刮削 ---------- */
+.cnlist { display: flex; flex-direction: column; }
+.cnrow {
+  display: flex; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+}
+.cnrow:last-child { border-bottom: 0; }
+.cncover {
+  width: 92px; height: 128px; flex: none; border-radius: 8px; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.cncover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cncover .cnph {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 11.5px;
+}
+.cninfo { flex: 1; min-width: 0; }
+.cnhead {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 7px;
+}
+.cnhead b { font-size: 13.5px; word-break: break-word; }
+.cnhead .mono { color: var(--text-2); }
+.cnhead .spacer { flex: 1; }
+.cnhead .tag { flex: none; }
+.cntags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.cntag {
+  font-size: 11.5px; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+}
+.cntag.ok { background: var(--success-soft); border-color: #c7e9d7; color: var(--success); }
+.cntag.meh { background: var(--warn-soft); border-color: #f6e0b8; color: var(--warn); }
+.cntag.bad { background: var(--danger-soft); border-color: #f5cfcf; color: var(--danger); }
+.cnmeta { font-size: 12.5px; color: var(--text-2); line-height: 1.9; word-break: break-word; }
+.cnmeta b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+.cnmeta i { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 6px; }
+.cnhint { font-size: 12px; color: var(--muted); }
+.cnpick {
+  display: flex; gap: 12px; align-items: flex-start;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; font-size: 12.5px; line-height: 1.9; word-break: break-word;
+}
+.cnpick img {
+  width: 92px; height: 128px; object-fit: cover; border-radius: 8px; flex: none;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.cnpick b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+.cnpick i { font-style: normal; color: var(--muted); font-size: 11px; margin-left: 6px; }
+.cnhit {
+  display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border);
+  font-size: 12.5px; align-items: flex-start;
+}
+.cnhit:last-child { border-bottom: 0; }
+.cnhit img {
+  width: 62px; height: 86px; object-fit: cover; border-radius: 6px; flex: none;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.cnhit .cnph {
+  width: 62px; height: 86px; flex: none; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.cnhit.exact { background: var(--success-soft); border-radius: 6px; padding-left: 8px; padding-right: 8px; }
+.cnhit > div { min-width: 0; word-break: break-word; }
 
 /* ---------- 工具栏 ---------- */
 .toolbar {

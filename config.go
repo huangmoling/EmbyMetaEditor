@@ -32,6 +32,11 @@ type Config struct {
 	JavBusURL    string `json:"javbus_url"`
 	JavBusCookie string `json:"javbus_cookie"`
 
+	// ---- 国产传媒专项刮削 ----
+	// 键为站点标识（xchina / madouqu / madou / 7mmtv），值为站点根地址。
+	// 留空则用 defaultCNSites() 里的默认值，方便换镜像域名。
+	CNSites map[string]string `json:"cn_sites"`
+
 	// ---- 通用 ----
 	Proxy           string `json:"proxy"`
 	InsecureTLS     bool   `json:"insecure_tls"`
@@ -76,6 +81,15 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.JavBusCookie) == "" {
 		c.JavBusCookie = d.JavBusCookie
+	}
+	if c.CNSites == nil {
+		c.CNSites = map[string]string{}
+	}
+	for k, v := range defaultCNSites() {
+		if strings.TrimSpace(c.CNSites[k]) == "" {
+			c.CNSites[k] = v
+		}
+		c.CNSites[k] = strings.TrimRight(strings.TrimSpace(c.CNSites[k]), "/")
 	}
 	if c.Concurrency <= 0 || c.Concurrency > 32 {
 		c.Concurrency = d.Concurrency

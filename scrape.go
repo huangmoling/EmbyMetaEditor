@@ -195,17 +195,39 @@ func buildItemPatch(item Item, mv *MTMovie, number string) map[string]any {
 // 为什么要在服务端算：Emby 的 **/Items 列表不返回 SortName**（实测全是 null），
 // 前端原本拿 SortName 当番号，于是卡片角标永远拿不到值、退化成显示年份。
 // 用和刮削同一套归一化逻辑算好，前端直接用。
+//
+// 另外要处理「数字开头的番号」（91CM-014 / 91BCM-002）：
+// 通用正则要求前缀是纯字母，会把前缀数字砍掉，详见下面实现里的说明。
 func itemNumber(item Item) string {
-	parts := []string{}
-	for _, k := range []string{"Name", "OriginalTitle", "Path", "SortName"} {
-		if s, ok := item[k].(string); ok {
-			parts = append(parts, s)
+	// numberSourceFields 会先把文件扩展名去掉 —— 不去的话 `.mp4` 会被当成
+	// 番号 "MP-4"，一个误报就能让整库的角标和搜索关键词全错。
+	joined := strings.Join(numberSourceFields(item), " ")
+
+	generic := ""
+	if ks := numKeys(joined); len(ks) > 0 {
+		generic = displayNumber(ks[0])
+		// 「HEVC10 1080P」这种压制组标记会被通用正则当成 HEVC-010。
+		// 展示用不上这种「番号」，直接丢掉（不影响 javbus 那套匹配逻辑）。
+		if cnNoisePrefix[strings.SplitN(generic, "-", 2)[0]] {
+			generic = ""
 		}
 	}
-	if ks := numKeys(strings.Join(parts, " ")); len(ks) > 0 {
-		return displayNumber(ks[0])
+
+	// 通用规则的正则要求前缀是**纯字母**，所以「数字开头的番号」会被砍掉前缀数字：
+	// 91CM-014 → CM-014、91BCM-002 → BCM-002（国产传媒库里有 1400 多条这种）。
+	// 只在能确认是「前缀被砍」时才改用国产传媒的提取结果 ——
+	// 否则会把 HEVC10 / WEB-DL 这类压制组标记当番号。
+	if cn := cnExtractNumber(joined); cn != "" {
+		genPrefix := strings.SplitN(generic, "-", 2)[0]
+		cnPrefix := strings.SplitN(cn, "-", 2)[0]
+		if len(cnPrefix) > len(genPrefix) && strings.HasSuffix(cnPrefix, genPrefix) {
+			return cn
+		}
+		if generic == "" {
+			return cn
+		}
 	}
-	return ""
+	return generic
 }
 
 // searchKeyword 从条目推断搜索关键词（优先番号，没有就用名字）。

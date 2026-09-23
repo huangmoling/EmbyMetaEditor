@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -317,6 +318,53 @@ func TestImageProxyAllowlistBeatsPrivateCheck(t *testing.T) {
 	_, proxy, err := ClassifyImage("http://192.168.1.10:8080/gf/a.jpg", cfg)
 	if err != nil || !proxy {
 		t.Errorf("内网镜像应在白名单内被代取，实际 proxy=%v err=%v", proxy, err)
+	}
+}
+
+// 国产传媒的图床也要走服务端代取。
+//
+// 实测 upload.xchina.io 会对浏览器弹 Cloudflare 安全验证页（403 + HTML），
+// 浏览器侧表现为 ERR_BLOCKED_BY_RESPONSE.NotSameOrigin、封面一片空白；
+// 服务端带浏览器 UA 直取是 200。所以这些主机必须留在代取白名单里。
+func TestImageProxyCoversCNDomesticHosts(t *testing.T) {
+	cfg := Config{}
+
+	proxied := []string{
+		"https://upload.xchina.io/video/63b104a71ed7f.webp",
+		"https://xchina.co/img/a.jpg",
+		"https://i0.wp.com/madouqu.com/wp-content/uploads/x.jpg?fit=1,2&ssl=1",
+		"https://i3.wp.com/example.com/a.png",
+		"https://madou.club/covers/2024/09/x-240x180.jpg",
+		"https://madouqu.com/wp-content/uploads/x.jpg",
+		"https://n1.1026cdn.sx/censored/m/x_SSNI-989.jpg",
+		"https://n19s.1024cdn.sx/censored/x.mp4",
+		"https://n7.1026cdn.sx/other/x.jpg", // 后缀匹配要覆盖没见过的分片域名
+	}
+	for _, raw := range proxied {
+		u, proxy, err := ClassifyImage(raw, cfg)
+		if err != nil {
+			t.Errorf("%q 应被放行，实际 %v", raw, err)
+			continue
+		}
+		if !proxy {
+			t.Errorf("%q 应由服务端代取（实际 %s）", raw, u)
+		}
+	}
+
+	// 后缀匹配不能变成「包含即可」：坏域名不能被放进来
+	notProxied := []string{
+		"https://notxchina.io/a.jpg",
+		"https://fake1026cdn.sx/a.jpg",
+		"https://xchina.io.evil.com/a.jpg",
+	}
+	for _, raw := range notProxied {
+		_, proxy, err := ClassifyImage(raw, cfg)
+		if err != nil {
+			continue // 拒绝也算对
+		}
+		if proxy {
+			t.Errorf("%q 不该被代取", raw)
+		}
 	}
 }
 
@@ -717,5 +765,187 @@ func TestMockPersonsRejectsMalformedParent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Unrecognized Guid format") {
 		t.Errorf("报错应带上服务端原因，实际: %v", err)
+	}
+}
+
+// ---------- 元数据编辑 ----------
+
+// postJSONTest 发一个 POST，返回响应（调用方负责 Close）。
+func postJSONTest(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s 失败: %v", url, err)
+	}
+	return resp
+}
+
+// itemUpdateFixture 造一个字段齐全的条目，用来验证「只提交改动项」。
+func itemUpdateFixture(t *testing.T) (*mockEmby, *httptest.Server) {
+	t.Helper()
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+	m.items["m1"] = map[string]any{
+		"Id": "m1", "Name": "原名", "Type": "Movie",
+		"OriginalTitle":  "原原始标题",
+		"Overview":       "原简介",
+		"OfficialRating": "JP-18+",
+		"PremiereDate":   "2019-05-01T00:00:00.0000000Z",
+		"ProductionYear": 2019,
+		"Genres":         []any{"CM"},
+		"Tags":           []any{"CM"},
+		"ProviderIds":    map[string]any{},
+	}
+	srv := httptest.NewServer(app.route())
+	t.Cleanup(srv.Close)
+	return m, srv
+}
+
+// fmtEq 做「不看具体类型」的相等比较。
+//
+// mock 里存的是 JSON 解码后的值：整数会变成 float64、数组会变成 []interface{}。
+// 用 `!=` 直接比 any 会因为类型不同而误报。
+func fmtEq(got, want any) bool {
+	return fmt.Sprint(got) == fmt.Sprint(want)
+}
+
+// 只改了简介，那别的字段必须原样保留。
+//
+// 这条用例守的是一条硬规则：Emby 的 POST /Items/{id} 是整对象替换，
+// 前端一旦把空表单原样提交（或后端把「没提交」当成「清空」），
+// 用户没碰过的字段就全没了 —— 这个项目已经因为同样的原因出过一次事故。
+func TestHandleItemUpdateOnlyPatchesChangedFields(t *testing.T) {
+	m, srv := itemUpdateFixture(t)
+
+	resp := postJSONTest(t, srv.URL+"/api/items/update", `{"id":"m1","overview":"新简介"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("期望 200，实际 %d：%s", resp.StatusCode, b)
+	}
+	var out struct {
+		Data struct {
+			Updated []string `json:"updated"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(out.Data.Updated) != 1 || out.Data.Updated[0] != "Overview" {
+		t.Errorf("updated 应只有 Overview，实际 %v", out.Data.Updated)
+	}
+
+	p := m.patched["m1"]
+	if p == nil {
+		t.Fatal("没有发出 POST /Items/{id}")
+	}
+	if got := p["Overview"]; got != "新简介" {
+		t.Errorf("Overview = %#v，期望「新简介」", got)
+	}
+	for k, want := range map[string]any{
+		"Name":           "原名",
+		"OriginalTitle":  "原原始标题",
+		"OfficialRating": "JP-18+",
+		"PremiereDate":   "2019-05-01T00:00:00.0000000Z",
+		"ProductionYear": 2019,
+	} {
+		if got := p[k]; !fmtEq(got, want) {
+			t.Errorf("%s 被改成了 %#v，应该保持 %#v", k, got, want)
+		}
+	}
+	if pv, ok := p["ProviderIds"]; !ok || pv == nil {
+		t.Errorf("ProviderIds 缺失或为 nil（Emby 会 400），实际 %#v", p["ProviderIds"])
+	}
+}
+
+// 改日期要顺带把年份带上：只改日期不改年份，列表里会出现年份对不上的条目。
+func TestHandleItemUpdateDateDerivesYear(t *testing.T) {
+	m, srv := itemUpdateFixture(t)
+
+	resp := postJSONTest(t, srv.URL+"/api/items/update", `{"id":"m1","premiere_date":"2021-04-06"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("期望 200，实际 %d：%s", resp.StatusCode, b)
+	}
+	p := m.patched["m1"]
+	if got := p["PremiereDate"]; !fmtEq(got, "2021-04-06T00:00:00.0000000Z") {
+		t.Errorf("PremiereDate = %#v，期望 Emby 的日期格式", got)
+	}
+	if got := p["ProductionYear"]; !fmtEq(got, 2021) {
+		t.Errorf("ProductionYear = %#v，期望跟着日期一起变成 2021", got)
+	}
+}
+
+// 留空 = 不修改。发空日期给 Emby 要么 400 要么把日期抹掉，两种都不能接受。
+func TestHandleItemUpdateBlankDateMeansNoChange(t *testing.T) {
+	m, srv := itemUpdateFixture(t)
+
+	resp := postJSONTest(t, srv.URL+"/api/items/update", `{"id":"m1","premiere_date":"","name":"还是原名"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("期望 200，实际 %d：%s", resp.StatusCode, b)
+	}
+	p := m.patched["m1"]
+	if p == nil {
+		t.Fatal("没有发出 POST /Items/{id}（没改动时可以不发，但这里改了别的字段就不该不发）")
+	}
+}
+
+// 三种非法输入必须挡在服务端，不能把坏数据递给 Emby。
+func TestHandleItemUpdateRejectsBadInput(t *testing.T) {
+	_, srv := itemUpdateFixture(t)
+
+	for _, tc := range []struct{ name, body string }{
+		{"缺少 id", `{"overview":"x"}`},
+		{"空名称", `{"id":"m1","name":"   "}`},
+		{"日期格式不对", `{"id":"m1","premiere_date":"2026/01/02"}`},
+		{"日期不是数字", `{"id":"m1","premiere_date":"2026-ab-cd"}`},
+		{"什么都没提交", `{"id":"m1"}`},
+	} {
+		resp := postJSONTest(t, srv.URL+"/api/items/update", tc.body)
+		code := resp.StatusCode
+		resp.Body.Close()
+		if code != http.StatusBadRequest {
+			t.Errorf("%s：期望 400，实际 %d", tc.name, code)
+		}
+	}
+}
+
+// 标签 / 类型提交空数组等于清空，这是允许的（区别于日期的「留空=不修改」）。
+func TestHandleItemUpdateClearsTagsOnEmptyArray(t *testing.T) {
+	m, srv := itemUpdateFixture(t)
+
+	resp := postJSONTest(t, srv.URL+"/api/items/update", `{"id":"m1","tags":[],"genres":["新类型"]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("期望 200，实际 %d：%s", resp.StatusCode, b)
+	}
+	p := m.patched["m1"]
+	if !fmtEq(p["Tags"], []string{}) {
+		t.Errorf("Tags 应被清空，实际 %#v", p["Tags"])
+	}
+	if !fmtEq(p["Genres"], []string{"新类型"}) {
+		t.Errorf("Genres = %#v，期望 [新类型]", p["Genres"])
+	}
+}
+
+// 逗号分隔的输入要去掉空白和空项，别把空串写进 Emby。
+func TestTrimAllDropsBlanks(t *testing.T) {
+	got := trimAll([]string{" 麻豆传媒 ", "", "  ", "91CM-014"})
+	want := []string{"麻豆传媒", "91CM-014"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("trimAll = %#v，期望 %#v", got, want)
+	}
+	for _, bad := range []string{"2026/01/02", "2026-1-2", "2026-ab-cd", "20260102", "", "2026-01-02xxx"} {
+		if isDateOnly(bad) {
+			t.Errorf("isDateOnly(%q) 应为 false", bad)
+		}
+	}
+	if !isDateOnly("2026-01-02") {
+		t.Error("isDateOnly(\"2026-01-02\") 应为 true")
 	}
 }

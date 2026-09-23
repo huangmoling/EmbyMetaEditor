@@ -33,11 +33,25 @@ const (
 )
 
 // imageCDNHosts 是允许代理的公开图床（都是只读的公开图片服务）。
+//
+// 以 "." 开头的条目是**域名后缀**，匹配任意子域 ——
+// 7mmtv 的图床有 n1./n2./n19s. 多个分片，逐个列会漏。
 var imageCDNHosts = []string{
 	"javbus.com", "www.javbus.com",
 	"javcdn.com", "www.javcdn.com",
 	"pics.dmm.co.jp", "awsimgsrc.dmm.co.jp",
 	"cdn.jsdelivr.net",
+
+	// ---- 国产传媒（见 cnmedia.go）----
+	//
+	// 这些主机本身没有 Referer 防盗链，直连本来也能取到图，
+	// 但 upload.xchina.io 会对浏览器弹 Cloudflare 安全验证页（403 + HTML），
+	// 浏览器那边表现为 ERR_BLOCKED_BY_RESPONSE.NotSameOrigin、封面一片空白；
+	// 服务端带浏览器 UA 直取是 200。所以统一交给服务端代取。
+	".xchina.io", ".xchina.co",
+	"i0.wp.com", "i1.wp.com", "i2.wp.com", "i3.wp.com",
+	"madouqu.com", "madou.club",
+	".1026cdn.sx", ".1024cdn.sx",
 }
 
 type imageEntry struct {
@@ -105,6 +119,26 @@ func allowedImageHosts(cfg Config) map[string]bool {
 	return hosts
 }
 
+// imageHostAllowed 判断主机是否在白名单里。
+//
+// 白名单里以 "." 开头的条目按域名后缀匹配：既匹配 apex（example.com），
+// 也匹配任意子域（n1.example.com）。这样 CDN 换分片域名不用改代码。
+// 注意是「后缀 + 前面的点」，所以 xchina.io.evil.com 不会被放进来。
+func imageHostAllowed(host string, cfg Config) bool {
+	for h := range allowedImageHosts(cfg) {
+		if strings.HasPrefix(h, ".") {
+			if host == h[1:] || strings.HasSuffix(host, h) {
+				return true
+			}
+			continue
+		}
+		if host == h {
+			return true
+		}
+	}
+	return false
+}
+
 // isPrivateHost 判断主机是否是本机 / 内网地址。
 func isPrivateHost(host string) bool {
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
@@ -139,7 +173,7 @@ func ClassifyImage(raw string, cfg Config) (*url.URL, bool, error) {
 		return nil, false, fmt.Errorf("图片地址缺少主机名")
 	}
 	host := strings.ToLower(u.Hostname())
-	if allowedImageHosts(cfg)[host] {
+	if imageHostAllowed(host, cfg) {
 		return u, true, nil
 	}
 	if isPrivateHost(host) {

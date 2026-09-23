@@ -652,7 +652,7 @@ func TestEmbyStatsAndPersons(t *testing.T) {
 	if stats["total"] != 3 || stats["with_image"] != 1 || stats["missing_image"] != 2 {
 		t.Errorf("演员统计异常: %v", stats)
 	}
-	libs, err := e.LibraryStats(context.Background(), false)
+	libs, err := e.LibraryStats(context.Background())
 	if err != nil {
 		t.Fatalf("媒体库统计失败: %v", err)
 	}

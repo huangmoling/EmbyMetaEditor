@@ -25,7 +25,7 @@ const S = {
   libs: [],
   lb: { start: 0, limit: 24, total: 0, items: [] },
   ps: { start: 0, limit: 48, total: 0, items: [] },
-  jb: { scan: null, selected: new Set(), magnets: [], targets: [] },
+  jb: { scan: null, selected: new Set(), magnets: [], targets: [], magTab: '' },
   watching: {},
 };
 
@@ -55,13 +55,6 @@ function toast(msg, kind) {
   setTimeout(() => el.remove(), 4100);
 }
 
-function fmtSize(b) {
-  if (b == null || b < 0) return '—';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  let i = 0, n = Number(b);
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (i === 0 ? n : n.toFixed(n < 10 ? 2 : 1)) + ' ' + u[i];
-}
 const num = (n) => (n == null ? '0' : Number(n).toLocaleString('zh-CN'));
 
 // ---------------- Emby 图片地址 ----------------
@@ -144,7 +137,7 @@ function watchJob(jobId, title, onDone) {
 }
 
 // ---------------- 视图切换 ----------------
-const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', settings: '设置' };
+const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', cn: '国产传媒', settings: '设置' };
 
 function switchView(v) {
   S.view = v;
@@ -154,6 +147,7 @@ function switchView(v) {
   if (v === 'stats') loadStats();
   if (v === 'library') { ensureLibs(); loadItems(0); }
   if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); }
+  if (v === 'cn') { ensureLibs(); cnSyncSelUI(); }
   if (v === 'settings') fillSettings();
 }
 
@@ -161,9 +155,8 @@ function switchView(v) {
 async function loadStats() {
   $('#statGrid').innerHTML = '<div class="empty"><span class="spin"></span> 正在统计…</div>';
   $('#stLibs').innerHTML = '<div class="empty">加载中…</div>';
-  const withSize = $('#stSize').checked;
   try {
-    const d = await api('/api/stats?size=' + (withSize ? 'true' : 'false'));
+    const d = await api('/api/stats');
     const c = d.counts || {};
     const p = d.persons || {};
     const cards = [
@@ -172,7 +165,6 @@ async function loadStats() {
       { k: '集数', v: num(c.EpisodeCount), c: '' },
       { k: '演员总数', v: num(p.total), c: 'violet', s: '已扫描 ' + num(p.scanned) },
       { k: '缺头像演员', v: num(p.missing_image), c: 'warn' },
-      { k: '媒体库体积', v: withSize ? fmtSize(d.total_size) : '—', c: 'green', s: withSize ? '' : '勾选左侧选项后统计' },
     ];
     $('#statGrid').innerHTML = cards.map((x) =>
       '<div class="stat ' + x.c + '"><div class="k">' + x.k + '</div><div class="v">' + x.v + '</div>' +
@@ -184,11 +176,11 @@ async function loadStats() {
     } else {
       $('#stLibs').innerHTML = '<table class="tbl"><thead><tr><th>媒体库</th><th>类型</th>' +
         '<th class="num">条目</th><th class="num">电影</th><th class="num">剧集</th><th class="num">集</th>' +
-        (withSize ? '<th class="num">体积</th>' : '') + '</tr></thead><tbody>' +
+        '</tr></thead><tbody>' +
         libs.map((l) => '<tr><td><b>' + esc(l.name) + '</b></td><td><span class="tag">' + esc(l.collection_type || 'mixed') + '</span></td>' +
           '<td class="num">' + num(l.item_count) + '</td><td class="num">' + num(l.movie_count) + '</td>' +
           '<td class="num">' + num(l.series_count) + '</td><td class="num">' + num(l.episode_count) + '</td>' +
-          (withSize ? '<td class="num">' + fmtSize(l.total_size) + '</td>' : '') + '</tr>').join('') +
+          '</tr>').join('') +
         '</tbody></table>';
     }
     renderComponents(d);
@@ -222,6 +214,9 @@ async function ensureLibs() {
     $('#lbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#jbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#psLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
+    // 国产传媒页不给「全部」这个选项：这个功能只在某个具体库里成立，
+    // 留个「全部」等于留个坑。
+    $('#cnLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
   } catch (e) { /* 未登录时忽略 */ }
 }
 
@@ -591,6 +586,7 @@ function renderJbMissing(res) {
     '<button class="btn btn-sm" id="jbExport">导出 JSON</button></h3>' +
     '<div class="missgrid" id="jbGrid">' + miss.map((m, i) => missCard(m, i)).join('') + '</div></div>' +
     '<div class="card" id="jbMagCard" style="display:none"><h3>磁力列表 <span class="spacer"></span>' +
+    '<button class="btn btn-sm" id="jbCopyOne">复制当前番号</button>' +
     '<button class="btn btn-sm" id="jbCopyAll">复制全部</button></h3><div class="maglist" id="jbMagList"></div></div>' +
     (res.local_unmatched && res.local_unmatched.length
       ? '<div class="card"><h3>本地有、javbus 未列出（' + res.local_unmatched.length + '）</h3>' +
@@ -633,38 +629,325 @@ async function fetchMagnets(miss) {
     watchJob(r.job_id, '抓取磁力', (j) => {
       if (j.status !== 'done') return;
       S.jb.magnets = j.result || [];
+      S.jb.magTab = ''; // 新一批磁力，默认停在第一个番号
       renderMagnets();
     });
   } catch (e) { toast(e.message, 'err'); }
 }
 
+// 磁力列表按番号分页：上面一排番号标签，点哪个看哪个。
+// 之前是一长条把所有番号的磁力堆在一起，几十条下来分不清哪条属于哪个番号。
 function renderMagnets() {
   const card = $('#jbMagCard');
   if (!card) return;
   card.style.display = 'block';
   const list = $('#jbMagList');
-  const all = [];
-  list.innerHTML = S.jb.magnets.map((r) => {
-    if (r.error && !(r.magnets || []).length) {
-      return '<div style="padding:10px;border-bottom:1px solid var(--border)"><b class="mono">' + esc(r.number) + '</b>' +
-        ' <span class="tag tag-amber">' + esc(r.error) + '</span></div>';
-    }
-    const rows = (r.magnets || []).map((m) => {
-      all.push(m.link);
-      return '<div class="magrow"><div class="n">' + esc(m.name) + '<br><i>' + esc(m.link.slice(0, 110)) + '…</i></div>' +
-        '<span class="sz">' + esc(m.size || '') + '</span><span class="dt">' + esc(m.date || '') + '</span>' +
-        '<button class="btn btn-sm" data-copy="' + esc(m.link) + '">复制</button></div>';
-    }).join('');
-    return '<div style="padding:9px 11px 3px;background:var(--surface-2);border-bottom:1px solid var(--border)">' +
-      '<b class="mono">' + esc(r.number) + '</b> <span style="color:var(--muted);font-size:12px">' +
-      esc(r.title || '') + '</span></div>' + rows;
+  const groups = S.jb.magnets || [];
+  if (!groups.length) {
+    list.innerHTML = '<div class="magempty">没有磁力数据</div>';
+    return;
+  }
+  // 重渲染时保持当前选中的番号；选中项已不存在就回到第一个
+  if (!groups.some((g) => g.number === S.jb.magTab)) S.jb.magTab = groups[0].number;
+
+  const tabs = groups.map((g) => {
+    const n = (g.magnets || []).length;
+    return '<button class="magtab' + (g.number === S.jb.magTab ? ' on' : '') + (n ? '' : ' bad') +
+      '" data-num="' + esc(g.number) + '" title="' + esc(g.title || g.number) + '">' +
+      esc(g.number) + '<i>' + (n || '无') + '</i></button>';
   }).join('');
+
+  const panels = groups.map((g) => {
+    const rows = (g.magnets || []).map((m) =>
+      '<div class="magrow"><div class="n">' + esc(m.name) + '<br><i>' + esc(m.link.slice(0, 110)) + '…</i></div>' +
+      '<span class="sz">' + esc(m.size || '') + '</span><span class="dt">' + esc(m.date || '') + '</span>' +
+      '<button class="btn btn-sm" data-copy="' + esc(m.link) + '">复制</button></div>').join('');
+    return '<div class="magpanel' + (g.number === S.jb.magTab ? ' on' : '') + '" data-num="' + esc(g.number) + '">' +
+      (g.title ? '<div class="maghead">' + esc(g.title) + '</div>' : '') +
+      (rows || '<div class="magempty">' + esc(g.error || '没有磁力链接') + '</div>') + '</div>';
+  }).join('');
+
+  list.innerHTML = '<div class="magtabs">' + tabs + '</div><div class="magpanels">' + panels + '</div>';
+
+  $$('.magtab', list).forEach((b) => b.onclick = () => {
+    S.jb.magTab = b.dataset.num;
+    $$('.magtab', list).forEach((x) => x.classList.toggle('on', x === b));
+    $$('.magpanel', list).forEach((p) => p.classList.toggle('on', p.dataset.num === b.dataset.num));
+  });
   $$('button[data-copy]', list).forEach((b) => b.onclick = () => {
     navigator.clipboard.writeText(b.dataset.copy).then(() => toast('已复制磁力链接', 'ok'), () => toast('复制失败', 'err'));
   });
+
+  const copy = (links, label) => {
+    if (!links.length) { toast('没有磁力链接', 'err'); return; }
+    navigator.clipboard.writeText(links.join('\n'))
+      .then(() => toast('已复制 ' + label + ' 共 ' + links.length + ' 条磁力链接', 'ok'), () => toast('复制失败', 'err'));
+  };
+  const one = $('#jbCopyOne');
+  if (one) one.onclick = () => {
+    const g = groups.find((x) => x.number === S.jb.magTab) || {};
+    copy(((g.magnets) || []).map((m) => m.link), S.jb.magTab);
+  };
   const ca = $('#jbCopyAll');
-  if (ca) ca.onclick = () => navigator.clipboard.writeText(all.join('\n'))
-    .then(() => toast('已复制 ' + all.length + ' 条磁力链接', 'ok'), () => toast('复制失败', 'err'));
+  if (ca) ca.onclick = () => copy(groups.flatMap((g) => (g.magnets || []).map((m) => m.link)), '全部番号');
+}
+
+// ---------------- 国产传媒专项刮削 ----------------
+//
+// 交互对齐「媒体库刮削」：选库 → 查询 → 网格 → 单个 / 多选刮削 → 可编辑元数据。
+//
+// 刻意的取舍：
+//   - 抓取字段固定全开（封面 / 标题 / 标签 / 日期），界面上不再给勾选；
+//   - 四家站点的明细不在界面上摊开（要看某家站点认不认这个番号，
+//     直接用 /api/cn/search?q=91CM-014 这个只读接口）；
+//   - 没有「试运行」这一步，点刮削就是写入。
+//
+// 选中的条目 id 放在 S.cn.sel 里：翻页、重新查询、刮完刷新都不会丢，
+// 和番号补全页的 S.jb.selected 一个思路。
+
+S.cn = { start: 0, limit: 24, total: 0, items: [], sel: new Set() };
+
+function cnSyncSelUI() {
+  $('#cnSelCount').textContent = '已选 ' + S.cn.sel.size;
+  const ids = S.cn.items.map((it) => it.Id);
+  const on = ids.filter((id) => S.cn.sel.has(id)).length;
+  const box = $('#cnSelAll');
+  box.checked = ids.length > 0 && on === ids.length;
+  // 本页选了一部分时给个中间态，否则「全选」看着像没生效。
+  box.indeterminate = on > 0 && on < ids.length;
+}
+
+async function loadCnItems(start) {
+  const cn = S.cn;
+  cn.start = start || 0;
+  if (!$('#cnLib').value) {
+    $('#cnGrid').innerHTML = '<div class="empty">先选一个媒体库，再点「查询」</div>';
+    $('#cnPager').innerHTML = '';
+    $('#cnCount').textContent = '—';
+    return;
+  }
+  $('#cnGrid').innerHTML = '<div class="empty"><span class="spin"></span> 加载中…</div>';
+  const params = new URLSearchParams({
+    parent: $('#cnLib').value,
+    q: $('#cnQ').value.trim(),
+    start: cn.start, limit: cn.limit,
+    missing_image: $('#cnMissing').checked ? 'true' : 'false',
+  });
+  try {
+    const d = await api('/api/items?' + params.toString());
+    cn.items = d.items || [];
+    cn.total = d.total || 0;
+    $('#cnCount').textContent = '共 ' + num(cn.total) + ' 条' +
+      ($('#cnMissing').checked ? '（本页过滤后 ' + cn.items.length + ' 条）' : '');
+    if (!cn.items.length) {
+      $('#cnGrid').innerHTML = '<div class="empty">没有符合条件的条目</div>';
+    } else {
+      $('#cnGrid').innerHTML = cn.items.map(renderCnCard).join('');
+    }
+    renderPager('#cnPager', cn, loadCnItems);
+    cnSyncSelUI();
+  } catch (e) {
+    $('#cnGrid').innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+    $('#cnPager').innerHTML = '';
+  }
+}
+
+function renderCnCard(it) {
+  const has = it.ImageTags && it.ImageTags.Primary;
+  const img = has ? '<img loading="lazy" src="' + embyImg(it.Id, it.ImageTags.Primary, 300) + '" alt="">'
+    : '<div class="ph">无封面</div>';
+  const number = it.Number || '';
+  const sel = S.cn.sel.has(it.Id);
+  // 片名和路径里都没有番号时搜不了，按钮直接禁用 —— 点下去只会换回一句报错。
+  const scrape = number
+    ? '<button class="btn btn-sm btn-primary" data-act="cnscrape">刮削</button>'
+    : '<button class="btn btn-sm" disabled title="片名和路径里都没有番号，无法搜索">刮削</button>';
+  return '<div class="mcard' + (sel ? ' sel' : '') + '" data-id="' + esc(it.Id) + '">' +
+    '<div class="poster">' + img +
+    '<label class="pick" title="勾选后可批量刮削"><input type="checkbox" data-act="cnpick"' + (sel ? ' checked' : '') + '></label>' +
+    '<span class="badge' + (has ? '' : ' no') + '">' + esc(number || (it.ProductionYear || '—')) + '</span></div>' +
+    '<div class="body"><div class="name" title="' + esc(it.Name) + '">' + esc(it.Name) + '</div>' +
+    '<div class="meta">' + (it.ProductionYear || '') + '</div>' +
+    '<div class="acts">' + scrape +
+    '<button class="btn btn-sm" data-act="cndetail">编辑</button>' +
+    '</div></div></div>';
+}
+
+// cnOutcome 把一次刮削结果压成一句人话。
+//
+// 界面不摊四家站点的明细，但「四家都没收录」和「站点根本抓不通」必须分得清 ——
+// 前者该换个番号写法，后者该去查网络或站点地址。
+function cnOutcome(r) {
+  if (r.applied) return r.message || '已写入';
+  const sites = r.sites || [];
+  if (sites.length && sites.every((s) => !s.ok)) {
+    return '站点全部抓取失败，检查网络或「设置 → 国产传媒站点」';
+  }
+  if (!(r.matched || []).length) {
+    return '四家站点都没有「' + (r.number || '') + '」的精确结果';
+  }
+  return r.message || '没有需要写入的字段';
+}
+
+// 单个刮削。字段固定全开，所以不传 fields；不传 dry_run 就是写入。
+async function cnScrapeOne(itemId, btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; }
+  try {
+    const r = await api('/api/cn/scrape', {
+      method: 'POST',
+      body: {
+        id: itemId,
+        overwrite_images: $('#cnOverwriteImg').checked,
+        overwrite_title: $('#cnOverwriteTitle').checked,
+      },
+    });
+    toast(cnOutcome(r), r.applied ? 'ok' : 'err');
+    if (r.applied) loadCnItems(S.cn.start);
+    else if (btn) { btn.disabled = false; btn.textContent = '刮削'; }
+  } catch (e) {
+    toast(e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '刮削'; }
+  }
+}
+
+// 批量刮削勾选的条目：把 id 明确传给后端，不用「整库前 N 条」那种模糊范围。
+async function cnScrapeSelected() {
+  const ids = [...S.cn.sel];
+  if (!ids.length) { toast('先勾选要刮削的条目', 'err'); return; }
+  try {
+    const r = await api('/api/cn/scrape-batch', {
+      method: 'POST',
+      body: {
+        ids,
+        overwrite_images: $('#cnOverwriteImg').checked,
+        overwrite_title: $('#cnOverwriteTitle').checked,
+      },
+    });
+    watchJob(r.job_id, '国产传媒刮削（' + ids.length + ' 条）', () => {
+      S.cn.sel.clear();
+      cnSyncSelUI();
+      loadCnItems(S.cn.start);
+    });
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// cnSplitList 把「逗号分隔」的输入拆成数组，中英文逗号、顿号都认。
+function cnSplitList(s) {
+  return String(s || '').split(/[,，、]/).map((x) => x.trim()).filter(Boolean);
+}
+
+// 元数据编辑抽屉。
+//
+// 关键：只提交**改动过**的字段。后端用指针区分「没提交」和「清空」，
+// 而 Emby 的 POST /Items/{id} 是整对象替换 —— 把没碰过的字段一起发过去，
+// 一次误操作就能抹掉别人攒了很久的元数据（这个项目已经出过一次事故）。
+async function openCnEditor(itemId) {
+  const host = openDrawer('<div class="empty"><span class="spin"></span> 加载中…</div>');
+  let it;
+  try { it = await api('/api/items/detail?id=' + encodeURIComponent(itemId)); }
+  catch (e) { host.innerHTML = ''; toast(e.message, 'err'); return; }
+
+  // 这个 Emby 构建（4.9.0.42）的详情接口**不返回 `Tags`**（实测永远是 null），
+  // 标签只体现在 `TagItems` 里。写的时候仍然发 `Tags`（服务端认这个字段），
+  // 读的时候两边都看一眼，免得编辑框莫名其妙是空的。
+  const tags = (Array.isArray(it.Tags) && it.Tags.length)
+    ? it.Tags
+    : (it.TagItems || []).map((t) => t && t.Name).filter(Boolean);
+  const orig = {
+    name: it.Name || '',
+    original_title: it.OriginalTitle || '',
+    overview: it.Overview || '',
+    official_rating: it.OfficialRating || '',
+    premiere_date: (it.PremiereDate || '').slice(0, 10),
+    production_year: it.ProductionYear || 0,
+    tags: cnSplitList(tags.join(',')),
+    genres: cnSplitList((it.Genres || []).join(',')),
+  };
+
+  const has = it.ImageTags && it.ImageTags.Primary;
+  openDrawer(
+    '<h3>编辑元数据</h3><div class="sub">' + esc(it.Name || '') + '</div>' +
+    (has ? '<img src="' + embyImg(it.Id, it.ImageTags.Primary, 420) + '" style="width:150px;border-radius:8px;border:1px solid var(--border);margin-bottom:14px">' : '') +
+    '<div class="field"><label>名称</label><input class="input" id="ceName"></div>' +
+    '<div class="field"><label>原始标题</label><input class="input" id="ceOrig"></div>' +
+    '<div class="field"><label>简介</label><textarea class="input" id="ceOv" rows="6"></textarea></div>' +
+    '<div class="row">' +
+    '<div class="field"><label>发行日期（YYYY-MM-DD）</label><input class="input" id="ceDate" placeholder="留空 = 不修改"></div>' +
+    '<div class="field"><label>年份</label><input class="input" id="ceYear" type="number" min="0" max="2999" placeholder="留空 = 不修改"></div>' +
+    '</div>' +
+    '<div class="field"><label>标签（逗号分隔）</label><input class="input" id="ceTags"></div>' +
+    '<div class="field"><label>类型（逗号分隔）</label><input class="input" id="ceGenres"></div>' +
+    '<div class="field"><label>分级</label><input class="input" id="ceRating"></div>' +
+    '<div style="display:flex;gap:8px;margin-top:14px">' +
+    '<button class="btn btn-primary" id="ceSave">保存</button>' +
+    '<button class="btn" id="ceScrape">刮削这一条</button>' +
+    '</div>' +
+    '<div class="cnhint" style="margin-top:10px">只提交改动过的字段，没碰的不动。' +
+    '名称不能为空；发行日期和年份<b>留空表示不修改</b>（不会清掉已有值）。</div>'
+  );
+  const set = (id, v) => { $(id).value = v == null ? '' : v; };
+  set('#ceName', orig.name); set('#ceOrig', orig.original_title);
+  set('#ceOv', orig.overview); set('#ceDate', orig.premiere_date);
+  set('#ceYear', orig.production_year || ''); set('#ceTags', orig.tags.join(', '));
+  set('#ceGenres', orig.genres.join(', ')); set('#ceRating', orig.official_rating);
+
+  $('#ceSave').onclick = async (ev) => {
+    const patch = {};
+    const name = $('#ceName').value.trim();
+    if (name !== orig.name) {
+      if (!name) { toast('名称不能为空', 'err'); return; }
+      patch.name = name;
+    }
+    if ($('#ceOrig').value.trim() !== orig.original_title) patch.original_title = $('#ceOrig').value.trim();
+    if ($('#ceOv').value.trim() !== orig.overview) patch.overview = $('#ceOv').value.trim();
+    if ($('#ceRating').value.trim() !== orig.official_rating) patch.official_rating = $('#ceRating').value.trim();
+    const date = $('#ceDate').value.trim();
+    if (date !== orig.premiere_date) {
+      if (!date) { toast('发行日期留空表示不修改，要清空请直接在 Emby 里改', 'err'); return; }
+      patch.premiere_date = date;
+    }
+    const year = Number($('#ceYear').value) || 0;
+    if (year !== orig.production_year) {
+      if (year <= 0) { toast('年份留空表示不修改，要清空请直接在 Emby 里改', 'err'); return; }
+      patch.production_year = year;
+    }
+    const tags = cnSplitList($('#ceTags').value);
+    if (tags.join('\u0001') !== orig.tags.join('\u0001')) patch.tags = tags;
+    const genres = cnSplitList($('#ceGenres').value);
+    if (genres.join('\u0001') !== orig.genres.join('\u0001')) patch.genres = genres;
+
+    if (!Object.keys(patch).length) { toast('没有改动', 'info'); return; }
+    ev.target.disabled = true;
+    try {
+      const r = await api('/api/items/update', {
+        method: 'POST',
+        body: Object.assign({ id: itemId }, patch),
+      });
+      toast('已保存：' + (r.updated || []).join(' / '), 'ok');
+      $('#drawerHost').innerHTML = '';
+      loadCnItems(S.cn.start);
+    } catch (e) {
+      toast(e.message, 'err');
+      ev.target.disabled = false;
+    }
+  };
+
+  $('#ceScrape').onclick = async (ev) => {
+    ev.target.disabled = true;
+    try {
+      const r = await api('/api/cn/scrape', {
+        method: 'POST',
+        body: {
+          id: itemId,
+          overwrite_images: $('#cnOverwriteImg').checked,
+          overwrite_title: $('#cnOverwriteTitle').checked,
+        },
+      });
+      toast(cnOutcome(r), r.applied ? 'ok' : 'err');
+      if (r.applied) { $('#drawerHost').innerHTML = ''; loadCnItems(S.cn.start); }
+      else ev.target.disabled = false;
+    } catch (e) { toast(e.message, 'err'); ev.target.disabled = false; }
+  };
 }
 
 // ---------------- 设置 ----------------
@@ -676,6 +959,9 @@ function fillSettings() {
   set('#stGfTree', c.gfriends_tree_url); set('#stGfCdn', c.gfriends_cdn);
   set('#stJb', c.javbus_url); set('#stJbCookie', c.javbus_cookie);
   set('#stJbInterval', c.javbus_interval_ms); set('#stConc', c.concurrency);
+  const cn = c.cn_sites || {};
+  set('#stCnXchina', cn.xchina); set('#stCnMadouqu', cn.madouqu);
+  set('#stCnMadou', cn.madou); set('#stCn7mmtv', cn['7mmtv']);
   set('#stProxy', c.proxy);
   $('#stInsecure').checked = !!c.insecure_tls;
   $('#stAutoRefresh').checked = !!c.auto_refresh;
@@ -697,6 +983,12 @@ async function saveSettings() {
     javbus_cookie: $('#stJbCookie').value.trim(),
     javbus_interval_ms: Number($('#stJbInterval').value) || 1500,
     concurrency: Number($('#stConc').value) || 4,
+    cn_sites: {
+      xchina: $('#stCnXchina').value.trim(),
+      madouqu: $('#stCnMadouqu').value.trim(),
+      madou: $('#stCnMadou').value.trim(),
+      '7mmtv': $('#stCn7mmtv').value.trim(),
+    },
     proxy: $('#stProxy').value.trim(),
     insecure_tls: $('#stInsecure').checked,
     auto_refresh: $('#stAutoRefresh').checked,
@@ -807,7 +1099,6 @@ function bind() {
   $$('#nav button').forEach((b) => b.onclick = () => switchView(b.dataset.view));
 
   $('#stReload').onclick = loadStats;
-  $('#stSize').onchange = loadStats;
   $('#lbSearch').onclick = () => loadItems(0);
   $('#lbQ').onkeydown = (e) => { if (e.key === 'Enter') loadItems(0); };
   $('#lbNoPoster').onchange = () => loadItems(0);
@@ -884,6 +1175,40 @@ function bind() {
   $('#jbScan').onclick = jbScan;
   $('#jbStar').onkeydown = (e) => { if (e.key === 'Enter') jbScan(); };
   $('#jbProbe').onclick = jbProbe;
+
+  $('#cnSearch').onclick = () => loadCnItems(0);
+  $('#cnQ').onkeydown = (e) => { if (e.key === 'Enter') loadCnItems(0); };
+  // 换库就清空选择 —— 上一个库勾中的 id 在新库里没有意义。
+  $('#cnLib').onchange = () => { S.cn.sel.clear(); loadCnItems(0); };
+  $('#cnMissing').onchange = () => loadCnItems(0);
+  $('#cnSelAll').onchange = (e) => {
+    const on = e.target.checked;
+    S.cn.items.forEach((it) => { if (on) S.cn.sel.add(it.Id); else S.cn.sel.delete(it.Id); });
+    // 只重画选中态，不重新请求：勾选是纯前端状态，走一趟网络纯属浪费。
+    $$('#cnGrid .mcard').forEach((card) => {
+      const pick = card.querySelector('input[data-act="cnpick"]');
+      if (pick) pick.checked = on;
+      card.classList.toggle('sel', on);
+    });
+    cnSyncSelUI();
+  };
+  $('#cnBatch').onclick = cnScrapeSelected;
+  $('#cnGrid').onclick = (e) => {
+    const card = e.target.closest('.mcard');
+    if (!card) return;
+    const pick = e.target.closest('input[data-act="cnpick"]');
+    if (pick) {
+      if (pick.checked) S.cn.sel.add(card.dataset.id);
+      else S.cn.sel.delete(card.dataset.id);
+      card.classList.toggle('sel', pick.checked);
+      cnSyncSelUI();
+      return;
+    }
+    const btn = e.target.closest('button[data-act]');
+    if (!btn || btn.disabled) return;
+    if (btn.dataset.act === 'cnscrape') cnScrapeOne(card.dataset.id, btn);
+    else openCnEditor(card.dataset.id);
+  };
 
   $('#stSave').onclick = saveSettings;
   $('#stTest').onclick = async () => {

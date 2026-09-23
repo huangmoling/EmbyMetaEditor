@@ -124,6 +124,7 @@
       <button data-view="library"><span class="ico">▤</span>媒体库刮削</button>
       <button data-view="persons"><span class="ico">☺</span>演员头像</button>
       <button data-view="javbus"><span class="ico">✓</span>番号补全</button>
+      <button data-view="cn"><span class="ico">◈</span>国产传媒</button>
       <button data-view="settings"><span class="ico">⚙</span>设置</button>
     </nav>
     <div class="foot">
@@ -145,7 +146,6 @@
         <div class="stat-grid" id="statGrid"></div>
         <div class="card">
           <h3>媒体库明细 <span class="spacer"></span>
-            <label class="switch"><input type="checkbox" id="stSize"> 统计体积（较慢）</label>
             <button class="btn btn-sm" id="stReload">刷新</button>
           </h3>
           <div class="scroll-x" id="stLibs"><div class="empty">尚未加载</div></div>
@@ -231,6 +231,28 @@
         </div>
       </section>
 
+      <!-- ---- 国产传媒 ---- -->
+      <section class="view" id="view-cn">
+        <div class="toolbar">
+          <select class="select" id="cnLib" style="width:190px" title="国产传媒专项刮削只在这个媒体库里生效"><option value="">请选择媒体库</option></select>
+          <input class="input grow" id="cnQ" placeholder="搜索片名 / 番号…">
+          <label class="switch"><input type="checkbox" id="cnMissing" checked> 只看缺封面</label>
+          <div class="sep"></div>
+          <button class="btn btn-primary" id="cnSearch">查询</button>
+        </div>
+        <div class="toolbar">
+          <span class="tag" id="cnCount">—</span>
+          <label class="switch"><input type="checkbox" id="cnSelAll"> 全选本页</label>
+          <span class="tag" id="cnSelCount">已选 0</span>
+          <div class="grow"></div>
+          <label class="switch"><input type="checkbox" id="cnOverwriteImg"> 覆盖已有封面</label>
+          <label class="switch"><input type="checkbox" id="cnOverwriteTitle"> 覆盖已有标题</label>
+          <button class="btn btn-primary" id="cnBatch">刮削选中</button>
+        </div>
+        <div class="grid" id="cnGrid"><div class="empty">先选一个媒体库，再点「查询」</div></div>
+        <div class="pager" id="cnPager"></div>
+      </section>
+
       <!-- ---- 设置 ---- -->
       <section class="view" id="view-settings">
         <div class="card">
@@ -278,6 +300,19 @@
           <div class="row">
             <div class="field"><label>请求间隔（毫秒）</label><input class="input" id="stJbInterval" type="number" min="300"></div>
             <div class="field"><label>并发数</label><input class="input" id="stConc" type="number" min="1" max="32"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>国产传媒站点</h3>
+          <div class="hint" style="margin-bottom:10px">四个站点的搜索页根地址。抓不到时可以换镜像域名，改完保存即可（不用重启）。</div>
+          <div class="row">
+            <div class="field"><label>xChina</label><input class="input" id="stCnXchina"></div>
+            <div class="field"><label>麻豆区 madouqu.com</label><input class="input" id="stCnMadouqu"></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>麻豆社 madou.club</label><input class="input" id="stCnMadou"></div>
+            <div class="field"><label>7mmtv.sx</label><input class="input" id="stCn7mmtv"></div>
           </div>
         </div>
 
