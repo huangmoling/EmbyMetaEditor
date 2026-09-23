@@ -1,8 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg" // 注册解码器，供 image.DecodeConfig 读取头像尺寸
+	_ "image/png"
+	"net/http"
+	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -400,6 +408,87 @@ func sortedKeys(m map[string]any) []string {
 
 // ---------- 演员头像刮削 ----------
 
+// matchGfriendEntry 在候选里找用户选中的那张头像。
+//
+// 前端传回的 file 是搜索接口给的**完整 URL**（handleGfSearch 把 File 覆写成 URL 后下发），
+// 而索引里的 File 是裸文件名（可能带 ?t= 时间戳）—— 直接 EqualFold 永远不相等。
+// 这里同时比对：裸文件名、完整 URL、URL 路径解码出来的文件名。
+func matchGfriendEntry(entries []GfriendEntry, file, cdn string) (GfriendEntry, bool) {
+	want := strings.TrimSpace(file)
+	if want == "" {
+		return GfriendEntry{}, false
+	}
+	wantBase := want
+	if u, err := url.Parse(want); err == nil && u.Path != "" {
+		p := u.Path
+		if un, err := url.PathUnescape(p); err == nil {
+			p = un
+		}
+		wantBase = path.Base(p)
+	}
+	if i := strings.Index(wantBase, "?"); i >= 0 {
+		wantBase = wantBase[:i]
+	}
+	for _, en := range entries {
+		if strings.EqualFold(en.File, want) ||
+			strings.EqualFold(en.File, wantBase) ||
+			strings.EqualFold(en.URL(cdn), want) {
+			return en, true
+		}
+	}
+	return GfriendEntry{}, false
+}
+
+// pickBestGfriends 并发下载全部候选头像，选**分辨率最高**的一张（对齐 Emby 官方
+// gfriends 插件「优先高清」的行为）。面积并列取字节数大的；读不出尺寸的按字节数比。
+// 下载 / 解析失败的候选直接跳过；全部失败才报错。手动指定 file 时候选只剩一张，行为不变。
+func pickBestGfriends(ctx context.Context, client *http.Client, entries []GfriendEntry, cdn string) ([]byte, string, string, error) {
+	type cand struct {
+		data []byte
+		ct   string
+		area int
+		en   GfriendEntry
+	}
+	sem := make(chan struct{}, 6) // 并发上限：一个演员的候选通常就几张
+	var wg sync.WaitGroup
+	ch := make(chan cand, len(entries))
+	for _, en := range entries {
+		wg.Add(1)
+		go func(en GfriendEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			d, c, err := fetchImageBytes(ctx, client, en.URL(cdn), "")
+			if err != nil || len(d) == 0 {
+				return
+			}
+			area := 0
+			if cfg, _, derr := image.DecodeConfig(bytes.NewReader(d)); derr == nil {
+				area = cfg.Width * cfg.Height
+			}
+			ch <- cand{data: d, ct: c, area: area, en: en}
+		}(en)
+	}
+	wg.Wait()
+	close(ch)
+
+	all := make([]cand, 0, len(entries))
+	for c := range ch {
+		all = append(all, c)
+	}
+	if len(all) == 0 {
+		return nil, "", "", errors.New("gfriends 候选头像全部下载失败")
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].area != all[j].area {
+			return all[i].area > all[j].area
+		}
+		return len(all[i].data) > len(all[j].data)
+	})
+	best := all[0]
+	return best.data, best.ct, best.en.Group + "/" + best.en.File, nil
+}
+
 // AvatarOptions 是头像刮削选项。
 type AvatarOptions struct {
 	Source    string `json:"source"` // auto / gfriends / metatube
@@ -461,12 +550,15 @@ func (a *App) ScrapePersonAvatar(ctx context.Context, personID, name string, opt
 		} else {
 			entries := a.gf.Lookup(res.Name)
 			if opts.File != "" {
-				for _, en := range entries {
-					if strings.EqualFold(en.File, opts.File) {
-						entries = []GfriendEntry{en}
-						break
-					}
+				// 用户手动选中的那张必须精确命中。前端传回的 file 是搜索接口给的
+				// **完整 URL**（handleGfSearch 会把 File 覆写成 URL），而索引里的
+				// File 是裸文件名 —— 之前直接 EqualFold 两者永远不等，静默回落成
+				// 第一张，就是「点谁都换不上去」的根因。现在匹配不到直接报错。
+				picked, ok := matchGfriendEntry(entries, opts.File, cfg.GfriendsCDN)
+				if !ok {
+					return nil, fmt.Errorf("gfriends 中没有找到所选头像 %q（演员 %q），请重新搜索后再选", opts.File, res.Name)
 				}
+				entries = []GfriendEntry{picked}
 			} else if opts.Group != "" {
 				filtered := entries[:0:0]
 				for _, en := range entries {
@@ -478,16 +570,13 @@ func (a *App) ScrapePersonAvatar(ctx context.Context, personID, name string, opt
 					entries = filtered
 				}
 			}
-			for _, en := range entries {
-				u := en.URL(cfg.GfriendsCDN)
-				data, ct, err := fetchImageBytes(ctx, e.HTTP, u, "")
-				if err != nil || len(data) == 0 {
+			if len(entries) > 0 {
+				data, ct, det, err := pickBestGfriends(ctx, e.HTTP, entries, cfg.GfriendsCDN)
+				if err != nil {
 					lastErr = err
-					continue
+				} else {
+					imgData, contentType, detail = data, ct, det
 				}
-				imgData, contentType = data, ct
-				detail = en.Group + "/" + en.File
-				break
 			}
 		}
 	}

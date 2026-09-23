@@ -19,9 +19,12 @@ type mockEmby struct {
 	mu       sync.Mutex
 	items    map[string]map[string]any
 	uploaded []string // "itemID/type/index/contentType/raw|b64"
-	deleted  []string // "itemID/type"
-	patched  map[string]map[string]any
-	persons  []Person
+	// bodies 记录每次上传的**解码后净荷**（b64 形式会先解码），
+	// 与 uploaded 一一对应 —— 用来断言「上传的到底是哪一张图」。
+	bodies  [][]byte
+	deleted []string // "itemID/type"
+	patched map[string]map[string]any
+	persons []Person
 	// personParent 模拟「演员 → 所属媒体库」的关系。真实 Emby 的 /Persons
 	// 支持 ParentId 过滤（实测：全局 10592 人 → 按库过滤后 464 / 2664 / 594 人），
 	// mock 必须照抄这个行为，否则「按库查看演员」的功能在单测里是假的。
@@ -229,6 +232,15 @@ func (m *mockEmby) recordUpload(id, typ, idx string, w http.ResponseWriter, r *h
 	}
 	m.mu.Lock()
 	m.uploaded = append(m.uploaded, id+"/"+typ+"/"+idx+"/"+ct+"/"+form)
+	if form == "b64" {
+		if dec, err := base64.StdEncoding.DecodeString(string(body)); err == nil {
+			m.bodies = append(m.bodies, dec)
+		} else {
+			m.bodies = append(m.bodies, body)
+		}
+	} else {
+		m.bodies = append(m.bodies, body)
+	}
 	if form == "b64" {
 		if it, ok := m.items[id]; ok {
 			tags, _ := it["ImageTags"].(map[string]any)
