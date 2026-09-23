@@ -4,7 +4,7 @@
 
 > **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.3 MB，无需安装任何运行库）
 >
-> **Docker** —— `huangmoling/emby-meta-editor`（linux/amd64 + arm64），一条命令起容器，见[「Docker 镜像」](#docker-镜像)。
+> **Docker** —— [`aag111/emby-meta-editor`](https://hub.docker.com/r/aag111/emby-meta-editor)（linux/amd64 + arm64），一条命令起容器，见[「Docker 镜像」](#docker-镜像)。
 >
 > 不想下载也可以从源码构建，见[「从源码构建」](#从源码构建)。
 
@@ -47,7 +47,7 @@ EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注�
 docker run -d --name emby-meta-editor \
   -p 127.0.0.1:8097:8097 \
   -v emby-data:/data \
-  huangmoling/emby-meta-editor:latest
+  aag111/emby-meta-editor:latest
 ```
 
 起来后浏览器访问 `http://127.0.0.1:8097`，配置存在命名卷 `emby-data` 里的 `config.json`。
@@ -370,6 +370,12 @@ python tools/verify_cn_view.py
 
 ## Docker 镜像
 
+已发布：**[`aag111/emby-meta-editor`](https://hub.docker.com/r/aag111/emby-meta-editor)**（公开，linux/amd64 + arm64，压缩后约 7.5 MB）
+
+```bash
+docker pull aag111/emby-meta-editor:latest
+```
+
 镜像定义在仓库根目录的 `Dockerfile`，两阶段构建：`golang:1.27-alpine` 里编译，
 只把二进制搬到 `alpine:3.22`（外加 `ca-certificates` + `tzdata`）。
 
@@ -390,8 +396,8 @@ python tools/verify_cn_view.py
 本地构建（有 Docker 的机器上）：
 
 ```bash
-docker build -t huangmoling/emby-meta-editor:latest .
-docker run --rm -p 127.0.0.1:8097:8097 -v emby-data:/data huangmoling/emby-meta-editor:latest
+docker build -t aag111/emby-meta-editor:latest .
+docker run --rm -p 127.0.0.1:8097:8097 -v emby-data:/data aag111/emby-meta-editor:latest
 ```
 
 ### 发布到 Docker Hub
@@ -413,9 +419,13 @@ git tag v1.0.8 && git push origin v1.0.8
 ```
 
 镜像标签由 tag 推导：`v1.0.8` → `1.0.8` / `1.0` / `1` / `latest`（`latest` 始终跟着最新正式版）。
+手动触发（`workflow_dispatch`）没有 tag 可比，只会推 `latest`。
 镜像名固定为 `<DOCKERHUB_USERNAME>/emby-meta-editor`，第一次推送时 Docker Hub 会自动创建仓库
-—— 所以 Docker Hub 的用户名改起来只动 secret，不用改代码；README 与 `docker-compose.yml` 里的
-`huangmoling/` 是默认值，换用户名时一并替换即可。
+（公开仓库，匿名即可拉取）—— 所以 Docker Hub 的用户名改起来只动 secret，不用改代码；
+README 与 `docker-compose.yml` 里写死的 `aag111/` 换用户名时一并替换即可。
+
+> **注意**：Docker Hub 用户名（`aag111`）和 GitHub 用户名（`huangmoling`）不是同一个，
+> 别照搬 GitHub 名去写镜像地址。
 
 ---
 

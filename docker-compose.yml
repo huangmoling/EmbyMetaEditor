@@ -6,8 +6,8 @@
 # 用法：docker compose up -d
 services:
   emby-meta-editor:
-    # 如果你的 Docker Hub 用户名不是 huangmoling，把这里换掉
-    image: huangmoling/emby-meta-editor:latest
+    # 如果你的 Docker Hub 用户名不是 aag111，把这里换掉
+    image: aag111/emby-meta-editor:latest
     container_name: emby-meta-editor
     restart: unless-stopped
 
