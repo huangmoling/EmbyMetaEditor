@@ -972,6 +972,13 @@ function fillSettings() {
   $('#stAutoRefresh').checked = !!c.auto_refresh;
   $('#stOverwrite').checked = !!c.overwrite_images;
   $('#stPath').textContent = c.config_path || '';
+  const av = $('#aboutVersion');
+  if (av) av.textContent = c.version || '';
+  const ar = $('#aboutRepo');
+  if (ar) {
+    ar.textContent = c.repo_url || '';
+    ar.href = c.repo_url || '#';
+  }
 }
 
 async function saveSettings() {

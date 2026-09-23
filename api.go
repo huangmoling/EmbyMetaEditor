@@ -147,6 +147,8 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		ConfigPath:  a.store.Path(),
 		LoggedIn:    cfg.Token != "",
 		DataDirPath: dataDir(),
+		Version:     appVersion,
+		RepoURL:     repoURL,
 	})
 }
 

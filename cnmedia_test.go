@@ -567,13 +567,14 @@ func TestCNApplyWritesFieldsAndCover(t *testing.T) {
 		t.Errorf("Tags = %v，期望 [91CM-014 果冻传媒]", patched["Tags"])
 	}
 	// 图片上传要走 base64 回退（mock 是严格构建）：
-	// 先发原始字节被 500 拒掉，再换 base64 —— 两次都会留记录，最后一条必须是 b64。
+	// 先发原始字节被 500 拒掉，再换 base64。封面（Primary）+ 缩略图（Thumb）
+	// 复用同一份字节各传一次，共 4 次请求记录，最后一条必须是 Thumb 的 b64。
 	if len(m.uploaded) == 0 {
 		t.Fatal("没有发生封面上传")
 	}
 	last := m.uploaded[len(m.uploaded)-1]
-	if !strings.Contains(last, "it-cn/Primary/-1/image/jpeg/b64") {
-		t.Errorf("封面上传最后一条 = %q，期望 base64 形态", last)
+	if !strings.Contains(last, "it-cn/Thumb/-1/image/jpeg/b64") {
+		t.Errorf("上传最后一条 = %q，期望缩略图 base64 形态", last)
 	}
 	b64 := 0
 	for _, u := range m.uploaded {
@@ -581,8 +582,8 @@ func TestCNApplyWritesFieldsAndCover(t *testing.T) {
 			b64++
 		}
 	}
-	if b64 != 1 {
-		t.Errorf("base64 上传次数 = %d，期望 1（回退成功就不该再试）", b64)
+	if b64 != 2 {
+		t.Errorf("base64 上传次数 = %d，期望 2（封面 + 缩略图各 1，回退成功就不该再试）", b64)
 	}
 }
 

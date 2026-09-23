@@ -44,3 +44,8 @@ __pycache__/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 本地诊断落盘数据（probe / 抓包 dump）
+.recent_*.json
+.probe_*.json
+.probe_analyze*.py

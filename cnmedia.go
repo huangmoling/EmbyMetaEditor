@@ -819,6 +819,9 @@ func (a *App) scrapeCNWith(ctx context.Context, cn *CNMedia, e *Emby, itemID, nu
 			pick.OrigTitle = origCNTitle
 		}
 	}
+	// 站点标题有时不带番号，写入 / 预览前主动补上（已带则不动）。
+	pick.Title = ensureNumberPrefix(pick.Title, res.Number)
+	res.Title = pick.Title
 
 	if len(matched) == 0 {
 		res.Message = "四个站点都没有该番号的精确结果"
@@ -905,6 +908,12 @@ func (a *App) applyCN(ctx context.Context, e *Emby, item Item, p *CNPicked, opts
 					notes = append(notes, "封面上传失败："+err.Error())
 				} else {
 					applied = append(applied, "封面")
+					// 缩略图（Thumb）复用同一份封面字节：Emby 列表 / 横版视图也有图。
+					if err := e.UploadImage(ctx, itemID, "Thumb", -1, data, ct); err != nil {
+						notes = append(notes, "缩略图上传失败："+err.Error())
+					} else {
+						applied = append(applied, "缩略图")
+					}
 				}
 			}
 		} else {

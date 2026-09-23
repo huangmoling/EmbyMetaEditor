@@ -410,7 +410,8 @@ func TestScrapeMovieEndToEnd(t *testing.T) {
 		t.Errorf("番号异常: %q", res.Number)
 	}
 	body := m.patched["m1"]
-	if body["Name"] != "中文标题" {
+	// 源标题「中文标题」不带番号，写入时应主动补上番号前缀
+	if body["Name"] != "SSIS-001 中文标题" {
 		t.Errorf("标题未写入: %v", body["Name"])
 	}
 	// JSON 往返后数字统一为 float64
@@ -425,10 +426,13 @@ func TestScrapeMovieEndToEnd(t *testing.T) {
 		t.Errorf("ProviderIds 未写入: %v", pids)
 	}
 
-	// 海报 + 2 张剧照
+	// 海报 + 缩略图 + 2 张剧照
 	joined := strings.Join(m.uploaded, " | ")
 	if !strings.Contains(joined, "m1/Primary/-1/image/jpeg") {
 		t.Errorf("未上传海报: %s", joined)
+	}
+	if !strings.Contains(joined, "m1/Thumb/-1/image/jpeg") {
+		t.Errorf("未上传缩略图: %s", joined)
 	}
 	if !strings.Contains(joined, "m1/Backdrop/0") || !strings.Contains(joined, "m1/Backdrop/1") {
 		t.Errorf("未上传剧照: %s", joined)
@@ -444,7 +448,7 @@ func TestScrapeMovieSkipsExistingImages(t *testing.T) {
 	app := testApp(t, m.srv.URL, mt.URL)
 	m.items["m1"] = map[string]any{
 		"Id": "m1", "Name": "SSIS-001", "Type": "Movie",
-		"ImageTags": map[string]any{"Primary": "t", "Backdrop": "b"},
+		"ImageTags": map[string]any{"Primary": "t", "Thumb": "h", "Backdrop": "b"},
 	}
 	if _, err := app.ScrapeMovie(context.Background(), "m1", ScrapeOptions{}); err != nil {
 		t.Fatalf("刮削失败: %v", err)

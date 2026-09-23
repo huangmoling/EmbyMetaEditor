@@ -432,9 +432,9 @@ func TestScrapeMovieTranslatesBeforeWrite(t *testing.T) {
 	if p == nil {
 		t.Fatal("没有写入 Emby")
 	}
-	// 关键断言：写入的标题 / 简介是翻译后的中文，不是原始的日文 / 英文。
-	if name, _ := p["Name"].(string); name != "译:女優の面接" {
-		t.Errorf("Name = %q，期望翻译后的「译:女優の面接」", name)
+	// 关键断言：写入的标题 / 简介是翻译后的中文，且番号保留在最前面。
+	if name, _ := p["Name"].(string); name != "SSIS-001 译:女優の面接" {
+		t.Errorf("Name = %q，期望「SSIS-001 译:女優の面接」", name)
 	}
 	if ov, _ := p["Overview"].(string); ov != "译:This is an English plot." {
 		t.Errorf("Overview = %q，期望翻译后的「译:This is an English plot.」", ov)
@@ -463,9 +463,9 @@ func TestScrapeMovieNoTranslationWhenDisabled(t *testing.T) {
 	if p == nil {
 		t.Fatal("没有写入 Emby")
 	}
-	// 没开翻译：标题应是原始日文（MetaTube 的 title 字段）。
-	if name, _ := p["Name"].(string); name != "女優の面接" {
-		t.Errorf("未开翻译时 Name 应为原始日文，实际 %q", name)
+	// 没开翻译：标题应是原始日文 + 主动补上的番号前缀（MetaTube 的 title 字段）。
+	if name, _ := p["Name"].(string); name != "SSIS-001 女優の面接" {
+		t.Errorf("未开翻译时 Name 应为「番号 + 原始日文」，实际 %q", name)
 	}
 	if *count != 0 {
 		t.Errorf("未开翻译不应请求翻译接口，实际 %d 次", *count)
@@ -593,5 +593,29 @@ func TestScrapeMovieKeepsNumberAndOriginalTitle(t *testing.T) {
 	}
 	if ot, _ := p["OriginalTitle"].(string); ot != "SSIS-001 女優の面接" {
 		t.Errorf("OriginalTitle = %q，期望日文原文「SSIS-001 女優の面接」", ot)
+	}
+}
+
+// ---------- ensureNumberPrefix（主动补番号前缀）----------
+
+func TestEnsureNumberPrefix(t *testing.T) {
+	cases := []struct {
+		title, number, want string
+	}{
+		{"女優の面接", "SSIS-001", "SSIS-001 女優の面接"},               // 没有番号 → 补上
+		{"SSIS-001 译:女優", "SSIS-001", "SSIS-001 译:女優"},        // 已带 → 不动
+		{"SSIS001 标题", "SSIS-001", "SSIS001 标题"},              // 压缩写法也算已带
+		{"ssis-1 标题", "SSIS-001", "ssis-1 标题"},                // 规范形式等价
+		{"街头搭讪", "91CM-014", "91CM-014 街头搭讪"},                 // 数字开头番号补上
+		{"91CM-014 街头", "91CM-014", "91CM-014 街头"},            // 已带 → 不动
+		{"Movie 2023", "010115-001", "010115-001 Movie 2023"}, // 纯数字番号走子串判断
+		{"010115-001 Movie", "010115-001", "010115-001 Movie"},
+		{"", "SSIS-001", ""},   // 空标题不处理
+		{"女優の面接", "", "女優の面接"}, // 无番号可用 → 原样
+	}
+	for _, c := range cases {
+		if got := ensureNumberPrefix(c.title, c.number); got != c.want {
+			t.Errorf("ensureNumberPrefix(%q, %q) = %q，期望 %q", c.title, c.number, got, c.want)
+		}
 	}
 }

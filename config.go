@@ -198,6 +198,8 @@ type publicConfig struct {
 	ConfigPath  string `json:"config_path"`
 	LoggedIn    bool   `json:"logged_in"`
 	DataDirPath string `json:"data_dir"`
+	Version     string `json:"version"`
+	RepoURL     string `json:"repo_url"`
 }
 
 // dataDir 决定配置与缓存存放目录。

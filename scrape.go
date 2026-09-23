@@ -93,12 +93,20 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 		}
 	}
 
+	// 标题保证以番号开头：MetaTube / 站点的源标题经常不带番号（纯日文标题、
+	// 站点自己的文案标题），v1.0.5 的翻译修复只能「保留」已有番号，
+	// 保不了本来就没有的 —— 用户看到的就是刮完标题里没有番号。
+	// 这里在写入前主动把已知番号补到最前面；标题里已有该番号（任意常见写法）则不动。
+	if n, ok := patch["Name"].(string); ok {
+		patch["Name"] = ensureNumberPrefix(n, res.Number)
+	}
+
 	if err := e.UpdateItem(ctx, itemID, patch); err != nil {
 		return nil, fmt.Errorf("写入元数据失败：%w", err)
 	}
 	res.Fields = sortedKeys(patch)
 
-	// 图片：海报 + 剧照
+	// 图片：海报 + 缩略图 + 剧照
 	hasPrimary := imageTagExists(item, "Primary")
 	hasBackdrop := imageTagExists(item, "Backdrop")
 	if opts.OverwriteImages || !hasPrimary {
@@ -109,6 +117,28 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 			res.Message = "海报上传失败：" + err.Error()
 		} else {
 			res.Images = append(res.Images, "Primary")
+		}
+	}
+	// 缩略图（Thumb）：Emby 列表 / 横版视图用的那张。优先横版剧照，没有就用封面。
+	if opts.OverwriteImages || !imageTagExists(item, "Thumb") {
+		thumbURL := previewURLAt(mv, 0)
+		if thumbURL == "" {
+			thumbURL = firstNonEmpty(mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
+		}
+		if thumbURL != "" {
+			data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, thumbURL)
+			switch {
+			case err != nil:
+				res.Message = appendScrapeNote(res.Message, "缩略图下载失败："+err.Error())
+			case len(data) == 0:
+				res.Message = appendScrapeNote(res.Message, "缩略图响应为空")
+			default:
+				if err := e.UploadImage(ctx, itemID, "Thumb", -1, data, ct); err != nil {
+					res.Message = appendScrapeNote(res.Message, "缩略图上传失败："+err.Error())
+				} else {
+					res.Images = append(res.Images, "Thumb")
+				}
+			}
 		}
 	}
 	if opts.OverwriteImages || !hasBackdrop {
@@ -130,6 +160,53 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 		res.Message = "刮削完成"
 	}
 	return res, nil
+}
+
+// appendScrapeNote 往结果消息上追加一条提示（首条直接赋值，后续用「；」连接）。
+func appendScrapeNote(msg, note string) string {
+	if msg == "" {
+		return note
+	}
+	return msg + "；" + note
+}
+
+// ensureNumberPrefix 保证标题以番号开头，没有就补上，已有则原样返回。
+//
+// 番号匹配用 numKeys 的规范形式（SSIS-001 / SSIS001 都算已有），
+// 纯数字番号（010115-001 这类规范不出前缀的）退化为子串判断。
+func ensureNumberPrefix(title, number string) string {
+	title = strings.TrimSpace(title)
+	number = strings.TrimSpace(number)
+	if title == "" || number == "" {
+		return title
+	}
+	want := canonNumber(number)
+	if want == "" {
+		// 纯数字番号（010115-001 这类）规范不出来，退化为子串判断
+		if strings.Contains(title, number) {
+			return title
+		}
+		return number + " " + title
+	}
+	for _, k := range numKeys(title) {
+		if k == want {
+			return title
+		}
+	}
+	// 标题最前面的番号允许 1 位数字的压缩写法（ssis-1）：
+	// numKeys 的正则要求 2 位以上数字兜不住，用 reCanon 再比一次。
+	if head, _ := splitLeadingNumber(title); head != "" {
+		if m := reCanon.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(head))); m != nil {
+			n := strings.TrimLeft(m[2], "0")
+			if n == "" {
+				n = "0"
+			}
+			if m[1]+"-"+n == want {
+				return title
+			}
+		}
+	}
+	return number + " " + title
 }
 
 // previewURLAt 取第 i 张剧照的直链（用于 MetaTube 代理失败时回退）。
