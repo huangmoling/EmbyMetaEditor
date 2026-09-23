@@ -366,16 +366,19 @@ func TestTranslateMetaEnabledTranslates(t *testing.T) {
 // ---------- 集成：ScrapeMovie 写入前翻译 ----------
 
 // japaneseMockMetaTube 返回一个「标题/简介都是非中文」的假 MetaTube，
-// 用来验证翻译确实发生在写入 Emby 之前。
-func japaneseMockMetaTube(t *testing.T) *httptest.Server {
+// 用来验证翻译确实发生在写入 Emby 之前。title 可指定（默认纯日文）。
+func japaneseMockMetaTube(t *testing.T, title string) *httptest.Server {
 	t.Helper()
+	if title == "" {
+		title = "女優の面接"
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/providers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"data": []string{"FANZA"}})
 	})
 	mux.HandleFunc("GET /v1/movies/search", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"data": []map[string]any{
-			{"id": "m-001", "number": "SSIS-001", "title": "女優の面接", "provider": "FANZA", "score": 8.0},
+			{"id": "m-001", "number": "SSIS-001", "title": title, "provider": "FANZA", "score": 8.0},
 		}})
 	})
 	mux.HandleFunc("GET /v1/movies/{provider}/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -385,7 +388,7 @@ func japaneseMockMetaTube(t *testing.T) *httptest.Server {
 		}
 		writeJSON(w, 200, map[string]any{"data": map[string]any{
 			"id": "m-001", "provider": "FANZA", "number": "SSIS-001",
-			"title": "女優の面接", "title_zh": "",
+			"title": title, "title_zh": "",
 			"actors": []string{"三上悠亜"},
 			"genres": []string{"剧情"},
 			"studio": "S1", "label": "S1", "series": "SSIS",
@@ -407,7 +410,7 @@ func japaneseMockMetaTube(t *testing.T) *httptest.Server {
 
 func TestScrapeMovieTranslatesBeforeWrite(t *testing.T) {
 	m := newMockEmby(t)
-	mt := japaneseMockMetaTube(t)
+	mt := japaneseMockMetaTube(t, "")
 	chat, _ := chatMock(t, http.StatusOK, true)
 	app := openaiApp(t, OpenAIConfig{BaseURL: chat.URL, APIKey: "test-key", Enabled: true}, m.srv.URL, mt.URL)
 
@@ -440,7 +443,7 @@ func TestScrapeMovieTranslatesBeforeWrite(t *testing.T) {
 
 func TestScrapeMovieNoTranslationWhenDisabled(t *testing.T) {
 	m := newMockEmby(t)
-	mt := japaneseMockMetaTube(t)
+	mt := japaneseMockMetaTube(t, "")
 	_, count := chatMock(t, http.StatusOK, true)
 	// 注意：这里故意传 Enabled=false，但把 BaseURL 也清空，模拟「完全没配翻译」。
 	app := openaiApp(t, OpenAIConfig{}, m.srv.URL, mt.URL)
@@ -466,5 +469,129 @@ func TestScrapeMovieNoTranslationWhenDisabled(t *testing.T) {
 	}
 	if *count != 0 {
 		t.Errorf("未开翻译不应请求翻译接口，实际 %d 次", *count)
+	}
+}
+
+// ---------- 番号保留 + 原标题保留（用户反馈修复）----------
+
+func TestSplitLeadingNumber(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantNum  string
+		wantRest string
+	}{
+		{"SSIS-001 女優の面接", "SSIS-001", "女優の面接"},
+		{"SSIS-001女優の面接", "SSIS-001", "女優の面接"},         // 番号后直接跟正文
+		{"SSIS-001", "SSIS-001", ""},                   // 纯番号
+		{"91CM-014 街头搭讪", "91CM-014", "街头搭讪"},          // 数字开头的国产番号
+		{"91CM074 标题", "91CM074", "标题"},                // 无分隔压缩形式
+		{"ABC_012 标题", "ABC_012", "标题"},                // 下划线分隔
+		{"女優の面接", "", "女優の面接"},                         // 没有番号
+		{"HEVC10 4K修复", "", "HEVC10 4K修复"},             // 压制组标记不是番号
+		{"MP4 Movie", "", "MP4 Movie"},                 // 容器标记不是番号
+		{"CD1 Partition", "", "CD1 Partition"},         // 分卷标记不是番号
+		{"Title 2023 续集", "", "Title 2023 续集"},         // 字母数字间有空格不算番号
+		{"FC2PPV-1234567 标题", "", "FC2PPV-1234567 标题"}, // FC2 特殊形式不硬拆
+		{"English Title", "", "English Title"},         // 纯英文无数字
+		{"4K修复版", "", "4K修复版"},                         // 字母不足 2 位
+		{"ssis-001 女優の面接", "ssis-001", "女優の面接"},        // 小写番号原样保留
+	}
+	for _, c := range cases {
+		num, rest := splitLeadingNumber(c.in)
+		if num != c.wantNum || rest != c.wantRest {
+			t.Errorf("splitLeadingNumber(%q) = (%q, %q)，期望 (%q, %q)",
+				c.in, num, rest, c.wantNum, c.wantRest)
+		}
+	}
+}
+
+func TestIsJapaneseOrKorean(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"女優の面接", true},
+		{"SSIS-001 女優の面接", true}, // 混排但有假名
+		{"아이돌 document", true},
+		{"中文标题", false},
+		{"English Only", false},
+		{"", false},
+		{"   ", false},
+	}
+	for _, c := range cases {
+		if got := isJapaneseOrKorean(c.in); got != c.want {
+			t.Errorf("isJapaneseOrKorean(%q) = %v，期望 %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestTranslateMetaPreservesLeadingNumber(t *testing.T) {
+	srv, count := chatMock(t, http.StatusOK, true)
+	app := openaiApp(t, OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Enabled: true}, "http://e", "http://m")
+
+	// chatMock 返回「译:」+ 收到的文本。译文若带番号前缀，
+	// 说明发送给翻译的只有番号后面的正文，番号是在本地拼回去的。
+	title, _, used := app.translateMeta(context.Background(), "SSIS-001 女優の面接", "")
+	if !used {
+		t.Fatal("应发起翻译")
+	}
+	if want := "SSIS-001 译:女優の面接"; title != want {
+		t.Errorf("标题 = %q，期望 %q（番号应原样保留在最前面）", title, want)
+	}
+	if *count != 1 {
+		t.Errorf("应发 1 次翻译请求，实际 %d", *count)
+	}
+
+	// 简介开头的番号同样保留（简介须是非中文才会翻，用日文示例）
+	_, ov, _ := app.translateMeta(context.Background(), "", "SSIS-001 女優の撮影風景")
+	if want := "SSIS-001 译:女優の撮影風景"; ov != want {
+		t.Errorf("简介 = %q，期望 %q", ov, want)
+	}
+}
+
+func TestTranslateMetaKeepsChineseTitleUntouched(t *testing.T) {
+	srv, count := chatMock(t, http.StatusOK, true)
+	app := openaiApp(t, OpenAIConfig{BaseURL: srv.URL, APIKey: "test-key", Enabled: true}, "http://e", "http://m")
+	// 已是中文（含汉字）→ needsTranslation 为 false，整条跳过，番号自然不动。
+	title, _, used := app.translateMeta(context.Background(), "91CM-014 街头搭讪", "")
+	if used {
+		t.Error("中文标题不应翻译")
+	}
+	if *count != 0 {
+		t.Errorf("不应请求翻译接口，实际 %d 次", *count)
+	}
+	if title != "91CM-014 街头搭讪" {
+		t.Errorf("标题应原样返回，实际 %q", title)
+	}
+}
+
+// 端到端：MetaTube 返回「番号 + 日文标题」，写入 Emby 的应是
+// Name=番号+中文译文、OriginalTitle=日文原文，两者都在。
+func TestScrapeMovieKeepsNumberAndOriginalTitle(t *testing.T) {
+	m := newMockEmby(t)
+	mt := japaneseMockMetaTube(t, "SSIS-001 女優の面接")
+	chat, _ := chatMock(t, http.StatusOK, true)
+	app := openaiApp(t, OpenAIConfig{BaseURL: chat.URL, APIKey: "test-key", Enabled: true}, m.srv.URL, mt.URL)
+
+	m.mu.Lock()
+	m.items["mm1"] = map[string]any{
+		"Id": "mm1", "Name": "SSIS-001 Actress Interview", "Type": "Movie",
+		"ImageTags": map[string]any{}, "ProviderIds": map[string]any{},
+		"Path": "/media/SSIS-001/SSIS-001.mp4",
+	}
+	m.mu.Unlock()
+
+	if _, err := app.ScrapeMovie(context.Background(), "mm1", ScrapeOptions{}); err != nil {
+		t.Fatalf("ScrapeMovie 不应出错：%v", err)
+	}
+	p := m.patched["mm1"]
+	if p == nil {
+		t.Fatal("没有写入 Emby")
+	}
+	if name, _ := p["Name"].(string); name != "SSIS-001 译:女優の面接" {
+		t.Errorf("Name = %q，期望「SSIS-001 译:女優の面接」（番号保留 + 标题翻译）", name)
+	}
+	if ot, _ := p["OriginalTitle"].(string); ot != "SSIS-001 女優の面接" {
+		t.Errorf("OriginalTitle = %q，期望日文原文「SSIS-001 女優の面接」", ot)
 	}
 }

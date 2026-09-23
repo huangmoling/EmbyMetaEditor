@@ -76,6 +76,12 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 		name, _ := patch["Name"].(string)
 		ov, _ := patch["Overview"].(string)
 		if name != "" || ov != "" {
+			// 日 / 韩原标题先存进 OriginalTitle：翻译后 Name 变中文，原文不丢。
+			//（buildItemPatch 只在「原标题 != 展示标题」时才设 OriginalTitle，
+			//  纯日文源两个值相同会漏设，翻译一开原文就丢了，这里补上。）
+			if isJapaneseOrKorean(name) {
+				patch["OriginalTitle"] = name
+			}
 			if nt, no, _ := a.translateMeta(ctx, name, ov); nt != "" || no != "" {
 				if name != "" {
 					patch["Name"] = nt

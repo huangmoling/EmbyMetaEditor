@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -245,7 +246,14 @@ func isMostlyASCII(s string) bool {
 
 // translateMeta 是 App 层入口：读配置，对标题 / 简介各做「非中文才翻」，
 // 错误时静默降级为原文（翻译是锦上添花，绝不该阻断刮削）。
-// 返回翻译后的值，以及本次是否真的发起了翻译。
+//
+// 番号保留：番号一般在标题最前面，AI 翻译常把它一起翻掉。翻译前先把前导番号剥离
+// （splitLeadingNumber），只翻其余部分，译完再拼回「番号 + 空格 + 译文」，番号原样不动。
+//
+// 原标题保留由调用方负责：翻译前用 isJapaneseOrKorean 判断标题是否日 / 韩，
+// 是则把原文写进 Emby 的 OriginalTitle 字段，翻译后 Name 变中文、原文不丢。
+//
+// 返回翻译后的标题、简介，以及本次是否真的发起了翻译。
 func (a *App) translateMeta(ctx context.Context, title, overview string) (string, string, bool) {
 	cfg := a.store.Get()
 	if !cfg.OpenAI.Ready() {
@@ -254,18 +262,84 @@ func (a *App) translateMeta(ctx context.Context, title, overview string) (string
 	cli := newOpenAIClient(cfg.OpenAI, newHTTPClient(cfg))
 	var used bool
 	if needsTranslation(title) {
-		if t, err := cli.Translate(ctx, title); err == nil && t != "" {
-			title = t
+		num, rest := splitLeadingNumber(title)
+		if t, err := cli.Translate(ctx, rest); err == nil && t != "" {
+			title = rejoinNumber(num, t)
 			used = true
 		}
 	}
 	if needsTranslation(overview) {
-		if o, err := cli.Translate(ctx, overview); err == nil && o != "" {
-			overview = o
+		num, rest := splitLeadingNumber(overview)
+		if o, err := cli.Translate(ctx, rest); err == nil && o != "" {
+			overview = rejoinNumber(num, o)
 			used = true
 		}
 	}
 	return title, overview, used
+}
+
+// isJapaneseOrKorean 判断文本是否含日文假名或谚文（用来决定要不要把原文存进 OriginalTitle）。
+func isJapaneseOrKorean(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 0x3040 && r <= 0x30FF) || (r >= 0xAC00 && r <= 0xD7A3) {
+			return true
+		}
+	}
+	return false
+}
+
+// reLeadingNumber 锚定文本开头的番号：
+//   - 可选数字前缀（91CM-014 / 18BT-123，国产传媒大量这种写法）
+//   - 字母前缀 2-10 位 + 可选 [-_] 分隔 + 数字（SSIS-001 / SSIS001）
+//
+// 字母与数字之间的分隔只认 [-_] 不认空格：否则 "Title 2023" 会被当成番号「Title-2023」。
+// Go 的 RE2 正则不支持前瞻，所以这里只捕获候选番号 + 剩余部分，
+// 「番号后不能紧跟字母」（避免 FC2PPV-123 被切成 FC2 + PPV-123）在代码里校验。
+var reLeadingNumber = regexp.MustCompile(`^((?:[0-9]{1,4})?[A-Za-z]{2,10}[-_]?[0-9]{1,6})([\s\S]*)$`)
+
+// reAlphaOnly 从候选番号里抠出纯字母部分，用来查 cnNoisePrefix 噪声表。
+var reAlphaOnly = regexp.MustCompile(`[^A-Za-z]`)
+
+// splitLeadingNumber 把文本最前面的番号剥出来，返回 (番号, 其余)。
+// 没识别到番号时返回 ("", 原文)。压制组 / 容器标记（HEVC10 / MP4 / CD1）不算番号，
+// 复用 cnmedia.go 的 cnNoisePrefix 噪声前缀表过滤。
+func splitLeadingNumber(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", ""
+	}
+	m := reLeadingNumber.FindStringSubmatch(s)
+	if m == nil {
+		return "", s
+	}
+	num, rest := m[1], m[2]
+	// 番号后面紧跟字母说明这个「番号」只是更长单词的前半截（FC2PPV-123 → FC2），不拆。
+	if rest != "" && isASCIILetter(rest[0]) {
+		return "", s
+	}
+	// 压制组 / 容器标记（HEVC10 / MP4 / CD1）不是番号，整段照翻。
+	if cnNoisePrefix[reAlphaOnly.ReplaceAllString(strings.ToUpper(num), "")] {
+		return "", s
+	}
+	return num, strings.TrimSpace(rest)
+}
+
+// isASCIILetter 判断字节是否为 ASCII 字母。
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// rejoinNumber 把番号拼回译文前面，番号为空则原样返回译文。
+func rejoinNumber(num, translated string) string {
+	translated = strings.TrimSpace(translated)
+	if num == "" {
+		return translated
+	}
+	return num + " " + translated
 }
 
 // ---- 错误类型 ----

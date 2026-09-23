@@ -691,6 +691,9 @@ type CNPicked struct {
 	CoverFrom string   `json:"cover_from"`
 	TagFrom   string   `json:"tag_from"`
 	DateFrom  string   `json:"date_from"`
+	// OrigTitle 是翻译前的原标题（仅当它是日 / 韩文时才有值），
+	// 随标题一起写进 Emby 的 OriginalTitle，原文不丢。
+	OrigTitle string `json:"orig_title,omitempty"`
 }
 
 // pickCN 按 cnSiteOrder 合并各站结果，**只认番号精确匹配的那几条**。
@@ -807,9 +810,14 @@ func (a *App) scrapeCNWith(ctx context.Context, cn *CNMedia, e *Emby, itemID, nu
 
 	// 翻译：把非中文标题翻成中文。dry-run 也翻，这样「命中预览」里就能看到中文标题，
 	// 方便判断要不要写。错误（配置缺失 / 接口挂）静默降级为原文，不影响刮削。
+	// 翻译前的标题若是日 / 韩文，记进 OrigTitle，applyCN 会把它写进 OriginalTitle。
+	origCNTitle := pick.Title
 	if t, _, _ := a.translateMeta(ctx, pick.Title, ""); t != "" && t != pick.Title {
 		pick.Title = t
 		res.Title = t
+		if isJapaneseOrKorean(origCNTitle) {
+			pick.OrigTitle = origCNTitle
+		}
 	}
 
 	if len(matched) == 0 {
@@ -849,6 +857,9 @@ func (a *App) applyCN(ctx context.Context, e *Emby, item Item, p *CNPicked, opts
 		cur, _ := item["Name"].(string)
 		if opts.OverwriteTitle || cnShouldSetTitle(cur, cnItemNumber(item)) {
 			patch["Name"] = p.Title
+			if p.OrigTitle != "" {
+				patch["OriginalTitle"] = p.OrigTitle
+			}
 			applied = append(applied, "标题")
 		} else {
 			notes = append(notes, "标题已存在且不像文件名，跳过")
