@@ -8,6 +8,7 @@ cache/
 
 # ===== 工具内部数据 =====
 .workbuddy-ai/
+.workbuddy/
 
 # ===== 真实环境截图 =====
 # 只保留 01–09 这批 mock 环境截图（README 引用的就是它们）。

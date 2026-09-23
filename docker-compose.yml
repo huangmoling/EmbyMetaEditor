@@ -1,0 +1,32 @@
+# 直接拉镜像跑，不需要本地有源码或 Dockerfile。
+#
+# 启动后浏览器访问 http://127.0.0.1:8097
+# 配置（Emby 地址 / 令牌、OpenAI key 等）在网页里填，存在挂载卷的 config.json 里。
+#
+# 用法：docker compose up -d
+services:
+  emby-meta-editor:
+    # 如果你的 Docker Hub 用户名不是 huangmoling，把这里换掉
+    image: huangmoling/emby-meta-editor:latest
+    container_name: emby-meta-editor
+    restart: unless-stopped
+
+    ports:
+      # 只绑本机回环。要给同局域网的其他设备用，把 "127.0.0.1:" 去掉 ——
+      # 但这个界面自身没有登录，谁都能打开并读到里面存的 Emby 凭据，别直接挂到公网。
+      - "127.0.0.1:8097:8097"
+
+    volumes:
+      # 用命名卷：Docker 会按镜像里的属主建目录，第一次启动就能写，不用手工 chown。
+      # 想改成宿主目录映射（方便直接看 config.json）就换成下面那行，并先执行
+      #   mkdir -p ./data && sudo chown 1000:1000 ./data
+      # （容器里是非 root 的 uid 1000）
+      - emby-data:/data
+      # - ./data:/data
+
+    environment:
+      # 容器里不需要浏览器，-open=false 是镜像默认 CMD 带的，这里不用重复写
+      - TZ=Asia/Shanghai
+
+volumes:
+  emby-data:

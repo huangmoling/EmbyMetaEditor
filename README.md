@@ -4,6 +4,8 @@
 
 > **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.3 MB，无需安装任何运行库）
 >
+> **Docker** —— `huangmoling/emby-meta-editor`（linux/amd64 + arm64），一条命令起容器，见[「Docker 镜像」](#docker-镜像)。
+>
 > 不想下载也可以从源码构建，见[「从源码构建」](#从源码构建)。
 
 围绕六件事：
@@ -36,6 +38,23 @@ EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注�
 ```
 
 首次启动会在程序目录生成 `config.json`（配置）和 `cache/`（gfriends 索引缓存，约 10 MB，下载一次可离线复用）。
+
+### 方式三：Docker
+
+本机或 NAS 上有 Docker / Docker Compose 的话，不用下载 exe，也不用源码：
+
+```bash
+docker run -d --name emby-meta-editor \
+  -p 127.0.0.1:8097:8097 \
+  -v emby-data:/data \
+  huangmoling/emby-meta-editor:latest
+```
+
+起来后浏览器访问 `http://127.0.0.1:8097`，配置存在命名卷 `emby-data` 里的 `config.json`。
+仓库里的 `docker-compose.yml` 是同一个东西的 compose 写法。
+
+> 命令里的 `-p 127.0.0.1:8097:8097` 只把端口暴露给本机。**想去掉 `127.0.0.1:` 给局域网访问前想清楚**：
+> 这个界面自身没有登录，谁打开都能操作、也能读到里面存着的 Emby 凭据。
 
 ### 使用顺序
 
@@ -349,6 +368,57 @@ python tools/verify_cn_view.py
 
 ---
 
+## Docker 镜像
+
+镜像定义在仓库根目录的 `Dockerfile`，两阶段构建：`golang:1.27-alpine` 里编译，
+只把二进制搬到 `alpine:3.22`（外加 `ca-certificates` + `tzdata`）。
+
+几个不显眼、但少一个就跑不起来的地方：
+
+- **`CGO_ENABLED=0`** —— 产物是纯静态 ELF（实测无 `PT_INTERP` / `PT_DYNAMIC`），
+  运行层不需要 glibc/musl，也不挑 libc 版本。
+- **运行层必须装 `ca-certificates`** —— Emby / MetaTube / javbus / gfriends 全是 HTTPS，
+  Go 在 Linux 上会去读 `/etc/ssl/certs/ca-certificates.crt`；这张表缺了**所有 TLS 请求都会证书校验失败**。
+  只把静态二进制丢进 `scratch` 是能启动的，但一出网就挂，这是最容易被忽略的坑。
+- **`-host 0.0.0.0` + `-open=false`** —— 只监听 `127.0.0.1` 的话端口映射进来的流量到不了；
+  容器里也没有浏览器，别让它去调 `xdg-open`。这两条写在镜像的默认 `CMD` 里。
+- **数据落在 `/data`**（`EMBYME_HOME`）—— `config.json` 与 `cache/` 都在卷里，容器重建不丢配置。
+- **非 root（uid 1000）运行** —— 用宿主目录映射而不是命名卷时，先 `chown 1000:1000`。
+- **`.dockerignore` 排掉了 `config.json` 与 `cache/`** —— 前者装着真实 Emby 令牌和 OpenAI key，
+  绝不该进构建上下文。
+
+本地构建（有 Docker 的机器上）：
+
+```bash
+docker build -t huangmoling/emby-meta-editor:latest .
+docker run --rm -p 127.0.0.1:8097:8097 -v emby-data:/data huangmoling/emby-meta-editor:latest
+```
+
+### 发布到 Docker Hub
+
+`.github/workflows/docker.yml` 在**打 `v*` tag 时**自动构建 `linux/amd64` + `linux/arm64`
+并推送到 Docker Hub；也可以在 Actions 页面手动触发（改完 Dockerfile 想先验一次，不用等发版）。
+
+首次使用需要配两个 secret（Settings → Secrets and variables → Actions）：
+
+| Secret | 值 |
+|---|---|
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_TOKEN` | 访问令牌（Account Settings → Personal access tokens，权限 **Read & Write**） |
+
+配好后打 tag 即发布：
+
+```bash
+git tag v1.0.8 && git push origin v1.0.8
+```
+
+镜像标签由 tag 推导：`v1.0.8` → `1.0.8` / `1.0` / `1` / `latest`（`latest` 始终跟着最新正式版）。
+镜像名固定为 `<DOCKERHUB_USERNAME>/emby-meta-editor`，第一次推送时 Docker Hub 会自动创建仓库
+—— 所以 Docker Hub 的用户名改起来只动 secret，不用改代码；README 与 `docker-compose.yml` 里的
+`huangmoling/` 是默认值，换用户名时一并替换即可。
+
+---
+
 ## 目录结构
 
 ```
@@ -368,6 +438,10 @@ console_windows.go   Windows 控制台切 UTF-8
 web/                 前端（原生 JS，无构建步骤）
 tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 演员按库筛选 / 磁力分页 / 国产传媒 / 夹具切取 / 实机冒烟
 app.ico              图标源文件
+Dockerfile           Docker 镜像定义（两阶段，静态链接）
+.dockerignore        排除 config.json / cache 等，别把凭据带进构建上下文
+docker-compose.yml   拉镜像运行的 compose 写法
+.github/workflows/docker.yml  打 tag 自动构建并推送 Docker Hub
 ```
 
 验证脚本一览：

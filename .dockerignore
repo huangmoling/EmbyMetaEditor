@@ -1,0 +1,35 @@
+# ===== 凭据：绝对不能进构建上下文 =====
+# config.json 里有真实的 Emby 令牌 / MetaTube 地址 / OpenAI key。
+# 虽然 Dockerfile 是多阶段构建（最终镜像只拿二进制），但构建上下文会进 builder 层缓存，
+# 也没必要把用户的凭据拷进容器。容器里的 config.json 由用户在挂载卷里另外生成。
+config.json
+
+# ===== 运行时缓存 =====
+# gfriends 索引约 10 MB，容器首次启动会自己重新下载到 /data/cache
+cache/
+
+# ===== 工具内部数据 =====
+.workbuddy/
+.workbuddy-ai/
+
+# ===== 版本控制 =====
+.git
+.gitignore
+
+# ===== Windows 构建产物（镜像里用不到）=====
+EmbyMetaEditor.exe
+EmbyMetaEditor.exe~
+emby-meta-editor.exe
+rsrc_windows_386.syso
+rsrc_windows_amd64.syso
+
+# ===== 真实环境截图（含真实媒体库内容）=====
+screenshots/
+
+# ===== 本地诊断落盘数据 =====
+.probe_*.json
+.recent_*.json
+
+# ===== Python 字节码缓存 =====
+__pycache__/
+*.pyc
