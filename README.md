@@ -324,7 +324,7 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 
 单文件 exe，前端资源（`web/`）和图标（`rsrc_windows_amd64.syso`）都通过 `go:embed` / PE 资源嵌进去了，拷走 exe 就能跑。
 
-加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（v1.0.8 的 md5 `38378a4d9099e914203484d90d87251a`）。
+加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（v1.0.9 的 md5 `2b1c342322b667d364dba15bcfd42070`）。
 不加这个参数的话 Go 会往产物里嵌当前 commit 的 VCS 信息，体积和哈希都会变 —— 那是正常的，不是源码漂移。
 
 跑测试：
@@ -397,6 +397,16 @@ python tools/verify_images.py
 `<img>` 都走了服务端代理且 `naturalWidth > 0`，最后截图到 `screenshots/`。
 覆盖三处：番号补全的缺失番号封面、MetaTube 搜索结果的封面、gfriends 头像库的缩略图。
 
+「选择头像」弹窗是 `imgSrc()` 的**第四个**调用点，上面那条覆盖不到，单独跑：
+
+```bash
+python tools/verify_gfriends_pick.py
+```
+
+它点演员卡片上的「选择」打开弹窗、用固定关键词搜一次，断言 `#pkList` 里每张候选图
+都走了 `/api/img`、`naturalWidth > 0`，并检查没有 CSP 拦截报错 —— 这个 bug 用命令行
+查不出来（CDN 外链 `curl` 是 200，只有浏览器会被 `img-src 'self'` 拦掉）。
+
 演员按媒体库筛选的**交互**回归（同样需要无头 Edge + 真实 config.json）：
 
 ```bash
@@ -468,6 +478,10 @@ docker pull aag111/emby-meta-editor:latest
   不传也能起，容器会自动生成随机密码并打到日志里（`docker logs`）；传了就每次启动都覆盖，
   这是忘了密码之后唯一的找回入口。
 - **容器重启后需要重新登录** —— 会话存在进程内存里，不落盘（安全换来的代价）。
+- **改了 `web/` 下的任何东西，必须重新打镜像** —— 前端是 `go:embed` 编进二进制的，
+  源码修对了不等于镜像修对了。这是**唯一**一种「CI 全绿、镜像能拉、容器能起，但界面还是坏的」
+  的故障：v1.0.8 的镜像就这么带着 gfriends 头像弹窗的 bug 发出去了。
+  `tools/verify_docker_image.py` 现在会解开镜像层、在二进制里实查内嵌前端，专门守这一条。
 
 本地构建（有 Docker 的机器上）：
 
@@ -491,10 +505,10 @@ docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/
 配好后打 tag 即发布：
 
 ```bash
-git tag v1.0.8 && git push origin v1.0.8
+git tag v1.0.9 && git push origin v1.0.9
 ```
 
-镜像标签由 tag 推导：`v1.0.8` → `1.0.8` / `1.0` / `1` / `latest`（`latest` 始终跟着最新正式版）。
+镜像标签由 tag 推导：`v1.0.9` → `1.0.9` / `1.0` / `1` / `latest`（`latest` 始终跟着最新正式版）。
 手动触发（`workflow_dispatch`）没有 tag 可比，只会推 `latest`。
 镜像名固定为 `<DOCKERHUB_USERNAME>/emby-meta-editor`，第一次推送时 Docker Hub 会自动创建仓库
 （公开仓库，匿名即可拉取）—— 所以 Docker Hub 的用户名改起来只动 secret，不用改代码；
@@ -599,6 +613,7 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | 国产传媒条目的角标显示 `CM-014`，不是 `91CM-014` | 通用番号正则要求「字母前缀 + 数字」，数字开头的番号被当成噪声前缀截掉了。**影响面比想象中大** —— 角标、写入的 `Tags`、搜索关键词全都用的是它 | `itemNumber()` 先跑国产传媒专用的 `cnExtractNumber`（允许 0–4 位数字前缀），命中且前缀更长时优先返回；同时把 `HEVC10 1080P` 这类压制组标记加进噪声前缀表过滤掉 |
 | 国产传媒封面在页面上全是白框，但 `/api/img` 明明返回 200 | `upload.xchina.io` 对**浏览器**返回 Cloudflare 挑战页（页面报 `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`），而服务端带浏览器 UA 去取就是正常图片 | 把国产传媒的图床加进 `imageproxy.go` 的代理白名单，浏览器只跟本机 `/api/img` 打交道 |
 | 加访问认证后所有海报 / 头像变成空白 | 图片原来是浏览器**直连 Emby**（`<img src>` 里拼 `api_key`），现在收紧了 CSP（`img-src 'self'`）且令牌不再进 DOM，残留的直连地址一律取不到图 | Emby 图片统一走服务端代取 `/api/emby/image`（复用图片代理的 6 小时缓存），前端 `embyImg()` 只产出同源地址；`tools/verify_emby_image.py` 与直连 Emby 逐字节比对 |
+| 「选择头像」弹窗里 gfriends 搜索结果**全是破图**，但 `curl` 那些 CDN 地址都是 200 | 这个弹窗是全项目**唯一**漏掉 `imgSrc()` 的图片渲染点，`<img src>` 直接写了 CDN 外链；上面那条把 CSP 收紧成 `img-src 'self'` 之后就被浏览器静默拦掉了（同页面里其他图片都走了代理，所以看着像"个别地址坏了"） | 弹窗改走 `imgSrc(en.f)` → 同源 `/api/img?u=…`（服务端代取 + 6h 缓存）；`tools/check_frontend.py` 新增一条静态规则，扫出所有没走 `imgSrc()` / `embyImg()` 的 `<img>` 模板，防止同类回归
 | 登录失败**两次**之后，本人输对密码也被挡 | 退避表取了 `idx = fails`，第二次失败就吃到 3 秒锁，「前两次不罚」形同虚设 | 改成 `idx = fails - 1`；`tools/smoke_auth.py` 把「连续失败才退避」固定成断言 |
 | 「保存设置」把存好的 Emby API Key / javbus cookie 抹掉了 | `/api/config` 不再下发明文密钥后，前端输入框本来就是空的，后端却还在无条件赋值 —— 空串被当成「清空」 | 密钥一律「留空 = 不修改」（含 `/api/emby/login` 里的 API Key），`smoke_auth.py` 有一条断言专门守着它 |
 | 修完「数字开头番号」之后，**每个 mp4 条目都多出一个「番号 `MP-4`」** | 为了支持 `91CM-014` 放宽了正则（允许数字前缀、数字部分只要求 1 位），结果 `.mp4` 被拆成 `MP` + `4`。角标、写进 `Tags` 的内容、javbus 搜索关键词全跟着错 —— 修之前抽样 200 条「有番号」的有 196 条 | `numberSourceFields()` 抽番号前先抹掉文件扩展名（`reFileExt`），并把 `MP` / `CD` 这类容器 / 分卷标记加进 `cnNoisePrefix`。回归用例 `TestCNItemNumberIgnoresFileExtension` 守着 |
