@@ -50,7 +50,29 @@ type Config struct {
 	OverwriteImages bool   `json:"overwrite_images"`
 	Concurrency     int    `json:"concurrency"`
 	JavBusInterval  int    `json:"javbus_interval_ms"`
+
+	// ---- 界面访问认证 ----
+	// 保护的是「谁能打开这个界面」，和上面的 Emby 登录完全是两回事。
+	Auth AuthConfig `json:"auth"`
 }
+
+// AuthConfig 是界面自己的登录凭据。
+//
+// 只存派生的密码哈希（见 auth.go 的 hashPassword），**不存明文**：
+// config.json 会被备份、会被挂进卷里、偶尔还会被人贴出来求助，
+// 明文密码进去就等于泄漏。
+//
+// 密码从哪来见 auth.go 顶部的说明（环境变量 > 配置 > 首次自动生成）。
+type AuthConfig struct {
+	Username     string `json:"username"`
+	PasswordHash string `json:"password_hash"`
+	// Generated 表示当前用的还是首次启动自动生成的那个密码，
+	// 界面上会提示「建议改掉」，改过之后置 false。
+	Generated bool `json:"password_generated"`
+}
+
+// DefaultAuthUsername 是没配置用户名时的默认值。
+const DefaultAuthUsername = "admin"
 
 // OpenAIConfig 是翻译功能的配置。
 //
@@ -127,6 +149,9 @@ func (c *Config) normalize() {
 	if c.DeviceID == "" {
 		c.DeviceID = randHex(8)
 	}
+	if strings.TrimSpace(c.Auth.Username) == "" {
+		c.Auth.Username = DefaultAuthUsername
+	}
 	c.EmbyURL = strings.TrimRight(strings.TrimSpace(c.EmbyURL), "/")
 	c.MetaTubeURL = strings.TrimRight(strings.TrimSpace(c.MetaTubeURL), "/")
 	c.JavBusURL = strings.TrimRight(strings.TrimSpace(c.JavBusURL), "/")
@@ -192,14 +217,71 @@ func (s *Store) save() error {
 // Path 返回配置文件路径。
 func (s *Store) Path() string { return s.path }
 
-// publicConfig 是返回给前端的结构（隐藏内部 token 细节可保留，此处本地工具直接透出便于编辑）。
+// publicConfig 是返回给前端的配置。
+//
+// **敏感字段一律置空**：Emby 账号密码、API Key、令牌、MetaTube token、
+// javbus cookie、OpenAI key —— 它们每一个都等于**另一个系统**的权限，
+// 没有任何理由跟着页面进浏览器内存（何况还有浏览器插件、截图、复制粘贴这些外溢口）。
+// 前端拿不到值，只能通过 Secrets 里的一组布尔值显示「已保存，留空则不修改」。
+//
+// 挡住未登录访问的是 guard 中间件，这里做的是第二层：即使登录了也不下发。
 type publicConfig struct {
 	Config
-	ConfigPath  string `json:"config_path"`
-	LoggedIn    bool   `json:"logged_in"`
-	DataDirPath string `json:"data_dir"`
-	Version     string `json:"version"`
-	RepoURL     string `json:"repo_url"`
+	ConfigPath  string      `json:"config_path"`
+	LoggedIn    bool        `json:"logged_in"`
+	DataDirPath string      `json:"data_dir"`
+	Version     string      `json:"version"`
+	RepoURL     string      `json:"repo_url"`
+	Secrets     secretFlags `json:"secrets"`
+	Auth        authPublic  `json:"auth"`
+}
+
+// secretFlags 说明哪些敏感项已经存过了（值本身不下发）。
+type secretFlags struct {
+	EmbyPassword  bool `json:"emby_password"`
+	EmbyAPIKey    bool `json:"emby_api_key"`
+	EmbyToken     bool `json:"emby_token"`
+	MetaTubeToken bool `json:"metatube_token"`
+	JavBusCookie  bool `json:"javbus_cookie"`
+	OpenAIAPIKey  bool `json:"openai_api_key"`
+}
+
+// authPublic 是界面自己能看到的认证信息，同样不含哈希。
+type authPublic struct {
+	Username  string `json:"username"`
+	Generated bool   `json:"password_generated"`
+}
+
+// Public 返回脱敏后的配置副本，供 /api/config 使用。
+func (s *Store) Public() publicConfig {
+	c := s.Get()
+	cfg := publicConfig{
+		LoggedIn:    c.Token != "",
+		ConfigPath:  s.Path(),
+		DataDirPath: dataDir(),
+		Version:     appVersion,
+		RepoURL:     repoURL,
+		Secrets: secretFlags{
+			EmbyPassword:  c.Password != "",
+			EmbyAPIKey:    c.APIKey != "",
+			EmbyToken:     c.Token != "",
+			MetaTubeToken: c.MetaTubeToken != "",
+			JavBusCookie:  c.JavBusCookie != "",
+			OpenAIAPIKey:  c.OpenAI.APIKey != "",
+		},
+		Auth: authPublic{Username: c.Auth.Username, Generated: c.Auth.Generated},
+	}
+
+	c.Password = ""
+	c.APIKey = ""
+	c.Token = ""
+	c.MetaTubeToken = ""
+	c.JavBusCookie = ""
+	c.OpenAI.APIKey = ""
+	// 密码哈希虽然是派生的，也没必要出门 —— 不下发就少一次离线爆破的机会。
+	c.Auth.PasswordHash = ""
+	cfg.Config = c
+	return cfg
 }
 
 // dataDir 决定配置与缓存存放目录。

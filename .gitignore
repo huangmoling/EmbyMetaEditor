@@ -11,10 +11,11 @@ cache/
 .workbuddy/
 
 # ===== 真实环境截图 =====
-# 只保留 01–09 这批 mock 环境截图（README 引用的就是它们）。
+# 只保留 00–09 这批 mock 环境的截图（README 引用的就是它们）。
 # 其余一律不入库 —— 10 号之后都是在真实 Emby 上截的，含真实媒体库内容。
 # 用「白名单」写法而不是逐个列黑名单：以后新截图默认被忽略，不会漏。
 screenshots/*
+!screenshots/00-*.png
 !screenshots/01-*.png
 !screenshots/02-*.png
 !screenshots/03-*.png

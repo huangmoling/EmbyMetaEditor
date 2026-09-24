@@ -39,6 +39,11 @@ COPY --from=build /out/EmbyMetaEditor /usr/local/bin/EmbyMetaEditor
 
 # 数据目录：config.json（配置）+ cache/（gfriends 索引，约 10 MB）
 # 用环境变量固定住，进程不管从哪里启动都会写到挂载卷里
+#
+# 访问认证：进程启动时会读 EMBYME_AUTH_USER / EMBYME_AUTH_PASSWORD
+# （用 docker run -e 或 compose 的 environment 传进来）。都不传的话会生成一个
+# 随机密码打到日志，`docker logs <容器>` 第一屏就能看到。
+# 凭据只从运行时注入，不写进镜像 —— 镜像里任何东西都是公开可拉的。
 ENV EMBYME_HOME=/data \
     TZ=Asia/Shanghai
 

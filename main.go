@@ -44,6 +44,19 @@ func main() {
 		fatal("加载内置前端资源失败: %v", err)
 	}
 	app := NewApp(store, webFS)
+	initialPassword := app.BootstrapAuth()
+	if initialPassword != "" {
+		// 首次启动：密码只在这里出现一次（配置里存的是派生值，找不回来），
+		// 提示要显眼 —— 用户没抄到就只能按 README 的办法重置。
+		fmt.Println()
+		fmt.Println("  ############################################################")
+		fmt.Println("  #  首次启动，已生成访问密码（只显示这一次，请立即保存）    #")
+		fmt.Println("  ############################################################")
+		fmt.Printf("     用户名 : %s\n", store.Get().Auth.Username)
+		fmt.Printf("     密码   : %s\n", initialPassword)
+		fmt.Println("     登录后可在「设置 → 访问认证」里修改。")
+		fmt.Println("  ############################################################")
+	}
 
 	addr := net.JoinHostPort(*host, itoa(*port))
 	ln, err := net.Listen("tcp", addr)
@@ -52,7 +65,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Handler:           app.route(),
+		Handler:           app.handler(),
 		ReadHeaderTimeout: 20 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -66,6 +79,7 @@ func main() {
 	fmt.Printf("    控制台地址 : %s\n", url)
 	fmt.Printf("    数据目录   : %s\n", base)
 	fmt.Printf("    配置文件   : %s\n", store.Path())
+	fmt.Printf("    访问账号   : %s\n", store.Get().Auth.Username)
 	fmt.Println("  ============================================================")
 	fmt.Println("    按 Ctrl+C 退出")
 	fmt.Println()

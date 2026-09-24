@@ -29,6 +29,11 @@ const S = {
   watching: {},
 };
 
+// AUTH_API 是认证自己的接口：它们必须自己处理 401（api() 遇到 401 会去拉登录门，
+// 若在这里也走同一条路就会自己套自己）。
+const AUTH_API = ['/api/auth/status', '/api/auth/login', '/api/auth/logout', '/api/auth/password'];
+const isAuthAPI = (p) => AUTH_API.indexOf(p) >= 0;
+
 // ---------------- 请求封装 ----------------
 async function api(path, opts) {
   const o = Object.assign({ headers: {} }, opts || {});
@@ -39,6 +44,12 @@ async function api(path, opts) {
   const res = await fetch(path, o);
   let json = null;
   try { json = await res.json(); } catch (e) { /* 非 JSON */ }
+  // 401 = 会话过期或没登录（后端 guard 中间件给的）。先把登录门拉回来再抛错，
+  // 否则用户只会看到一串「请求失败：HTTP 401」，不知道要去登录。
+  if (res.status === 401 && !isAuthAPI(path)) {
+    showAuthGate('登录状态已失效，请重新登录');
+    throw new Error('请先登录');
+  }
   if (!res.ok || (json && json.ok === false)) {
     const msg = (json && json.error) || ('请求失败：HTTP ' + res.status);
     throw new Error(msg);
@@ -57,11 +68,111 @@ function toast(msg, kind) {
 
 const num = (n) => (n == null ? '0' : Number(n).toLocaleString('zh-CN'));
 
+// ---------------- 访问认证 ----------------
+// 这是**进程自己的**登录（保护「谁能打开这个界面」），和 Emby 登录是两回事：
+// 后端 guard 中间件会拦住所有未登录的 /api/ 请求，所以没登录时这个页面
+// 拿不到任何数据，能做的只有登录。
+function showAuthGate(msg) {
+  $('#app').classList.add('hidden');
+  $('#login').classList.add('hidden');
+  $('#authGate').classList.remove('hidden');
+  const box = $('#agAlert');
+  if (msg) { box.textContent = msg; box.classList.remove('hidden'); }
+  else { box.classList.add('hidden'); }
+}
+
+// authStatus 用裸 fetch：它必须在「还没登录」的状态下就能调通，
+// 不能走 api()（那个遇到 401 会去拉登录门，会自己套自己）。
+async function authStatus() {
+  const res = await fetch('/api/auth/status', { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const j = await res.json();
+  if (!j || j.ok === false) throw new Error((j && j.error) || '无法获取登录状态');
+  return j.data;
+}
+
+async function doAuthLogin() {
+  const btn = $('#agBtn');
+  const box = $('#agAlert');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> 登录中…';
+  box.classList.add('hidden');
+  try {
+    await api('/api/auth/login', {
+      method: 'POST',
+      body: { username: $('#agUser').value.trim(), password: $('#agPass').value },
+    });
+    $('#agPass').value = '';
+    $('#authGate').classList.add('hidden');
+    await startApp();
+  } catch (e) {
+    box.textContent = e.message;
+    box.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登录';
+  }
+}
+
+async function doAuthLogout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { /* 会话可能已失效 */ }
+  S.cfg = null;
+  $('#app').classList.add('hidden');
+  showAuthGate('已退出登录');
+}
+
+// saveAuth 改访问用户名 / 密码。旧密码必填（拿到别人没锁屏的浏览器也不能直接换掉）。
+async function saveAuth() {
+  const btn = $('#stAuthSave');
+  const msg = $('#stAuthMsg');
+  btn.disabled = true;
+  msg.textContent = '保存中…';
+  msg.style.color = '';
+  try {
+    await api('/api/auth/password', {
+      method: 'POST',
+      body: {
+        username: $('#stAuthUser').value.trim(),
+        old_password: $('#stAuthOld').value,
+        new_password: $('#stAuthNew').value,
+      },
+    });
+    $('#stAuthOld').value = '';
+    $('#stAuthNew').value = '';
+    await loadConfig();
+    fillSettings();
+    msg.textContent = '已保存，其他设备上的登录已失效';
+    msg.style.color = 'var(--success)';
+    toast('访问凭据已更新', 'ok');
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// markSecret 处理「值不下发前端」的输入框。
+// 后端不再把已保存的密钥发给页面，所以输入框只能是空的 ——
+// 留空提交 = 不修改（这是后端的规则），框里换成提示语说明这一点。
+function markSecret(id, saved) {
+  const el = $(id);
+  if (!el) return;
+  if (el.dataset.ph == null) el.dataset.ph = el.placeholder || '';
+  el.value = '';
+  el.placeholder = saved ? '已保存，留空则不修改' : el.dataset.ph;
+  el.classList.toggle('saved', !!saved);
+}
+
 // ---------------- Emby 图片地址 ----------------
+// 图片统一由服务端带着令牌去 Emby 取（/api/emby/image）。
+// 原来是直接把 token 拼进 <img src> 的 api_key 参数里 ——
+// 那等于把 Emby 的管理员权限印在 DOM 上，截图、复制图片地址都会带出去；
+// 顺带还解决了「页面是 http、Emby 是 https 自签证书」被浏览器拦掉的问题。
 function embyImg(itemId, tag, h) {
-  if (!S.cfg || !S.cfg.emby_url || !tag) return '';
-  return S.cfg.emby_url.replace(/\/$/, '') + '/Items/' + itemId + '/Images/Primary?maxHeight=' +
-    (h || 300) + '&quality=90&tag=' + encodeURIComponent(tag) + '&api_key=' + encodeURIComponent(S.cfg.token || '');
+  if (!itemId || !tag) return '';
+  return '/api/emby/image?id=' + encodeURIComponent(itemId) +
+    '&type=Primary&h=' + (h || 300) + '&tag=' + encodeURIComponent(tag);
 }
 function personImg(p, h) {
   const tag = p.ImageTags && p.ImageTags.Primary;
@@ -953,11 +1064,15 @@ async function openCnEditor(itemId) {
 // ---------------- 设置 ----------------
 function fillSettings() {
   const c = S.cfg || {};
+  const sec = c.secrets || {};
   const set = (id, v) => { const el = $(id); if (el) el.value = v == null ? '' : v; };
-  set('#stUrl', c.emby_url); set('#stUser', c.username); set('#stKey', c.api_key);
-  set('#stMt', c.metatube_url); set('#stMtToken', c.metatube_token);
+  set('#stUrl', c.emby_url); set('#stUser', c.username);
+  markSecret('#stKey', sec.emby_api_key);
+  set('#stMt', c.metatube_url);
+  markSecret('#stMtToken', sec.metatube_token);
   set('#stGfTree', c.gfriends_tree_url); set('#stGfCdn', c.gfriends_cdn);
-  set('#stJb', c.javbus_url); set('#stJbCookie', c.javbus_cookie);
+  set('#stJb', c.javbus_url);
+  markSecret('#stJbCookie', sec.javbus_cookie);
   set('#stJbInterval', c.javbus_interval_ms); set('#stConc', c.concurrency);
   const cn = c.cn_sites || {};
   set('#stCnXchina', cn.xchina); set('#stCnMadouqu', cn.madouqu);
@@ -965,12 +1080,13 @@ function fillSettings() {
   set('#stProxy', c.proxy);
   const oai = c.openai || {};
   set('#stOaiUrl', oai.base_url);
-  set('#stOaiKey', oai.api_key);
+  markSecret('#stOaiKey', sec.openai_api_key);
   set('#stOaiModel', oai.model);
   $('#stOaiOn').checked = !!oai.enabled;
   $('#stInsecure').checked = !!c.insecure_tls;
   $('#stAutoRefresh').checked = !!c.auto_refresh;
   $('#stOverwrite').checked = !!c.overwrite_images;
+  set('#stAuthUser', (c.auth || {}).username);
   $('#stPath').textContent = c.config_path || '';
   const av = $('#aboutVersion');
   if (av) av.textContent = c.version || '';
@@ -1050,15 +1166,16 @@ async function testOpenAI() {
 async function loadConfig() {
   S.cfg = await api('/api/config');
   const c = S.cfg;
+  const sec = c.secrets || {};
   $('#lgUrl').value = c.emby_url || '';
   $('#lgUser').value = c.username || '';
-  $('#lgKey').value = c.api_key || '';
+  markSecret('#lgKey', sec.emby_api_key);
   $('#lgMt').value = c.metatube_url || '';
-  $('#lgMtToken').value = c.metatube_token || '';
+  markSecret('#lgMtToken', sec.metatube_token);
   $('#lgGfTree').value = c.gfriends_tree_url || '';
   $('#lgGfCdn').value = c.gfriends_cdn || '';
   $('#lgJb').value = c.javbus_url || '';
-  $('#lgJbCookie').value = c.javbus_cookie || '';
+  markSecret('#lgJbCookie', sec.javbus_cookie);
   $('#lgProxy').value = c.proxy || '';
   $('#lgConc').value = c.concurrency || 4;
   $('#lgInsecure').checked = !!c.insecure_tls;
@@ -1131,6 +1248,13 @@ async function doLogin() {
 
 // ---------------- 事件绑定 ----------------
 function bind() {
+  // 访问认证（进程自己的登录）
+  $('#agBtn').onclick = doAuthLogin;
+  $('#agPass').onkeydown = (e) => { if (e.key === 'Enter') doAuthLogin(); };
+  $('#agUser').onkeydown = (e) => { if (e.key === 'Enter') $('#agPass').focus(); };
+  $('#sbLogout').onclick = doAuthLogout;
+  $('#stAuthSave').onclick = saveAuth;
+
   $$('#loginMode button').forEach((b) => b.onclick = () => {
     $$('#loginMode button').forEach((x) => x.classList.toggle('on', x === b));
     const k = b.dataset.mode === 'apikey';
@@ -1298,17 +1422,35 @@ function bind() {
 }
 
 // ---------------- 启动 ----------------
-(async function boot() {
-  bind();
+// startApp 是「过了访问认证之后」才走的路：读配置 → 探 Emby → 决定进主界面还是停在连接页。
+async function startApp() {
   try {
     await loadConfig();
     const st = await checkStatus();
-    if (st.online && S.cfg && S.cfg.logged_in) {
-      enterApp();
-    } else if (st.online && S.cfg && S.cfg.token) {
-      enterApp();
-    }
+    if (st.online && S.cfg && S.cfg.logged_in) { enterApp(); return; }
   } catch (e) {
     toast('初始化失败：' + e.message, 'err');
   }
+  // 还没连上 Emby（或没登录）→ 停在 Emby 连接页
+  $('#authGate').classList.add('hidden');
+  $('#login').classList.remove('hidden');
+}
+
+(async function boot() {
+  bind();
+  let st;
+  try {
+    st = await authStatus();
+  } catch (e) {
+    showAuthGate('无法获取登录状态：' + e.message);
+    return;
+  }
+  if (!st.authenticated) {
+    $('#agUser').value = st.username || 'admin';
+    showAuthGate(st.password_is_new
+      ? '当前用的还是首次启动自动生成的密码，登录后建议在「设置 → 访问认证」里改掉。'
+      : '');
+    return;
+  }
+  await startApp();
 })();

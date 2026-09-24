@@ -168,6 +168,10 @@ details.adv { margin-top: 16px; border-top: 1px dashed var(--border); padding-to
 details.adv > summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); font-weight: 600; }
 details.adv[open] > summary { margin-bottom: 14px; }
 
+/* 敏感输入框（API Key / Cookie / Token）：值不下发到页面，
+   框里只会显示「已保存，留空则不修改」，用左边框颜色区分「确实存过」。 */
+.input.saved { border-color: var(--success, #2e8b57); }
+
 /* ---------- 主框架 ---------- */
 .app { display: flex; height: 100vh; overflow: hidden; }
 .sidebar {

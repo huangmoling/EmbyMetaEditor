@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,10 @@ type App struct {
 	jobs   *JobRegistry
 	images *ImageProxy
 	web    fs.FS
+
+	// 界面访问认证：会话表常驻内存，登录失败退避按来源 IP 记。
+	sess  *sessions
+	limit *attemptLimiter
 
 	// 国产传媒客户端按站点地址缓存：同一个批次里必须复用同一个实例，
 	// 否则每次请求都新建，限速器（按站点共享）就成了摆设。
@@ -36,6 +42,8 @@ func NewApp(store *Store, web fs.FS) *App {
 		jobs:   NewJobRegistry(),
 		images: NewImageProxy(newHTTPClient(store.Get())),
 		web:    web,
+		sess:   newSessions(),
+		limit:  newAttemptLimiter(),
 	}
 }
 
@@ -76,9 +84,18 @@ func decodeBody(r *http.Request, out any) error {
 	return dec.Decode(out)
 }
 
+// handler 返回最终挂到 http.Server 上的处理器：路由外面套一层安全中间件。
+func (a *App) handler() http.Handler { return a.guard(a.route()) }
+
 // route 注册全部 API 与静态资源路由。
 func (a *App) route() *http.ServeMux {
 	mux := http.NewServeMux()
+
+	// ---- 界面访问认证（保护「谁能打开这个界面」）----
+	mux.HandleFunc("GET /api/auth/status", a.handleAuthStatus)
+	mux.HandleFunc("POST /api/auth/login", a.handleAuthLogin)
+	mux.HandleFunc("POST /api/auth/logout", a.handleAuthLogout)
+	mux.HandleFunc("POST /api/auth/password", a.handleAuthPassword)
 
 	// ---- 配置 ----
 	mux.HandleFunc("GET /api/config", a.handleGetConfig)
@@ -128,6 +145,9 @@ func (a *App) route() *http.ServeMux {
 	// ---- 图片代理（javbus 等有 Referer 防盗链）----
 	mux.HandleFunc("GET /api/img", a.handleImageProxy)
 
+	// ---- Emby 图片代取（浏览器不再直接拿令牌去连 Emby）----
+	mux.HandleFunc("GET /api/emby/image", a.handleEmbyImage)
+
 	// ---- 任务 ----
 	mux.HandleFunc("GET /api/jobs", a.handleJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", a.handleJobGet)
@@ -141,15 +161,8 @@ func (a *App) route() *http.ServeMux {
 // ---------- 配置 ----------
 
 func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := a.store.Get()
-	writeOK(w, publicConfig{
-		Config:      cfg,
-		ConfigPath:  a.store.Path(),
-		LoggedIn:    cfg.Token != "",
-		DataDirPath: dataDir(),
-		Version:     appVersion,
-		RepoURL:     repoURL,
-	})
+	// 注意走的是 Public()：敏感字段在这里被抹掉，别再换回 store.Get()。
+	writeOK(w, a.store.Public())
 }
 
 func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
@@ -166,13 +179,24 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if in.Password != "" {
 			c.Password = in.Password
 		}
-		c.APIKey = in.APIKey
+		// 下面几项都是秘密，一律「留空 = 不修改」。
+		// 原因：/api/config 不再把已保存的值下发，前端输入框本来就是空的，
+		// 提交上来的空串只表示「这次没碰这一项」，绝不能当成清空 ——
+		// 直接赋值会把用户存的 Emby API Key / cookie 静默抹掉。
+		// 真要清空，编辑 config.json 即可（README 有说明）。
+		if in.APIKey != "" {
+			c.APIKey = in.APIKey
+		}
 		c.MetaTubeURL = in.MetaTubeURL
-		c.MetaTubeToken = in.MetaTubeToken
+		if in.MetaTubeToken != "" {
+			c.MetaTubeToken = in.MetaTubeToken
+		}
 		c.GfriendsTreeURL = in.GfriendsTreeURL
 		c.GfriendsCDN = in.GfriendsCDN
 		c.JavBusURL = in.JavBusURL
-		c.JavBusCookie = in.JavBusCookie
+		if in.JavBusCookie != "" {
+			c.JavBusCookie = in.JavBusCookie
+		}
 		if in.CNSites != nil {
 			if c.CNSites == nil {
 				c.CNSites = map[string]string{}
@@ -206,7 +230,7 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeOK(w, a.store.Get())
+	writeOK(w, a.store.Public())
 }
 
 // handleOpenAITest 探测 OpenAI / 中转接口的连通性：地址可达 + Key 有效 + 模型可用。
@@ -305,12 +329,18 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	info, _ := e.PublicInfo(ctx)
 	_ = a.store.Update(func(c *Config) {
-		c.EmbyURL = strings.TrimRight(in.URL, "/")
+		// 登录表单里的空值一律当「没填」而不是「清空」：
+		// 前端已经拿不到已保存的 API Key，空着提交是常态。
+		if u := strings.TrimRight(strings.TrimSpace(in.URL), "/"); u != "" {
+			c.EmbyURL = u
+		}
 		c.Username = in.Username
 		if in.Password != "" {
 			c.Password = in.Password
 		}
-		c.APIKey = in.APIKey
+		if in.APIKey != "" {
+			c.APIKey = in.APIKey
+		}
 		c.Token = lr.Token
 		c.UserID = lr.UserID
 		c.UserName = lr.UserName
@@ -1444,6 +1474,88 @@ func (a *App) handleImageProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.Header().Set("Cache-Control", "public, max-age=21600") // 6h，与内存缓存一致
+	_, _ = w.Write(data)
+}
+
+// ---------- Emby 图片代取 ----------
+
+// embyImageTypes 是允许代取的图片类型白名单。
+// 类型直接拼进 URL 路径，所以必须是白名单而不是转义 ——
+// 否则 `type=../../System/Info` 能把任意接口当图片读出来。
+var embyImageTypes = map[string]string{
+	"primary": "Primary", "backdrop": "Backdrop", "thumb": "Thumb",
+	"logo": "Logo", "banner": "Banner", "art": "Art", "disc": "Disc",
+	"box": "Box", "menu": "Menu", "chapter": "Chapter",
+	"screenshot": "Screenshot", "profile": "Profile", "boxset": "BoxSet",
+}
+
+var reSafeItemID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// handleEmbyImage 由服务端带着令牌去 Emby 取图。
+//
+// 为什么不让浏览器直接连 Emby（原来的做法）：
+//  1. 那样必须把 Emby 令牌写进每个 <img src> 的 api_key 参数里 ——
+//     等于把「Emby 管理员权限」印在 DOM 上，截图、复制图片地址、
+//     浏览器插件都能顺手带走。现在令牌只存在于服务端内存与配置文件里。
+//  2. 顺带解决混合内容：页面是 http://局域网IP:8097，Emby 若是 HTTPS + 自签证书，
+//     浏览器会直接拦掉这些图片。
+//
+// 代价是图片要多过一趟容器，所以复用了 ImageProxy 那份 6 小时内存缓存。
+func (a *App) handleEmbyImage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	id := strings.TrimSpace(q.Get("id"))
+	if !reSafeItemID.MatchString(id) {
+		http.Error(w, "缺少或非法的 id", http.StatusBadRequest)
+		return
+	}
+	imgType := embyImageTypes[strings.ToLower(strings.TrimSpace(q.Get("type")))]
+	if imgType == "" {
+		imgType = "Primary"
+	}
+	h := atoiSafe(q.Get("h"))
+	if h <= 0 || h > 2000 {
+		h = 300
+	}
+
+	cfg := a.store.Get()
+	if strings.TrimSpace(cfg.EmbyURL) == "" {
+		http.Error(w, "未配置 Emby 地址", http.StatusBadGateway)
+		return
+	}
+	if cfg.Token == "" {
+		http.Error(w, "尚未登录 Emby，图片需要令牌代取", http.StatusBadGateway)
+		return
+	}
+
+	raw := fmt.Sprintf("%s/Items/%s/Images/%s?maxHeight=%d&quality=90",
+		strings.TrimRight(cfg.EmbyURL, "/"), url.PathEscape(id), imgType, h)
+	// tag 参与缓存键：Emby 换图会换 tag，带上它才能立刻拿到新图而不是旧缓存。
+	if tag := strings.TrimSpace(q.Get("tag")); tag != "" {
+		raw += "&tag=" + url.QueryEscape(tag)
+	}
+	target, err := url.Parse(raw)
+	if err != nil {
+		http.Error(w, "图片地址无法解析", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	data, ctype, err := a.images.FetchWith(ctx, target, map[string]string{
+		"X-Emby-Token": cfg.Token,
+		// 带上一份 Authorization，有些构建只认这个而忽略 X-Emby-Token
+		"X-Emby-Authorization": fmt.Sprintf(
+			`MediaBrowser Client="%s", Device="WebUI", DeviceId="%s", Version="%s"`,
+			embyClientName, cfg.DeviceID, embyClientVersion),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	// private：图片里可能有私人媒体库的封面，别让中间缓存留存。
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 	_, _ = w.Write(data)
 }
 

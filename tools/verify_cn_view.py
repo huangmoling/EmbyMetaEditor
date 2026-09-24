@@ -36,6 +36,7 @@ try:
 except ImportError:
     print("缺少 websocket-client，请用 ~/.workbuddy-ai/binaries/python/envs/default 里的 python")
     sys.exit(2)
+import wbauth  # noqa: E402  （访问认证辅助，见 wbauth.py）
 
 ok_n = 0
 fail_n = 0
@@ -190,6 +191,9 @@ def main():
     try:
         cdp.call("Page.enable")
         cdp.call("Runtime.enable")
+        cdp.call("Page.navigate", url=BASE)
+        # 先过访问认证（未登录时所有 /api/ 都是 401），再重载让 boot() 带着会话跑
+        wbauth.login_in_browser(cdp)
         cdp.call("Page.navigate", url=BASE)
         time.sleep(3)
         # 错误收集器：只关心未捕获异常和 console.error。

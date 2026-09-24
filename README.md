@@ -2,7 +2,10 @@
 
 一个用 Go 写的 Emby 媒体库管理工具。单文件 exe，双击即用，界面跑在本机浏览器里（默认只监听 `127.0.0.1`，不会暴露到局域网）。
 
-> **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.3 MB，无需安装任何运行库）
+> **界面自带访问认证** —— 用户名 + 密码，和 Emby 登录是两回事。密码只存 PBKDF2-SHA256 派生值，
+> 会话是内存里的随机令牌；即使把端口开放到局域网也不至于「谁打开谁就是管理员」。详见[「关于访问认证」](#关于访问认证)。
+
+> **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.6 MB，无需安装任何运行库）
 >
 > **Docker** —— [`aag111/emby-meta-editor`](https://hub.docker.com/r/aag111/emby-meta-editor)（linux/amd64 + arm64），一条命令起容器，见[「Docker 镜像」](#docker-镜像)。
 >
@@ -12,10 +15,11 @@
 
 | 模块 | 能力 |
 |---|---|
+| **访问认证** | 保护「谁能打开这个界面」：用户名 + 密码登录，PBKDF2 派生存储，登录失败按 IP 退避 |
 | **Emby 登录** | 用户名 / 密码 或 API Key 两种方式，凭据本地保存 |
 | **MetaTube 刮削** | 单个 / 批量刮削元数据与图片，**服务地址自行配置**（公共后端已下线，建议自建） |
 | **gfriends 头像库** | 10 万+ 张头像索引；演员列表可**按媒体库筛选**，缺头像的一眼看完，单个挑或批量刮 |
-| **javbus 番号统计** | 按演员抓取全部番号，与本地媒体库比对找出缺失，抓取磁力列表；**按番号并排分页**，磁力结果**带连通性诊断** |
+| **番号补全** | 按演员抓取全部番号，与本地媒体库比对找出缺失，抓取磁力列表；**按番号并排分页**，磁力结果**带连通性诊断** |
 | **国产传媒专项刮削** | 选媒体库 → 列出条目 → **单个刮削 / 勾选多个批量刮削 / 直接编辑元数据**；四站（xChina / 麻豆区 / 麻豆社 / 7mmtv）并发搜索，**封面 → 标题 → 标签 → 日期** 按优先级合并 |
 | **媒体库统计** | 各媒体库条目数、电影 / 剧集 / 集数 |
 
@@ -34,10 +38,18 @@ EmbyMetaEditor.exe                 # 默认 127.0.0.1:8097，自动开浏览器
 EmbyMetaEditor.exe -port 8098      # 换端口
 EmbyMetaEditor.exe -open=false     # 不自动开浏览器
 EmbyMetaEditor.exe -dir D:\data    # 指定数据目录
-EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注意凭据安全）
+EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（注意凭据安全，见下）
 ```
 
 首次启动会在程序目录生成 `config.json`（配置）和 `cache/`（gfriends 索引缓存，约 10 MB，下载一次可离线复用）。
+
+**首次启动会生成一个随机访问密码并打印在控制台**，用它登录后可在「设置 → 访问认证」里改掉。
+忘了密码就用环境变量重新指定一次：
+
+```bash
+EMBYME_AUTH_USER=admin EMBYME_AUTH_PASSWORD=你的新密码  EmbyMetaEditor.exe
+# Windows PowerShell：$env:EMBYME_AUTH_PASSWORD="你的新密码"; .\EmbyMetaEditor.exe
+```
 
 ### 方式三：Docker
 
@@ -45,19 +57,26 @@ EmbyMetaEditor.exe -host 0.0.0.0   # 允许局域网访问（默认不开，注�
 
 ```bash
 docker run -d --name emby-meta-editor \
-  -p 127.0.0.1:8097:8097 \
+  -p 8097:8097 \
+  -e EMBYME_AUTH_USER=admin \
+  -e EMBYME_AUTH_PASSWORD=换成你自己的密码 \
   -v emby-data:/data \
   aag111/emby-meta-editor:latest
 ```
 
-起来后浏览器访问 `http://127.0.0.1:8097`，配置存在命名卷 `emby-data` 里的 `config.json`。
-仓库里的 `docker-compose.yml` 是同一个东西的 compose 写法。
+起来后浏览器访问 `http://127.0.0.1:8097`（或 NAS 的地址），用上面那个账号密码登录。
+配置存在命名卷 `emby-data` 里的 `config.json`。仓库里的 `docker-compose.yml` 是同一个东西的 compose 写法。
 
-> 命令里的 `-p 127.0.0.1:8097:8097` 只把端口暴露给本机。**想去掉 `127.0.0.1:` 给局域网访问前想清楚**：
-> 这个界面自身没有登录，谁打开都能操作、也能读到里面存着的 Emby 凭据。
+> 不传 `EMBYME_AUTH_PASSWORD` 也能起：容器会生成一个随机密码，用 `docker logs emby-meta-editor`
+> 在第一屏就能看到（只在首次生成时打印一次）。密码忘了就带着这个环境变量重启一次 —— 它是唯一的找回入口。
+>
+> 界面自带的认证挡的是「谁能打开这个界面」。**要暴露到公网仍然必须在前面套一层 HTTPS 反代**
+> （Caddy / Nginx / 群晖反代都行）：容器本身只跑 http，cookie 里也就带不了 `Secure`。
+> 反代之后所有请求的 `Host` 要和浏览器看到的一致，否则写请求会被同源校验（CSRF 防护）拒掉。
 
 ### 使用顺序
 
+0. **访问认证** —— 首次启动的控制台里有随机密码；登录后可随时在「设置 → 访问认证」修改。
 1. **登录** —— 填 Emby 地址 + 用户名密码，或切到 API Key 模式。
    API Key 在 Emby 后台「高级 → API 密钥」里生成。
 2. **概览统计** —— 看媒体库数量分布、缺头像演员数。
@@ -90,6 +109,38 @@ docker run -d --name emby-meta-editor \
 | `openai.model` | `gpt-4o-mini` | 翻译用的模型名 |
 | `openai.enabled` | false | **翻译总开关**：关掉则刮削不调用翻译 |
 | `insecure_tls` | false | 自签证书的 Emby 勾上 |
+| `auth.username` | `admin` | 界面访问用户名 |
+| `auth.password_hash` | 首次启动自动生成 | 访问密码的 PBKDF2 派生值（**不存明文**；改这里没用，要重置见下） |
+| `auth.password_generated` | true | 是否还是首次自动生成的密码，界面上据此提示「建议改掉」 |
+
+### 关于访问认证
+
+这一层和 Emby 登录**没有任何关系**：它保护的是「谁能打开这个界面」。因为界面里能读到 Emby 的
+API Key、能改媒体库、能上传图片 —— 端口一旦映射到局域网，没有这层就等于把管理员权限摊在网上。
+
+密码从哪来，按优先级：
+
+1. 环境变量 `EMBYME_AUTH_PASSWORD`（每次启动都会重新派生并覆盖，**这就是找回密码的方式**）
+2. `config.json` 里的 `auth.password_hash`
+3. 都没有 → 生成一个随机密码打到控制台，Docker 里就是 `docker logs`
+
+具体做法：
+
+- 密码存的是 **PBKDF2-SHA256（20 万轮 + 16 字节随机盐）** 派生值，比对用常量时间比较。
+  `config.json` 被备份、被贴出来求助都不会直接泄露密码。
+- 会话是**内存里**的 32 字节随机令牌，不落盘：进程重启 = 全部登出，
+  卷里那份 `config.json` 被拿走也换不到一个可用会话。代价是容器重启后要重新登录一次。
+- Cookie 带 `HttpOnly` + `SameSite=Lax`，JS 读不到；进程里默认是明文 HTTP，所以**没加 `Secure`**
+  （加了登录直接失效）。要上公网请在前面套 HTTPS 反代。
+- 写请求校验 `Origin` / `Referer`，并且所有写接口只收 JSON —— HTML 表单伪造不出 `application/json`，
+  这是 CSRF 的第二道闸。
+- 登录失败按来源 IP 退避：前两次不罚，之后 3s → 10s → 30s → 2min → 5min → 15min。
+- 改密码要验旧密码，改完**会踢掉其他所有会话**（当前这个留着），所以怀疑密码泄漏时改一次就能收口。
+- **敏感项不再下发到页面**：Emby 密码 / API Key / 令牌、MetaTube token、javbus cookie、OpenAI key
+  都只在服务端。设置页对应输入框显示「已保存，留空则不修改」——**留空提交 = 不修改**。
+  真想清空某一项，编辑 `config.json`（这几项删成空串即可）。
+- 顺带的副作用：Emby 的海报 / 头像改由服务端带令牌代取（`/api/emby/image`），
+  令牌不再出现在 `<img src>` 里，也顺手解决了「页面是 http、Emby 是 https 自签证书」被浏览器拦掉的问题。
 
 ### 关于 MetaTube
 
@@ -241,25 +292,29 @@ curl "http://127.0.0.1:8097/api/cn/search?q=91CM-014"
 
 ## 界面
 
-| 登录 | 概览统计 |
+| 访问认证 | 登录 |
 |---|---|
-| ![登录](screenshots/01-登录.png) | ![概览](screenshots/02-概览统计.png) |
+| ![访问认证](screenshots/00-访问认证.png) | ![登录](screenshots/01-登录.png) |
 
-| 媒体库刮削 | 详情与手动匹配 |
+| 概览统计 | 媒体库刮削 |
 |---|---|
-| ![媒体库](screenshots/03-媒体库刮削.png) | ![详情](screenshots/04-详情与手动匹配.png) |
+| ![概览](screenshots/02-概览统计.png) | ![媒体库](screenshots/03-媒体库刮削.png) |
 
-| 演员头像 | 番号补全 |
+| 详情与手动匹配 | 演员头像 |
 |---|---|
-| ![演员](screenshots/05-演员头像.png) | ![番号](screenshots/06-番号补全.png) |
+| ![详情](screenshots/04-详情与手动匹配.png) | ![演员](screenshots/05-演员头像.png) |
 
-| 连通性诊断 · 正常 | 连通性诊断 · 失败 |
+| 番号补全 | 连通性诊断 · 正常 |
 |---|---|
-| ![诊断正常](screenshots/08-连通性诊断-正常.png) | ![诊断失败](screenshots/09-连通性诊断-失败.png) |
+| ![番号](screenshots/06-番号补全.png) | ![诊断正常](screenshots/08-连通性诊断-正常.png) |
 
-| 磁力列表 · 按番号分页 | 国产传媒专项刮削 |
+| 连通性诊断 · 失败 | 磁力列表 · 按番号分页 |
 |---|---|
-| ![磁力分页](screenshots/magnet_tabs.png) | ![国产传媒](screenshots/cn_scrape.png) |
+| ![诊断失败](screenshots/09-连通性诊断-失败.png) | ![磁力分页](screenshots/magnet_tabs.png) |
+
+| 国产传媒专项刮削 | |
+|---|---|
+| ![国产传媒](screenshots/cn_scrape.png) | |
 
 （截图里的数据来自本地 mock Emby / mock javbus，仅用于展示界面。）
 
@@ -273,7 +328,7 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 
 单文件 exe，前端资源（`web/`）和图标（`rsrc_windows_amd64.syso`）都通过 `go:embed` / PE 资源嵌进去了，拷走 exe 就能跑。
 
-加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（md5 `82f8690085ef8794985976c5235c8350`）。
+加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（v1.0.8 的 md5 `38378a4d9099e914203484d90d87251a`）。
 不加这个参数的话 Go 会往产物里嵌当前 commit 的 VCS 信息，体积和哈希都会变 —— 那是正常的，不是源码漂移。
 
 跑测试：
@@ -282,24 +337,48 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 go test ./...
 ```
 
-123 个用例，覆盖番号归一化（含 `91CM-014` 这类数字开头番号、**以及「`.mp4` 被当成番号」这种误报**）、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、图片代理的主机分类与缓存、演员按媒体库过滤、国产传媒四站解析与**只认精确匹配**的合并逻辑（含按勾选 id 批量、封面 raw→base64 回退上传）、**元数据编辑的「只提交改动项」语义**、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
+183 个用例，覆盖访问认证（PBKDF2 派生与坏哈希、会话签发/过期/踢其他会话、失败退避、同源校验、配置脱敏）、番号归一化（含 `91CM-014` 这类数字开头番号、**以及「`.mp4` 被当成番号」这种误报**）、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、图片代理的主机分类与缓存、演员按媒体库过滤、国产传媒四站解析与**只认精确匹配**的合并逻辑（含按勾选 id 批量、封面 raw→base64 回退上传）、**元数据编辑的「只提交改动项」语义**、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
 国产传媒的夹具是 `tools/extract_cn_fixtures.py` 从 `cache/debug/` 里落盘的**真实响应**里按容器标签逐字节切出来的，不手写 —— 手写夹具最容易「顺手把 `<tr>` 补成 `<table>`」，结果单测全绿、线上全挂。
 
 其中 mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径返回 404）、写操作只认全局路径、`POST /Items/{id}` 是整对象替换、图片上传只收 base64 文本、列表接口不返回 `SortName`、`/Persons` 支持 `ParentId` 但传非法 GUID 会 500。线上踩过的坑因此都能在单元测试里复现，而不是等上线才发现。
 
+### 验证脚本
+
+下面这些脚本都要先过**访问认证**：起 exe 时带上 `EMBYME_AUTH_PASSWORD`，
+脚本默认按 `test-pass` 登录（共用 `tools/wbauth.py`）。不带就只会看到一片 401。
+
+```bash
+export EMBYME_AUTH_PASSWORD=test-pass        # PowerShell: $env:EMBYME_AUTH_PASSWORD="test-pass"
+EmbyMetaEditor.exe -port 8097 -open=false &  # 起应用，后面几个脚本共用这一个实例
+```
+
+访问认证本身的回归（**不需要 Emby，也不需要浏览器**，自己起临时实例、用完即删）：
+
+```bash
+python tools/smoke_auth.py
+```
+
+47 项断言：未登录时所有 `/api/` 一律 401、静态资源放行、跨站 Origin 被拒、
+配置里没有任何明文密钥、密钥留空提交不会清空原有值、改密码要验旧密码且会踢掉其他会话、
+退出后会话立即失效、连续失败会退避、环境变量指定密码生效。
+
+Emby 图片代取链路（和直连 Emby 逐字节比对，只读）：
+
+```bash
+python tools/verify_emby_image.py
+```
+
 界面回归（可选）：起一个模拟 javbus 站点，用无头浏览器真实点击验证诊断按钮的渲染。
 
 ```bash
 python tools/mock_javbus.py 9500 &          # 模拟 javbus
-EmbyMetaEditor.exe -port 8097 -open=false & # 起应用
 python tools/verify_javbus_probe.py         # 走 CDP 点击 + 截图 + 断言
 ```
 
 实机冒烟（可选）：对真实 Emby / MetaTube / gfriends / javbus 跑一轮**只读**验证，逐项打印实测数字。
 
 ```bash
-EmbyMetaEditor.exe -port 8097 -open=false &
 python tools/smoke_real.py
 ```
 
@@ -312,12 +391,9 @@ python tools/check_frontend.py
 页面图片的**渲染**回归（需要无头 Edge + 真实 config.json）：
 
 ```bash
-# 1) 起应用（真实配置）  2) 起无头 Edge
-EmbyMetaEditor.exe -port 8097 -open=false &
 "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" \
   --headless=new --disable-gpu --remote-debugging-port=9333 \
   --remote-allow-origins=* --user-data-dir=C:/Users/xiao/AppData/Local/Temp/edgeimg about:blank &
-# 3) 跑验证
 python tools/verify_images.py
 ```
 
@@ -392,12 +468,16 @@ docker pull aag111/emby-meta-editor:latest
 - **非 root（uid 1000）运行** —— 用宿主目录映射而不是命名卷时，先 `chown 1000:1000`。
 - **`.dockerignore` 排掉了 `config.json` 与 `cache/`** —— 前者装着真实 Emby 令牌和 OpenAI key，
   绝不该进构建上下文。
+- **有两个环境变量可以注入访问认证**：`EMBYME_AUTH_USER` / `EMBYME_AUTH_PASSWORD`。
+  不传也能起，容器会自动生成随机密码并打到日志里（`docker logs`）；传了就每次启动都覆盖，
+  这是忘了密码之后唯一的找回入口。
+- **容器重启后需要重新登录** —— 会话存在进程内存里，不落盘（安全换来的代价）。
 
 本地构建（有 Docker 的机器上）：
 
 ```bash
 docker build -t aag111/emby-meta-editor:latest .
-docker run --rm -p 127.0.0.1:8097:8097 -v emby-data:/data aag111/emby-meta-editor:latest
+docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/data aag111/emby-meta-editor:latest
 ```
 
 ### 发布到 Docker Hub
@@ -432,8 +512,9 @@ README 与 `docker-compose.yml` 里写死的 `aag111/` 换用户名时一并替�
 ## 目录结构
 
 ```
-main.go              启动、参数、控制台 UTF-8、自动开浏览器
-config.go            配置结构与持久化
+main.go              启动、参数、控制台 UTF-8、自动开浏览器、打印初始密码
+auth.go              访问认证：PBKDF2 派生、内存会话、失败退避、安全响应头 / CSRF 中间件
+config.go            配置结构与持久化（含敏感字段脱敏）
 api.go               HTTP 路由与处理函数
 emby.go              Emby REST 客户端
 imageproxy.go        图片代理：Referer 防盗链、白名单、6 小时缓存
@@ -459,6 +540,8 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | 脚本 | 验什么 | 需要什么 |
 |---|---|---|
 | `check_frontend.py` | HTML / JS / 后端路由静态对照 | 无 |
+| `smoke_auth.py` | 访问认证 47 项：未登录必须 401、密钥不下发、跨站被拒、密钥留空不清空、改密码踢会话、暴力破解退避、环境变量指定密码 | 无（自建临时实例） |
+| `verify_emby_image.py` | Emby 海报**代取**链路（与直连 Emby 逐字节比对） | 真实 config |
 | `smoke_real.py` | 真实环境只读冒烟 41 项（含国产传媒四站搜索 / 批量 dry-run / 封面代理） | 起 exe + 真实 config |
 | `verify_images.py` | 页面图片**真的渲染出来**（番号补全 / MetaTube 搜索 / gfriends 三处） | 起 exe + 无头 Edge |
 | `verify_person_lib.py` | 演员按媒体库筛选的**交互**（切库、总数、卡片换批、切回） | 起 exe + 无头 Edge |
@@ -476,7 +559,13 @@ docker-compose.yml   拉镜像运行的 compose 写法
 - 番号识别靠正则从片名和路径里提取，路径里带番号是最稳的。国产传媒那类**数字开头**的番号（`91CM-014`、`91BCM-002`、`18BT.NET-…`）走的是单独的提取逻辑，见下面踩坑表。
 - javbus 页面结构如果改版，解析可能失效 —— `parseStarPage` / `parseMagnets` 已有单元测试夹具，改起来很快。真改版了先跑「连通性诊断」，看 `cache/debug/` 里的原始页面就知道新结构长什么样。
 - javbus 有反爬。限速默认 1.5 秒 / 次、并发 2，别调太激进。
-- 工具默认只监听本机。用 `-host 0.0.0.0` 开放出去等于把 Emby 凭据摊在网上，自己掂量。
+- 访问认证是**进程自己的**登录，和 Emby 登录无关。用 `-host 0.0.0.0` 开放到局域网是安全的
+  （未登录只能看到登录页），但**要暴露到公网就得自己套 HTTPS 反代**：进程本身只跑 http，
+  cookie 里也就带不了 `Secure`。反代时注意保持 `Host` 与浏览器一致，否则写请求会被同源校验拒掉。
+- 访问认证没有「关闭开关」。真的不想要它，就别把端口开放出去（默认只监听 `127.0.0.1`）。
+- 改了访问密码会踢掉其他所有会话；容器重启也会（会话只在内存里）。
+- 设置页里 Emby 密码 / API Key / 令牌 / cookie / OpenAI key **不会回显**，留空提交等于不修改。
+  要清空就编辑 `config.json`。
 - `SortName` / `ForcedSortName` 在部分 Emby 构建上设不进去，详见下面「一个改不回来的字段」。
 - 国产传媒四站都是第三方聚合站，改版会让解析失效。每站一个 `parseXxx` 函数、夹具在 `testdata/cn/`（由 `tools/extract_cn_fixtures.py` 从真实响应里切），改起来比读代码快。站点挂了不会让整次刮削失败 —— 失败原因会写在那一站的卡片里，其余站点照常出结果。
 - 麻豆区的搜索是**模糊**的，返回近似番号是常态；工具只认精确匹配，所以「搜了但没命中」通常是正常的，不代表站点挂了。要判断站点是否可达，看那一站的 `OK` / `Error` 字段。
@@ -512,6 +601,9 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | 按媒体库查演员，库 ID 写错时整个请求 500 | `/Persons` 的 `ParentId` 不是 GUID 时 Emby 直接 500 `Unrecognized Guid format.`，**不是**返回空列表；而全零 GUID 这种「格式合法但不存在」的会正常返回 0 条 | 前端只传真实库 Id 或空串，两种都安全；mock 也照抄了这个 500 行为，避免以后误传坏 ID 时单测看不出来 |
 | 国产传媒条目的角标显示 `CM-014`，不是 `91CM-014` | 通用番号正则要求「字母前缀 + 数字」，数字开头的番号被当成噪声前缀截掉了。**影响面比想象中大** —— 角标、写入的 `Tags`、搜索关键词全都用的是它 | `itemNumber()` 先跑国产传媒专用的 `cnExtractNumber`（允许 0–4 位数字前缀），命中且前缀更长时优先返回；同时把 `HEVC10 1080P` 这类压制组标记加进噪声前缀表过滤掉 |
 | 国产传媒封面在页面上全是白框，但 `/api/img` 明明返回 200 | `upload.xchina.io` 对**浏览器**返回 Cloudflare 挑战页（页面报 `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`），而服务端带浏览器 UA 去取就是正常图片 | 把国产传媒的图床加进 `imageproxy.go` 的代理白名单，浏览器只跟本机 `/api/img` 打交道 |
+| 加访问认证后所有海报 / 头像变成空白 | 图片原来是浏览器**直连 Emby**（`<img src>` 里拼 `api_key`），现在收紧了 CSP（`img-src 'self'`）且令牌不再进 DOM，残留的直连地址一律取不到图 | Emby 图片统一走服务端代取 `/api/emby/image`（复用图片代理的 6 小时缓存），前端 `embyImg()` 只产出同源地址；`tools/verify_emby_image.py` 与直连 Emby 逐字节比对 |
+| 登录失败**两次**之后，本人输对密码也被挡 | 退避表取了 `idx = fails`，第二次失败就吃到 3 秒锁，「前两次不罚」形同虚设 | 改成 `idx = fails - 1`；`tools/smoke_auth.py` 把「连续失败才退避」固定成断言 |
+| 「保存设置」把存好的 Emby API Key / javbus cookie 抹掉了 | `/api/config` 不再下发明文密钥后，前端输入框本来就是空的，后端却还在无条件赋值 —— 空串被当成「清空」 | 密钥一律「留空 = 不修改」（含 `/api/emby/login` 里的 API Key），`smoke_auth.py` 有一条断言专门守着它 |
 | 修完「数字开头番号」之后，**每个 mp4 条目都多出一个「番号 `MP-4`」** | 为了支持 `91CM-014` 放宽了正则（允许数字前缀、数字部分只要求 1 位），结果 `.mp4` 被拆成 `MP` + `4`。角标、写进 `Tags` 的内容、javbus 搜索关键词全跟着错 —— 修之前抽样 200 条「有番号」的有 196 条 | `numberSourceFields()` 抽番号前先抹掉文件扩展名（`reFileExt`），并把 `MP` / `CD` 这类容器 / 分卷标记加进 `cnNoisePrefix`。回归用例 `TestCNItemNumberIgnoresFileExtension` 守着 |
 
 ### 一个改不回来的字段

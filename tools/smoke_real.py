@@ -4,6 +4,7 @@
 用法：python tools/smoke_real.py [base_url]
 """
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -12,15 +13,25 @@ import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8097"
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wbauth  # noqa: E402  （访问认证辅助，见 wbauth.py）
+
+# 界面有进程自己的登录，未登录时 /api/ 一律 401 —— 先换一个会话 cookie，
+# 后面所有请求都带上它（密码从 EMBYME_AUTH_PASSWORD 读，默认 test-pass）。
+COOKIE_HEADER = {"Cookie": wbauth.cookie_header(BASE)}
+
 
 def get(path, timeout=90):
-    with urllib.request.urlopen(BASE + path, timeout=timeout) as r:
+    req = urllib.request.Request(BASE + path, headers=dict(COOKIE_HEADER))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
 def fetch_raw(path, timeout=60, headers=None):
     """取原始响应，返回 (状态码, Content-Type, 字节)。不解析 JSON。"""
-    req = urllib.request.Request(BASE + path, headers=headers or {})
+    h = dict(COOKIE_HEADER)
+    h.update(headers or {})
+    req = urllib.request.Request(BASE + path, headers=h)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.headers.get("Content-Type", ""), r.read()
@@ -43,10 +54,11 @@ def q(s):
 
 
 def post(path, payload, timeout=30):
+    h = {"Content-Type": "application/json"}
+    h.update(COOKIE_HEADER)
     req = urllib.request.Request(
         BASE + path, method="POST",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"})
+        data=json.dumps(payload).encode(), headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 

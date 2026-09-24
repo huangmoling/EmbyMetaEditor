@@ -11,8 +11,39 @@
 </head>
 <body>
 
-<!-- ================= 登录 / 初始化 ================= -->
-<div id="login" class="login-wrap">
+<!-- ================= 访问认证 =================
+     这一层是**进程自己的**登录，保护「谁能打开这个界面」，和下面的 Emby 登录无关。
+     未登录时后端对所有 /api/ 一律返回 401，这个门是唯一能过去的地方。 -->
+<div id="authGate" class="login-wrap hidden">
+  <div class="login-card auth-card">
+    <div class="login-head">
+      <div class="logo">Em</div>
+      <div>
+        <h1>Emby 元数据编辑器</h1>
+        <p>请先登录控制台</p>
+      </div>
+    </div>
+    <div class="login-body">
+      <div class="field">
+        <label>用户名</label>
+        <input class="input" id="agUser" placeholder="admin" autocomplete="username">
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input class="input" id="agPass" type="password" placeholder="访问密码" autocomplete="current-password">
+        <div class="hint">密码只存 PBKDF2 派生值，忘了就在启动时用环境变量 <span class="mono">EMBYME_AUTH_PASSWORD</span> 重置。</div>
+      </div>
+      <div id="agAlert" class="alert hidden"></div>
+      <div class="login-actions">
+        <button class="btn btn-primary" id="agBtn">登录</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 登录 / 初始化 =================
+     默认隐藏：先过访问认证这一关，由 app.js 的 startApp() 决定显示它还是主界面。 -->
+<div id="login" class="login-wrap hidden">
   <div class="login-card">
     <div class="login-head">
       <div class="logo">Em</div>
@@ -130,6 +161,7 @@
     <div class="foot">
       <div><span class="dot" id="sbDot"></span><span id="sbState">检测中…</span></div>
       <div class="mono" id="sbVer" style="margin-top:4px"></div>
+      <button class="btn btn-sm" id="sbLogout" style="margin-top:8px;width:100%">退出登录</button>
     </div>
   </aside>
 
@@ -263,7 +295,7 @@
           </div>
           <div class="row">
             <div class="field"><label>密码</label><input class="input" id="stPass" type="password" placeholder="留空则不修改"></div>
-            <div class="field"><label>API Key</label><input class="input" id="stKey" placeholder="可直接用 API Key 鉴权"></div>
+            <div class="field"><label>API Key</label><input class="input" id="stKey" placeholder="可直接用 API Key 鉴权"><div class="hint">出于安全，已保存的值不会下发到页面；这里留空表示不修改原有设置。</div></div>
           </div>
           <div style="display:flex;gap:8px">
             <button class="btn btn-primary" id="stLogin">用以上信息重新登录</button>
@@ -276,7 +308,7 @@
         <div class="card">
           <h3>MetaTube</h3>
           <div class="field"><label>服务地址</label><input class="input" id="stMt"></div>
-          <div class="field"><label>Token（可选）</label><input class="input" id="stMtToken"></div>
+          <div class="field"><label>Token（可选）</label><input class="input" id="stMtToken" placeholder="实例开启鉴权时填写"><div class="hint">已保存的值不会下发到页面；留空表示不修改。</div></div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn" id="stMtTest">获取 provider 列表</button>
             <span id="stMtProviders" class="mono" style="color:var(--muted)"></span>
@@ -295,7 +327,7 @@
           <div class="field">
             <label>Cookie</label>
             <input class="input" id="stJbCookie">
-            <div class="hint">javbus 需要 age 验证与磁力开关：<span class="mono">age=verified; dv=1; existmag=mag</span>。若被 Cloudflare 拦截，请从浏览器复制完整 Cookie（含 cf_clearance）。</div>
+            <div class="hint">javbus 需要 age 验证与磁力开关：<span class="mono">age=verified; dv=1; existmag=mag</span>。若被 Cloudflare 拦截，请从浏览器复制完整 Cookie（含 cf_clearance）。已保存的值不会下发到页面，留空表示不修改。</div>
           </div>
           <div class="row">
             <div class="field"><label>请求间隔（毫秒）</label><input class="input" id="stJbInterval" type="number" min="300"></div>
@@ -321,12 +353,34 @@
           <div class="hint" style="margin-bottom:10px">刮削番号时，把非中文的<b>标题</b>、<b>简介</b>翻成中文。填官方
             <span class="mono">https://api.openai.com/v1</span> 或任意 OpenAI 兼容中转（如 <span class="mono">https://api.gptgod.online/v1</span>）的地址与 Key，再打开下面的开关即可。翻译失败不影响刮削（自动退回原文）。</div>
           <div class="field"><label>接口地址（Base URL）</label><input class="input" id="stOaiUrl" placeholder="https://api.openai.com/v1"></div>
-          <div class="field"><label>API Key</label><input class="input" id="stOaiKey" type="password" placeholder="sk-…（留空则不修改已保存的）"></div>
+          <div class="field"><label>API Key</label><input class="input" id="stOaiKey" type="password" placeholder="sk-…（留空则不修改已保存的）"><div class="hint">已保存的值不会下发到页面，要换直接填新的。</div></div>
           <div class="field"><label>模型</label><input class="input" id="stOaiModel" placeholder="gpt-4o-mini"></div>
           <label class="switch" style="margin-top:6px"><input type="checkbox" id="stOaiOn"> 启用翻译（关掉则刮削不调用翻译）</label>
           <div class="row" style="align-items:center;margin-top:12px;gap:12px">
             <button class="btn" id="btnOaiTest" onclick="testOpenAI()">测试连接</button>
             <span id="oaiTestResult" class="hint" style="margin:0"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>访问认证</h3>
+          <div class="hint" style="margin-bottom:10px">
+            这一层保护的是<b>谁能打开这个界面</b>，和上面 Emby 的登录是两回事。
+            密码只存 PBKDF2-SHA256 派生值，不落明文；会话是内存里的随机令牌，重启即失效。
+            忘记密码时，用环境变量 <span class="mono">EMBYME_AUTH_PASSWORD</span> 启动一次即可重置。
+          </div>
+          <div class="row">
+            <div class="field"><label>用户名</label><input class="input" id="stAuthUser" autocomplete="username"></div>
+            <div class="field"><label>当前密码</label><input class="input" id="stAuthOld" type="password" placeholder="修改时必须填写" autocomplete="current-password"></div>
+          </div>
+          <div class="field">
+            <label>新密码</label>
+            <input class="input" id="stAuthNew" type="password" placeholder="留空则保持原密码（只改用户名）" autocomplete="new-password">
+            <div class="hint">至少 8 位。改完密码后，其他设备 / 浏览器上的登录会全部失效。</div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button class="btn btn-primary" id="stAuthSave">保存访问凭据</button>
+            <span id="stAuthMsg" class="hint" style="margin:0"></span>
           </div>
         </div>
 

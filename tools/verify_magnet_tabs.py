@@ -27,6 +27,7 @@ PORT = 9333
 BASE = "http://127.0.0.1:8097/"
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wbauth  # noqa: E402  （访问认证辅助，见 wbauth.py）
 try:
     import websocket  # websocket-client
 except ImportError:
@@ -117,6 +118,9 @@ def main():
     try:
         cdp.call("Page.enable")
         cdp.call("Runtime.enable")
+        cdp.call("Page.navigate", url=BASE)
+        # 先过访问认证（未登录时所有 /api/ 都是 401），再重载让 boot() 带着会话跑
+        wbauth.login_in_browser(cdp)
         cdp.call("Page.navigate", url=BASE)
         time.sleep(3)
 

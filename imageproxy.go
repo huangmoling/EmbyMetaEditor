@@ -196,6 +196,24 @@ func (p *ImageProxy) Fetch(ctx context.Context, raw string, cfg Config) ([]byte,
 
 // fetchResolved 取回已解析的图片数据（带缓存）。
 func (p *ImageProxy) fetchResolved(ctx context.Context, target *url.URL) ([]byte, string, error) {
+	// 防盗链的关键。用「目标自己的 origin」当 Referer：
+	// javbus 认自家域名，其他图床本来就不校验，这个值两边都合适。
+	return p.FetchWith(ctx, target, map[string]string{
+		"Referer":    target.Scheme + "://" + target.Host + "/",
+		"User-Agent": browserUA,
+		"Accept":     "image/avif,image/webp,image/*,*/*;q=0.8",
+	})
+}
+
+// browserUA 是访问图床时用的 UA —— 有些图床（如 upload.xchina.io）对
+// 非浏览器 UA 会直接返回 Cloudflare 挑战页，对浏览器才给正常图片。
+const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+	"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// FetchWith 取回图片，允许调用方附加请求头（例如 Emby 需要令牌）。
+// 结果同样进缓存，键就是 URL 本身 —— 调用方注意**别把密钥写进查询串**，
+// 否则会以明文形式留在缓存键里（api.go 的 handleEmbyImage 用的是请求头）。
+func (p *ImageProxy) FetchWith(ctx context.Context, target *url.URL, header map[string]string) ([]byte, string, error) {
 	key := target.String()
 	if e, ok := p.lookup(key); ok {
 		return e.data, e.ctype, nil
@@ -205,11 +223,11 @@ func (p *ImageProxy) fetchResolved(ctx context.Context, target *url.URL) ([]byte
 	if err != nil {
 		return nil, "", err
 	}
-	// 防盗链的关键。用「目标自己的 origin」当 Referer：
-	// javbus 认自家域名，其他图床本来就不校验，这个值两边都合适。
-	req.Header.Set("Referer", target.Scheme+"://"+target.Host+"/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+	for k, v := range header {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
+	}
 
 	resp, err := p.http.Do(req)
 	if err != nil {

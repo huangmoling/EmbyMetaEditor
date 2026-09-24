@@ -12,6 +12,9 @@ import time
 import websocket
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wbauth  # noqa: E402  （访问认证辅助，见 wbauth.py）
+
 CDP = "http://127.0.0.1:9333"
 APP = "http://127.0.0.1:8097/"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "screenshots")
@@ -127,6 +130,9 @@ def main():
               deviceScaleFactor=1, mobile=False)
 
     print("1) 打开应用")
+    page.send("Page.navigate", url=APP)
+    # 先过访问认证这关（未登录时所有 /api/ 都是 401），再重载让 boot() 带着会话跑
+    wbauth.login_in_browser(page)
     page.send("Page.navigate", url=APP)
     page.wait_for("!!document.querySelector('#lgSkip')", desc="登录页出现")
     page.pump(0.6)
