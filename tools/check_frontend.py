@@ -121,6 +121,33 @@ def main():
         for u in unused:
             print("      " + u)
 
+    # --- 5. img 模板必须走同源地址 ---
+    # 服务端的 CSP 是 img-src 'self'（见 auth.go setSecurityHeaders），任何直连外部
+    # 图床的 <img src> 都会被浏览器拦掉，表现是一片破图 —— 而且只在浏览器里看得出来，
+    # curl 上游地址反而是 200。所以模板里的地址只能来自 imgSrc / embyImg / personImg。
+    proxies = ("imgSrc(", "embyImg(", "personImg(")
+    # 允许先算好再引用（missCard 里的 `const src = imgSrc(m.cover)` 就是这种写法）。
+    proxied_vars = set(re.findall(
+        r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:imgSrc|embyImg|personImg)\(", js))
+    bad_imgs = []
+    for m in re.finditer(r"<img\b[^>]*>", js):
+        tag = m.group(0)
+        if "src=" not in tag:
+            continue  # 没有 src 的占位 <img>，不需要过代理
+        if any(p in tag for p in proxies):
+            continue
+        if any(("esc(" + v + ")") in tag for v in proxied_vars):
+            continue
+        bad_imgs.append(tag[:90].replace("\n", " "))
+    print(f"      检查 {len(re.findall(r'<img', js))} 个 img 模板，代理变量 {len(proxied_vars)} 个")
+    if bad_imgs:
+        print("FAIL  这些 <img> 没走同源地址，会被 CSP 拦成破图：")
+        for t in bad_imgs:
+            print("      " + t)
+        bad += 1
+    else:
+        print("PASS  img 模板全部走同源地址")
+
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0
 

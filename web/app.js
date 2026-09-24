@@ -537,6 +537,14 @@ async function scrapeAvatar(personId, name, btn) {
   }
 }
 
+// gfFileName 从搜索接口下发的完整 CDN 地址里取回裸文件名，只用于提示文案。
+function gfFileName(url) {
+  try {
+    const p = decodeURIComponent(new URL(url, location.href).pathname);
+    return p.slice(p.lastIndexOf('/') + 1);
+  } catch (_) { return String(url || ''); }
+}
+
 async function pickAvatar(personId, name) {
   const host = openDrawer('<h3>' + esc(name) + '</h3><div class="sub">从 gfriends 头像库挑选一张</div>' +
     '<div class="field"><div class="row"><input class="input" id="pkQ" value="' + esc(name) + '">' +
@@ -549,8 +557,8 @@ async function pickAvatar(personId, name) {
       if (!hits.length) { $('#pkList').innerHTML = '<div class="empty">没有找到</div>'; return; }
       $('#pkList').innerHTML = hits.map((h) => '<div style="margin-bottom:14px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px">' +
         esc(h.name) + '（' + h.entries.length + ' 张）</div><div style="display:flex;gap:8px;flex-wrap:wrap">' +
-        h.entries.map((en, i) => '<img data-name="' + esc(h.name) + '" data-file="' + esc(en.f) + '" data-group="' + esc(en.g) + '" ' +
-          'src="' + esc(en.f) + '" title="' + esc(en.gz + ' / ' + en.f) + '" ' +
+        h.entries.map((en, i) => '<img loading="lazy" data-name="' + esc(h.name) + '" data-file="' + esc(en.f) + '" data-group="' + esc(en.g) + '" ' +
+          'src="' + esc(imgSrc(en.f)) + '" alt="" title="' + esc(en.gz + ' / ' + gfFileName(en.f)) + '" ' +
           'style="width:76px;height:104px;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer">').join('') +
         '</div></div>').join('');
       $$('#pkList img').forEach((im) => im.onclick = async () => {

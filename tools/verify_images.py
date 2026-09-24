@@ -1,10 +1,14 @@
 """用 CDP 驱动无头 Edge，验证页面上的外部图片**真的渲染出来**。
 
-这是线上 bug「缺失番号没有图片」的界面级回归，同时覆盖 imgSrc() 的全部三个调用点：
+这是线上 bug「缺失番号没有图片」的界面级回归，同时覆盖 imgSrc() 的调用点：
 
   A. 番号补全页的缺失番号封面   -> #jbGrid .misscard img
   B. MetaTube 搜索结果的封面     -> #dvHits .hit img
   C. gfriends 头像库的缩略图     -> #gfResult img
+
+第四个调用点（「选择头像」弹窗的 #pkList）跑 `tools/verify_gfriends_pick.py`：
+它曾经漏掉 imgSrc() 直接写 CDN 外链，被 CSP 拦成一片破图，而这里的 A/B/C 全是好的 ——
+所以**只跑本脚本会漏掉它**，两个脚本都要跑。
 
 接口能返回 JPEG 不等于页面上看得到图 —— 可能是 <img> 的 src 拼错、
 被 referrerpolicy 掐掉、或者 loading="lazy" 根本没触发。

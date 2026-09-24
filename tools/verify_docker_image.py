@@ -80,6 +80,40 @@ def candidates(version):
     return out
 
 
+def check_embedded_frontend(tok, amd_manifest, version):
+    """解开 amd64 的层，确认二进制里内嵌的前端确实是修好的那一版。
+
+    为什么必须查这个：web/ 是 `go:embed` 编进二进制的。源码修对了、镜像忘了重建，
+    Actions 照样绿、镜像照样能拉、容器照样能起 —— 只有界面还是坏的。
+    2026-09 的 gfriends 头像弹窗就是这么漏出去的：v1.0.8 镜像里仍是 CDN 裸外链。
+    """
+    blob = b""
+    try:
+        for layer in amd_manifest.get("layers", []):
+            raw, _ = get("%s/v2/%s/blobs/%s" % (REGISTRY, REPO, layer["digest"]), tok)
+            try:
+                blob += gzip.decompress(raw)
+            except Exception:  # noqa: BLE001
+                blob += raw
+    except Exception as e:  # noqa: BLE001
+        print("  提示：层拉不下来（%s），跳过内嵌前端检查" % e)
+        return
+
+    i = blob.find(b"function pickAvatar")
+    if i < 0:
+        check("镜像里能找到内嵌的 app.js", False, "没找到 pickAvatar")
+        return
+    seg = blob[i:i + 2000].decode("utf-8", "replace")
+    # 头像弹窗的缩略图必须走同源 /api/img（imgSrc()）。写成 CDN 裸外链的话会被
+    # CSP 的 `img-src 'self'` 拦掉，界面就是一片破图 —— 而命令行验 CDN 地址全是 200，
+    # 光看地址永远发现不了。
+    check("候选头像走同源代理（imgSrc）", "imgSrc(en.f)" in seg)
+    check("候选头像已无 CDN 裸外链", "'src=\"' + esc(en.f)" not in seg)
+    if version:
+        check("二进制版本串与镜像标签一致",
+              ("v" + version).encode() in blob, "v" + version)
+
+
 def main():
     try:
         tok = token()
@@ -155,6 +189,9 @@ def main():
     user = (cfg.get("config") or {}).get("User") or ""
     print("  User = %r" % user)
     check("以非 root 运行", user not in ("", "root", "0"))
+
+    # 最后一道：镜像里的前端到底修没修 —— 静态检查看不出来，只有解开层才知道
+    check_embedded_frontend(tok, amd, labels.get("org.opencontainers.image.version") or "")
 
     print("\n%s" % ("全部通过" if not FAILED else "%d 项未通过：%s" % (len(FAILED), "；".join(FAILED))))
     return 1 if FAILED else 0
