@@ -1,0 +1,164 @@
+"""匿名校验 Docker Hub 上的镜像：确认推上去的确实是本地这份代码。
+
+为什么要单独验：
+  「Actions 绿了」只说明流水线跑完了，不说明推成功、更不说明推的是**我们的**提交 ——
+  同名仓库完全可能是别人的，或者 tag 被旧的一次构建覆盖了。这里按 registry 协议
+  自己拉一遍：先看是不是多架构、再看配置 blob 里的 `org.opencontainers.image.revision`
+  是否等于本地 HEAD、`source` 是否指向本仓库。全部用匿名 pull token，不需要登录。
+
+用法： python tools/verify_docker_image.py [镜像名] [tag]
+默认： aag111/emby-meta-editor:latest
+退出码 0 = 校验通过。
+"""
+import gzip
+import json
+import subprocess
+import sys
+import time
+import urllib.request
+
+REPO = sys.argv[1] if len(sys.argv) > 1 else "aag111/emby-meta-editor"
+TAG = sys.argv[2] if len(sys.argv) > 2 else "latest"
+REGISTRY = "https://registry-1.docker.io"
+FAILED = []
+
+ACCEPT = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
+
+
+def check(name, cond, detail=""):
+    print(("PASS  " if cond else "FAIL  ") + name + (("  → " + str(detail)) if detail else ""))
+    if not cond:
+        FAILED.append(name)
+
+
+def token():
+    url = ("https://auth.docker.io/token?service=registry.docker.io"
+           "&scope=repository:%s:pull" % REPO)
+    with urllib.request.urlopen(url, timeout=30) as r:
+        return json.loads(r.read())["token"]
+
+
+def get(url, tok, accept=ACCEPT, tries=4):
+    """带重试：blob 会 302 到 CDN（Cloudflare / CloudFront），国内直连时握手偶发超时。"""
+    last = None
+    for _ in range(tries):
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", "Bearer " + tok)
+        req.add_header("Accept", accept)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read(), r.headers
+        except Exception as e:  # noqa: BLE001
+            last = e
+            time.sleep(1.5)
+    raise RuntimeError("拉取 %s 失败：%s" % (url, last))
+
+
+def candidates(version):
+    """镜像应当对应的提交。先看 release tag（v1.0.8），再看 HEAD。
+
+    正常情况下两者是同一个提交；但 tag 之后还可能有 merge / 文档提交，
+    那时 HEAD 已经往前走了 —— 镜像跟着 tag 走才是对的，所以两个都接受。
+    """
+    out = []
+    refs = [("HEAD", ["git", "rev-parse", "HEAD"])]
+    if version:
+        refs.insert(0, ("tag v" + version, ["git", "rev-parse", "v" + version]))
+    for name, args in refs:
+        try:
+            sha = subprocess.check_output(args, stderr=subprocess.DEVNULL,
+                                          text=True).strip()
+            if sha:
+                out.append((name, sha))
+        except Exception:
+            pass
+    return out
+
+
+def main():
+    try:
+        tok = token()
+    except Exception as e:
+        print("拿不到匿名 pull token：%s" % e)
+        return 1
+
+    raw, _ = get("%s/v2/%s/manifests/%s" % (REGISTRY, REPO, TAG), tok)
+    manifest = json.loads(raw)
+    print("  manifest mediaType = %s" % manifest.get("mediaType"))
+
+    is_index = "manifests" in manifest
+    check("是多架构镜像（image index）", is_index, manifest.get("mediaType"))
+    if not is_index:
+        print("\n提示：不是 index，可能是单架构镜像。")
+        return 1
+
+    plats = {}
+    for m in manifest["manifests"]:
+        p = m.get("platform") or {}
+        key = "%s/%s" % (p.get("os"), p.get("architecture"))
+        plats[key] = m["digest"]
+    print("  平台 = %s" % ", ".join(sorted(plats)))
+    check("包含 linux/amd64", "linux/amd64" in plats)
+    check("包含 linux/arm64", "linux/arm64" in plats)
+
+    digest = plats.get("linux/amd64")
+    raw, _ = get("%s/v2/%s/manifests/%s" % (REGISTRY, REPO, digest),
+                 tok, accept="application/vnd.oci.image.manifest.v1+json,"
+                             "application/vnd.docker.distribution.manifest.v2+json")
+    amd = json.loads(raw)
+
+    total = sum(l.get("size", 0) for l in amd.get("layers", []))
+    print("  amd64 压缩后 %.1f MB（%d 层）" % (total / 1048576.0, len(amd.get("layers", []))))
+
+    cfg_digest = amd["config"]["digest"]
+    raw, _ = get("%s/v2/%s/blobs/%s" % (REGISTRY, REPO, cfg_digest), tok)
+    try:
+        cfg = json.loads(raw)
+    except Exception:
+        cfg = json.loads(gzip.decompress(raw))
+
+    labels = (cfg.get("config") or {}).get("Labels") or {}
+    history = cfg.get("history") or []
+    print("  revision = %s" % labels.get("org.opencontainers.image.revision"))
+    print("  source   = %s" % labels.get("org.opencontainers.image.source"))
+    print("  version  = %s" % labels.get("org.opencontainers.image.version"))
+
+    rev = (labels.get("org.opencontainers.image.revision") or "")
+    refs = candidates(labels.get("org.opencontainers.image.version") or "")
+    if rev and refs:
+        # revision 是完整 sha，本地 rev-parse 也是完整 sha；保险起见按前 12 位比
+        ok = any(rev.startswith(sha[:12]) or sha.startswith(rev[:12]) for _, sha in refs)
+        detail = " / ".join("%s=%s" % (n, s[:12]) for n, s in refs)
+        check("revision 与本地提交一致", ok, "镜像 %s 本地 %s" % (rev[:12], detail))
+    else:
+        print("  提示：拿不到本地提交（不在 git 仓库里？），跳过一致性比对")
+    src = labels.get("org.opencontainers.image.source") or ""
+    check("source 指向本仓库", "EmbyMetaEditor" in src, src)
+
+    # 入口参数：容器里必须监听 0.0.0.0 且不开浏览器
+    cmd = (cfg.get("config") or {}).get("Cmd") or []
+    entry = (cfg.get("config") or {}).get("Entrypoint") or []
+    joined = " ".join(entry + cmd)
+    print("  入口 = %s" % joined)
+    check("默认监听 0.0.0.0", "0.0.0.0" in joined, joined)
+    check("容器内不开浏览器", "-open=false" in joined, joined)
+    check("数据目录固定为 /data", "/data" in ((cfg.get("config") or {}).get("Env") or [""])[0]
+          or any(e.startswith("EMBYME_HOME=/data") for e in (cfg.get("config") or {}).get("Env") or []),
+          (cfg.get("config") or {}).get("Env"))
+
+    # 非 root 运行
+    user = (cfg.get("config") or {}).get("User") or ""
+    print("  User = %r" % user)
+    check("以非 root 运行", user not in ("", "root", "0"))
+
+    print("\n%s" % ("全部通过" if not FAILED else "%d 项未通过：%s" % (len(FAILED), "；".join(FAILED))))
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

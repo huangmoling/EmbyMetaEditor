@@ -18,6 +18,12 @@ import wbauth  # noqa: E402  （访问认证辅助，见 wbauth.py）
 CDP = "http://127.0.0.1:9333"
 APP = "http://127.0.0.1:8097/"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "screenshots")
+
+# 截图文件名直接对齐 README「界面截图」里引用的名字，这样重跑脚本就是**原地刷新**
+# README 那几张图，而不是在旁边多出一堆英文名的孤儿文件。
+SHOT_BEFORE = "07-番号补全-诊断按钮.png"
+SHOT_OK = "08-连通性诊断-正常.png"
+SHOT_FAIL = "09-连通性诊断-失败.png"
 os.makedirs(OUT, exist_ok=True)
 
 _id = 0
@@ -173,7 +179,7 @@ def main():
     if not ok:
         raise RuntimeError("找不到 #jbProbe 按钮")
     print("   按钮文案 =", page.eval("document.querySelector('#jbProbe').textContent"))
-    page.shot("07-javbus-diagnose-before.png")
+    page.shot(SHOT_BEFORE)
 
     print("5) 填演员名并点「连通性诊断」")
     page.eval("""(() => {
@@ -192,7 +198,7 @@ def main():
     for line in text.splitlines():
         if line.strip():
             print("   | " + line.strip())
-    page.shot("08-javbus-diagnose-ok.png")
+    page.shot(SHOT_OK)
 
     # 关键断言
     checks = {
@@ -228,7 +234,7 @@ def main():
     for line in text2.splitlines():
         if line.strip():
             print("   | " + line.strip())
-    page.shot("09-javbus-diagnose-fail.png")
+    page.shot(SHOT_FAIL)
 
     checks2 = {
         "提示『无法连接』": "无法连接" in text2,

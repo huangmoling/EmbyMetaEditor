@@ -312,10 +312,6 @@ curl "http://127.0.0.1:8097/api/cn/search?q=91CM-014"
 |---|---|
 | ![诊断失败](screenshots/09-连通性诊断-失败.png) | ![磁力分页](screenshots/magnet_tabs.png) |
 
-| 国产传媒专项刮削 | |
-|---|---|
-| ![国产传媒](screenshots/cn_scrape.png) | |
-
 （截图里的数据来自本地 mock Emby / mock javbus，仅用于展示界面。）
 
 ---
@@ -549,6 +545,7 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | `verify_cn_view.py` | 国产传媒**选库→列表→单选/多选刮削→编辑元数据**（41 项，写路径全用假 `api()`） | 起 exe + 无头 Edge |
 | `extract_cn_fixtures.py` | 从 `cache/debug/` 的原始响应里切测试夹具 | 落盘的原始 HTML |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
+| `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest，比对 `revision` = 本地 tag、`source` = 本仓库、入口参数、非 root） | 能连 Docker Hub |
 | `live_test.go`（`EMBY_LIVE=1 go test -run TestLive`） | 实机**写**路径，幂等不改变数据 | 真实 config |
 
 ---
