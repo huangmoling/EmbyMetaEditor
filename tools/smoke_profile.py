@@ -126,8 +126,10 @@ def main():
         return 1
     keys = [s["key"] for s in src.get("sources") or []]
     check("至少注册了 3 个资料源", len(keys) >= 3, keys)
-    check("写入策略固定为 only_blank", src.get("write_strategy") == "only_blank",
+    check("批量写入策略固定为 only_blank", src.get("write_strategy") == "only_blank",
           src.get("write_strategy"))
+    check("单卡勾选写入策略为 as_picked（勾了就写，含覆盖）",
+          src.get("picked_write_strategy") == "as_picked", src.get("picked_write_strategy"))
     print("     源：%s" % "、".join("%s(%s)" % (s["label"], s["key"]) for s in src.get("sources") or []))
 
     # ---------- 2. 挑一个真实演员 ----------
@@ -175,6 +177,14 @@ def main():
     check("write_count 与实际可写字段数一致", (target_prof.get("write_count") or 0) == n,
           "write_count=%s 实际=%d" % (target_prof.get("write_count"), n))
 
+    # 「已有值 + 本次抓到」= 界面上可勾选覆盖的那一批。
+    # 默认不写（只填空白），但必须**能被勾选** —— 这是新加的能力，
+    # 至少要有样本，否则 live 阶段的覆盖验证会静默跳过。
+    over = [k for k, v in f.items() if v["value"] and v["emby_value"]]
+    check("可覆盖字段默认不写入（勾选才覆盖）",
+          not [k for k in over if f[k]["will_write"]], over)
+    print("     其中 %d 个字段可勾选覆盖：%s" % (len(over), "、".join(over) or "无"))
+
     for k in PROFILE_KEYS:
         v = f[k]
         print("     %-20s emby=%-26s got=%-26s %s" % (
@@ -211,9 +221,11 @@ def main():
     # ---------- 6. 真写 + 回滚 ----------
     if not LIVE:
         print("\n6) 写回 + 回滚  —— 跳过（设 PROFILE_LIVE=1 才跑，会真的改一次 Emby 再还原）")
+        print("6b) 勾选覆盖 + 回滚  —— 跳过（同上）")
         print("7) 批量（items 带 ID）  —— 跳过（同上）")
     else:
         run_live(target, target_prof)
+        run_live_overwrite(target, target_prof)
         run_live_batch(target)
 
     print("\n" + ("全部通过" if not FAILED else "有 %d 项失败：%s" % (len(FAILED), FAILED)))
@@ -285,6 +297,104 @@ def run_live(target, prof):
 
     st, js = post("/api/profile/rollback", {"id": rid})
     check("同一条记录不能回滚第二次", st >= 400, (st, js))
+
+
+def norm_val(key, val):
+    """把抓取值和 Emby 存回来的值拉到同一个尺度上再比。
+
+    为什么不能直接比字符串：Emby 会把日期规范化（写进去 `1996-04-22`，读回来是
+    `1996-04-22T00:00:00.0000000Z`），年份同理；`provider_ids` 更是**合并写**
+    （新值写进去，原有的 MetaTube / gfriends 行都还留着）。这不是 bug，是 Emby 的
+    存储语义 —— 断言得按语义比，否则满屏假 FAIL。
+    """
+    s = (val or "").strip()
+    if key == "premiere_date":
+        return s[:10]
+    return s
+
+
+def run_live_overwrite(target, prof):
+    """把「已有值也被本次抓到的」那批字段显式勾选写入，验覆盖确实生效且能回滚。
+
+    为什么单列一节：批量路径的承诺是「只填空白」，而单卡勾选是**唯一**能改动已有值的
+    入口 —— 它的风险也最高（写坏了就是真覆盖用户数据），所以必须逼着它走一遍
+    「真的改了 → 真的能逐字段还原」。没有可覆盖样本时明确跳过而不是假装通过。
+    """
+    pid, name = target["Id"], target["Name"]
+    f0 = fields_of(prof)
+    before = {k: v["emby_value"] for k, v in f0.items()}
+    over = [k for k, v in f0.items() if v["value"] and v["emby_value"]]
+
+    print("\n6b) 勾选覆盖 + 回滚（对已有值强制写入：%s）" % (over or "无可覆盖字段"))
+    if not over:
+        print("     这个演员没有「已有值 + 本次抓到」的字段，覆盖路径无法验证 —— 换个候选演员再跑")
+        return
+
+    labels = {k: f0[k]["label"] for k in over}
+    want = {k: f0[k]["value"] for k in over}
+    leave = {k: v["label"] for k, v in f0.items() if k not in over}
+
+    st, js = post("/api/profile/apply", {"person_id": pid, "name": name, "keys": over})
+    res = data(st, js)
+    check("勾选覆盖写入接口 200", st == 200, (st, js))
+    if not res:
+        return
+    check("written 报的就是勾选的那批字段",
+          sorted(res.get("written") or []) == sorted(labels.values()),
+          (res.get("written"), sorted(labels.values())))
+    check("overwritten 恰好是「本来就有值」的那批（都是中文标签）",
+          sorted(res.get("overwritten") or []) == sorted(labels.values()),
+          (res.get("overwritten"), sorted(labels.values())))
+    check("未勾选的字段没被顺手写进去",
+          not set(res.get("written") or []) & set(leave.values()),
+          (res.get("written"), sorted(leave.values())))
+    check("未勾选的字段在 skipped 里注明「未勾选」",
+          all(any(lb in s and "未勾选" in s for s in res.get("skipped") or [])
+              for lb in leave.values()),
+          (res.get("skipped"), sorted(leave.values())))
+    check("提示语明确说了「覆盖」", "覆盖" in (res.get("message") or ""), res.get("message"))
+    check("提示语里同时给了「可回滚」", "回滚" in (res.get("message") or ""), res.get("message"))
+    check("提示语里的覆盖数等于勾选数",
+          ("其中 %d 个覆盖了原值" % len(over)) in (res.get("message") or ""), res.get("message"))
+
+    rid = res.get("record_id")
+    check("覆盖写入也留了回滚快照", bool(rid), res)
+    if not rid:
+        return
+
+    st, prof_mid = preview(pid, name)
+    f_mid = fields_of(prof_mid)
+    mid = {k: v["emby_value"] for k, v in f_mid.items()}
+
+    bad = []
+    for k in over:
+        if k == "provider_ids":
+            # Emby 把外部 ID 合并写 → 只要求「抓到的每一行都进了 Emby」。
+            miss = [ln for ln in want[k].splitlines()
+                    if ln.strip() and ln.strip() not in (mid.get(k) or "")]
+            if miss:
+                bad.append((k, "缺", miss))
+        elif norm_val(k, mid.get(k)) != norm_val(k, want[k]):
+            bad.append((k, norm_val(k, want[k]), norm_val(k, mid.get(k))))
+    check("已有值已变成抓取值（按语义比，兼容 Emby 的规范化 / 合并写）", not bad, bad)
+
+    check("覆盖不会把字段写空", not [k for k in over if not (mid.get(k) or "").strip()],
+          {k: mid.get(k) for k in over})
+
+    # 覆盖只作用于这次勾选的字段，「只填空白」的默认策略不受影响：
+    # 覆盖前后「默认可写字段集合」必须一致（比如「出生地」这种空白+抓到值的字段
+    # 本来就该是 will_write，别把它误判成覆盖引起的）。
+    was = {k for k, v in f0.items() if v["will_write"]}
+    now = {k for k, v in f_mid.items() if v["will_write"]}
+    check("覆盖没有改变默认「只填空白」的可写字段集合", was == now, (sorted(was), sorted(now)))
+
+    st, js = post("/api/profile/rollback", {"id": rid})
+    check("覆盖后回滚接口 200", st == 200, (st, js))
+
+    st, prof_after = preview(pid, name)
+    after = {k: v["emby_value"] for k, v in fields_of(prof_after).items()}
+    diff = {k: (before[k], after[k]) for k in before if before[k] != after[k]}
+    check("覆盖回滚后逐字段还原到原值", not diff, diff)
 
 
 def run_live_batch(target):

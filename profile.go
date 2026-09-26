@@ -1,12 +1,14 @@
 package main
 
-// 演员资料管理：抓取 → 与 Emby 现有值比对 → **只填空白** → 写回 → 留快照可回滚。
+// 演员资料管理：抓取 → 与 Emby 现有值比对 → 写回 → 留快照可回滚。
 //
 // 这是 actorprofile.go（抓取/解析）的上一层，负责所有「会改数据」的动作。
-// 两条铁律（都是用户明确选的策略）：
-//  1. **只填空白。** Emby 里已有值的字段一律不动 —— 库里 1400 个演员已有头像/资料，
-//     全量覆盖会毁数据。是否写入的判定完全在服务端做，不信前端传来的值。
-//  2. **先快照再写。** 每次写之前落一份 Before/After，出问题能一键还原。
+// 两条铁律：
+//  1. **默认只填空白。** Emby 里已有值的字段默认一律不动 —— 库里上千个演员已经有资料，
+//     批量全量覆盖会毁数据。**唯一的例外**：在单卡面板上，用户并排看到「Emby 现有值 vs
+//     本次抓取值」之后亲手勾选的字段，那时以勾选为准（可以覆盖）。见 applyProfileFacts。
+//     无论哪种模式，写进去的值都来自服务端重新抓取的结果，不信前端传来的值。
+//  2. **先快照再写。** 每次写之前落一份 Before/After，出问题能一键还原 —— 覆盖也一样。
 
 import (
 	"context"
@@ -476,13 +478,19 @@ type ApplyResult struct {
 	Message   string   `json:"message"`
 	Sources   []string `json:"sources"`
 	AliasMemo int      `json:"alias_memo"`
+	// Overwritten 列出这次**覆盖**掉了 Emby 原有值的字段（Written 的子集）。
+	// 界面据此把结果说得更准确：一律只说「已写入 N 个字段」会让用户以为
+	// 自己辛苦攒的资料被无声改掉了。
+	Overwritten []string `json:"overwritten,omitempty"`
 }
 
 // applyActorProfile 抓取并写入（对外入口：先抓网络，再写）。
 //
-// keys 为空表示「写入所有判定为 WillWrite 的字段」；非空时只写其中的子集
-// （界面上的逐字段勾选）。**无论哪种，最终写什么由服务端重新抓取后判定**，
-// 不接受前端传来的值 —— 避免把任意内容写进用户的 Emby。
+// keys 为空表示「按「只填空白」策略写所有判定为 WillWrite 的字段」（批量走这条）；
+// 非空表示界面逐字段勾选过，**以勾选为准**，勾中的字段即使 Emby 已有值也会被覆盖
+// （用户是在并排看到两边值之后亲手勾的）。
+// **无论哪种，最终写什么值由服务端重新抓取后决定**，不接受前端传来的值 ——
+// 避免把任意内容写进用户的 Emby。
 func (a *App) applyActorProfile(ctx context.Context, personID, name string, keys []string, opts FetchOptions) (*ApplyResult, error) {
 	if personID == "" {
 		return nil, fmt.Errorf("缺少演员 ID")
@@ -495,6 +503,9 @@ func (a *App) applyActorProfile(ctx context.Context, personID, name string, keys
 }
 
 // applyProfileFacts 把一份**已经抓好的**资料写进 Emby。
+//
+// keys 为空 = 批量模式，只填空白；非空 = 界面逐字段勾选，以勾选为准（可覆盖已有值）。
+// 详见函数体里的 explicit 分支。
 //
 // 和 applyActorProfile 分开是为了可测：这条路径会改用户的媒体库，是整套功能里
 // 唯一「出错就没法挽回」的地方（除了回滚），必须能脱离外网单独测
@@ -510,17 +521,34 @@ func (a *App) applyProfileFacts(ctx context.Context, prof *ActorProfile, keys []
 	for _, k := range keys {
 		want[k] = true
 	}
+	// explicit 表示「界面逐字段勾选过」。这两种模式的差别是整个写入策略的核心：
+	//
+	//   keys 为空（批量）：只填空白 —— 库里上千个演员大多已经有资料，
+	//                       批量跑一遍全量覆盖会毁数据。
+	//   keys 非空（单卡）：**以勾选为准**。用户是看着「Emby 现有值 vs 本次抓取值」
+	//                       那两列亲手勾的，勾了就写，包括覆盖已有值。
+	//
+	// 无论哪种，值都来自服务端本次重新抓取的结果（prof），不接受前端传值。
+	explicit := len(want) > 0
 	picked := map[string]bool{}
 	for _, f := range prof.Fields {
-		if !f.WillWrite {
-			res.Skipped = append(res.Skipped, f.Label+"（"+f.Note+"）")
-			continue
-		}
-		if len(want) > 0 && !want[f.Key] {
+		switch {
+		case explicit && !want[f.Key]:
 			res.Skipped = append(res.Skipped, f.Label+"（未勾选）")
-			continue
+		case f.Value == "":
+			// 没抓到值的字段永远不写：覆盖成空等于清库。
+			res.Skipped = append(res.Skipped, f.Label+"（未抓取到）")
+		case explicit:
+			picked[f.Key] = true
+			if !f.WillWrite {
+				// Emby 里原本有值，这次是用户明确勾选要覆盖
+				res.Overwritten = append(res.Overwritten, f.Label)
+			}
+		case f.WillWrite:
+			picked[f.Key] = true
+		default:
+			res.Skipped = append(res.Skipped, f.Label+"（"+f.Note+"）")
 		}
-		picked[f.Key] = true
 	}
 	if len(picked) == 0 {
 		res.Message = "没有需要写入的字段（Emby 里该有的都有了）"
@@ -620,6 +648,9 @@ func (a *App) applyProfileFacts(ctx context.Context, prof *ActorProfile, keys []
 	}
 
 	res.Message = fmt.Sprintf("已写入 %d 个字段", len(res.Written))
+	if n := len(res.Overwritten); n > 0 {
+		res.Message += fmt.Sprintf("（其中 %d 个覆盖了原值，可回滚）", n)
+	}
 	return res, nil
 }
 
@@ -677,4 +708,144 @@ func sortSourceKeys(keys []string) []string {
 	out := append([]string(nil), keys...)
 	sort.Strings(out)
 	return out
+}
+
+// ---------- 该演员在媒体库里的作品 ----------
+//
+// 放在演员资料面板里一起展示：用户点开某位演员，想知道的两件事就是
+// 「他的资料对不对」和「我库里有哪些他的片」，分成两个地方看反而割裂。
+//
+// 只读本地 Emby，不碰外部站点，所以它单独一个接口、单独加载 ——
+// 不能让它拖慢（也不能被）资料源的抓取。
+
+// PersonWork 是某演员在媒体库里的一部作品。
+type PersonWork struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Year     int    `json:"year"`
+	Date     string `json:"premiere_date"`
+	Number   string `json:"number"`
+	Library  string `json:"library"`
+	ImageTag string `json:"image_tag"`
+}
+
+// PersonWorks 是「这个演员在媒体库里有哪些作品」的结果。
+type PersonWorks struct {
+	Total int          `json:"total"`
+	Items []PersonWork `json:"items"`
+	Start int          `json:"start"`
+	Limit int          `json:"limit"`
+}
+
+// libraryRoot 是一条「磁盘路径 → 库名」的映射。
+type libraryRoot struct {
+	prefix string
+	name   string
+}
+
+// libraryRoots 从服务器登记信息里拼出路径前缀表。
+//
+// 取不到就返回空表（不算错误）：归不到库只是少显示一个标签，
+// 不该让「这个演员有哪些作品」整个失败。
+func (e *Emby) libraryRoots(ctx context.Context) []libraryRoot {
+	folders, err := e.LibraryFolders(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []libraryRoot
+	seen := map[string]bool{}
+	for _, f := range folders {
+		for _, loc := range f.Locations {
+			loc = strings.TrimRight(strings.TrimSpace(loc), "/\\")
+			if loc == "" || f.Name == "" || seen[loc] {
+				continue
+			}
+			seen[loc] = true
+			out = append(out, libraryRoot{prefix: loc, name: f.Name})
+		}
+	}
+	return out
+}
+
+// libraryOfPath 把条目的磁盘路径归到某个库名，认不出来返回空串。
+//
+// 两条要求，都是踩过才知道要写死的：
+//   - **按路径段对齐**（后面必须是分隔符或结尾）。只比字符串前缀的话，
+//     `/data/movies-archive/x.mp4` 会被归进 `/data/movies` 那个库。
+//   - **自己挑最长前缀**，不假设调用方排过序。库路径可以互相嵌套
+//     （`/a` 与 `/a/4K`），挑错就会把 4K 专区的片子归到主库；
+//     依赖「调用方记得排序」是那种出错时完全静默的设计。
+//   - 大小写不敏感：路径来自服务端，同一目录在不同条目上大小写可能不一致。
+func libraryOfPath(roots []libraryRoot, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	best, bestLen := "", 0
+	for _, r := range roots {
+		if len(r.prefix) <= bestLen || len(p) < len(r.prefix) {
+			continue
+		}
+		if !strings.EqualFold(p[:len(r.prefix)], r.prefix) {
+			continue
+		}
+		rest := p[len(r.prefix):]
+		if rest == "" || rest[0] == '/' || rest[0] == '\\' {
+			best, bestLen = r.name, len(r.prefix)
+		}
+	}
+	return best
+}
+
+// PersonWorks 查这个演员在媒体库里的作品，按首播日期倒序。
+func (a *App) PersonWorks(ctx context.Context, personID string, start, limit int) (*PersonWorks, error) {
+	personID = strings.TrimSpace(personID)
+	if personID == "" {
+		return nil, fmt.Errorf("缺少演员 ID")
+	}
+	if start < 0 {
+		start = 0
+	}
+	if limit <= 0 {
+		limit = 60
+	}
+	if limit > 400 {
+		limit = 400
+	}
+
+	e := NewEmby(a.store.Get())
+	res, err := e.Items(ctx, ItemQuery{
+		PersonIDs:  []string{personID},
+		Recursive:  true,
+		Fields:     []string{"ProductionYear,PremiereDate,ImageTags,Path"},
+		StartIndex: start,
+		Limit:      limit,
+		SortBy:     "PremiereDate",
+		SortOrder:  "Descending",
+	})
+	if err != nil {
+		return nil, err
+	}
+	roots := e.libraryRoots(ctx)
+
+	out := &PersonWorks{Total: res.TotalRecordCount, Start: start, Limit: limit, Items: []PersonWork{}}
+	for _, it := range res.Items {
+		w := PersonWork{
+			ID:     itemStr(it, "Id"),
+			Name:   itemStr(it, "Name"),
+			Type:   itemStr(it, "Type"),
+			Year:   itemInt(it, "ProductionYear"),
+			Date:   itemStr(it, "PremiereDate"),
+			Number: itemNumber(it),
+		}
+		w.Library = libraryOfPath(roots, itemStr(it, "Path"))
+		if tags, ok := it["ImageTags"].(map[string]any); ok {
+			if v, ok := tags["Primary"].(string); ok {
+				w.ImageTag = v
+			}
+		}
+		out.Items = append(out.Items, w)
+	}
+	return out, nil
 }

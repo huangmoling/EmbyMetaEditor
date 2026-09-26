@@ -244,7 +244,27 @@ func (e *Emby) Views(ctx context.Context) ([]Library, error) {
 	return resp.Items, nil
 }
 
-// Counts 是全局媒体数量统计。
+// LibraryFolder 是一个媒体库在服务器上的登记信息，带它在磁盘上的位置。
+//
+// 为什么不用 Views：那个接口**不返回 Path**（试过 `Fields=Path`，仍是 null），
+// 而没有 Path 就没法把一条作品归到某个库 —— 条目的 `ParentId` 是库**内部**那一层
+// 文件夹（例如「女优库 / 三島奈津子」里的中间层），跟 Views 给出的库 ID 对不上。
+// VirtualFolders 是管理员接口，这个令牌本来就在做写操作，权限足够。
+type LibraryFolder struct {
+	Name      string   `json:"Name"`
+	ItemID    string   `json:"ItemId"`
+	Locations []string `json:"Locations"`
+}
+
+// LibraryFolders 列出服务器上登记的全部媒体库及其磁盘路径。
+func (e *Emby) LibraryFolders(ctx context.Context) ([]LibraryFolder, error) {
+	var out []LibraryFolder
+	if err := e.getJSON(ctx, "/Library/VirtualFolders", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 type Counts struct {
 	MovieCount   int `json:"MovieCount"`
 	SeriesCount  int `json:"SeriesCount"`
@@ -273,6 +293,7 @@ type ItemQuery struct {
 	IncludeItemTypes string
 	Fields           []string
 	SearchTerm       string
+	PersonIDs        []string
 	StartIndex       int
 	Limit            int
 	SortBy           string
@@ -296,6 +317,11 @@ func (q ItemQuery) values() url.Values {
 	}
 	if q.SearchTerm != "" {
 		v.Set("SearchTerm", q.SearchTerm)
+	}
+	// PersonIds：按演员筛条目（「这个演员在媒体库里有哪些作品」就靠它）。
+	// 逗号分隔的 ID 列表，Emby 侧是同义匹配。
+	if len(q.PersonIDs) > 0 {
+		v.Set("PersonIds", strings.Join(q.PersonIDs, ","))
 	}
 	if q.Limit > 0 {
 		v.Set("Limit", itoa(q.Limit))

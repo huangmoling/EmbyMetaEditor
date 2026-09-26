@@ -624,6 +624,162 @@ func TestApplyProfileFactsOnlyFillsBlank(t *testing.T) {
 	}
 }
 
+// profileWithFilled 造一份「Emby 里已经有值」的抓取结果：字段同时有 Value（本次抓到）
+// 和 EmbyValue（现有），WillWrite 为 false —— 也就是默认策略下会被跳过的那一类。
+// 用来验证「已有值也能被主动勾选覆盖」这条需求。
+func profileWithFilled(personID, name string, fetched, existing map[string]string) *ActorProfile {
+	prof := profileWithFields(personID, name, fetched)
+	for i := range prof.Fields {
+		f := &prof.Fields[i]
+		if v, ok := existing[f.Key]; ok {
+			f.EmbyValue = v
+			f.WillWrite = false
+			f.Note = "Emby 已有值，跳过"
+		}
+	}
+	prof.WriteCount = 0
+	for _, f := range prof.Fields {
+		if f.WillWrite {
+			prof.WriteCount++
+		}
+	}
+	return prof
+}
+
+// TestApplyProfileExplicitKeysOverwrite 是需求「已有值可勾选覆盖」的回归。
+//
+// 两条承诺同时钉住：
+//   - 勾中的字段**可以**覆盖 Emby 里已有的值（这是新加的能力）；
+//   - 没勾的字段一个字都不能动（这是覆盖功能的安全边界，比新能力更重要）。
+func TestApplyProfileExplicitKeysOverwrite(t *testing.T) {
+	m := newMockEmby(t)
+	m.items["p-1"] = map[string]any{
+		"Id": "p-1", "Name": "星野テスト", "Type": "Person",
+		"Overview":            "旧简介",
+		"PremiereDate":        "1990-01-01T00:00:00.0000000Z",
+		"ProductionYear":      float64(1990),
+		"ProductionLocations": []any{"旧出生地"},
+		"ProviderIds":         map[string]any{"MetaTube": "keep-me"},
+	}
+	a := newProfileTestApp(t, m)
+
+	prof := profileWithFilled("p-1", "星野テスト",
+		map[string]string{"overview": "新简介", "premiere_date": "1995-04-01"},
+		map[string]string{"overview": "旧简介", "premiere_date": "1990-01-01"})
+	if prof.WriteCount != 0 {
+		t.Fatalf("两个字段 Emby 里都有值，默认一个都不该预判为可写，实际 %d", prof.WriteCount)
+	}
+
+	// 只勾「简介」，出生日期不勾
+	res, err := a.applyProfileFacts(context.Background(), prof, []string{"overview"})
+	if err != nil {
+		t.Fatalf("applyProfileFacts: %v", err)
+	}
+	if len(res.Written) != 1 || res.Written[0] != "overview" {
+		t.Fatalf("只该写入勾中的简介，实际 %+v", res.Written)
+	}
+	if len(res.Overwritten) != 1 || res.Overwritten[0] != "overview" {
+		t.Fatalf("勾中的字段原本有值，应被标成覆盖，实际 %+v", res.Overwritten)
+	}
+	if !strings.Contains(res.Message, "覆盖") {
+		t.Errorf("结果说明里要讲清覆盖了几项，实际 %q", res.Message)
+	}
+
+	body := m.patched["p-1"]
+	if body == nil {
+		t.Fatal("mock 没收到写入请求")
+	}
+	if body["Overview"] != "新简介" {
+		t.Errorf("勾中的简介没被覆盖：%v", body["Overview"])
+	}
+	// 没勾的字段必须原样保留
+	if body["PremiereDate"] != "1990-01-01T00:00:00.0000000Z" {
+		t.Errorf("没勾的出生日期被动了：%v", body["PremiereDate"])
+	}
+	if y, _ := body["ProductionYear"].(float64); int(y) != 1990 {
+		t.Errorf("没勾的年份被动了：%v", body["ProductionYear"])
+	}
+	if locs, _ := body["ProductionLocations"].([]any); len(locs) != 1 || locs[0] != "旧出生地" {
+		t.Errorf("没勾的出生地被动了：%v", body["ProductionLocations"])
+	}
+	if pids, _ := body["ProviderIds"].(map[string]any); pids["MetaTube"] != "keep-me" {
+		t.Errorf("没勾的外部 ID 被动了：%v", body["ProviderIds"])
+	}
+}
+
+// 批量路径（keys 为空）必须还是「只填空白」—— 新加的覆盖能力不能把它带偏。
+// 库里上千个演员大多已经有资料，批量跑一遍全量覆盖会毁数据。
+func TestApplyProfileNoKeysKeepsOnlyBlankPolicy(t *testing.T) {
+	m := newMockEmby(t)
+	m.items["p-1"] = map[string]any{
+		"Id": "p-1", "Name": "星野テスト", "Type": "Person",
+		"Overview": "旧简介",
+	}
+	a := newProfileTestApp(t, m)
+
+	prof := profileWithFilled("p-1", "星野テスト",
+		map[string]string{"overview": "新简介"},
+		map[string]string{"overview": "旧简介"})
+	res, err := a.applyProfileFacts(context.Background(), prof, nil)
+	if err != nil {
+		t.Fatalf("applyProfileFacts: %v", err)
+	}
+	if len(res.Written) != 0 {
+		t.Fatalf("批量模式不该写任何字段，实际 %+v", res.Written)
+	}
+	if m.patched["p-1"] != nil {
+		t.Error("批量模式不该发出任何写入请求")
+	}
+	if len(res.Skipped) == 0 {
+		t.Error("跳过的字段要有说明，否则用户以为抓取失败了")
+	}
+	if m.items["p-1"]["Overview"] != "旧简介" {
+		t.Errorf("Emby 里的原值被改动了：%v", m.items["p-1"]["Overview"])
+	}
+}
+
+// 覆盖也要能回滚 —— 这是用户敢用覆盖的前提。
+func TestOverwriteThenRollbackRestoresOriginal(t *testing.T) {
+	m := newMockEmby(t)
+	original := map[string]any{
+		"Id": "p-1", "Name": "星野テスト", "Type": "Person",
+		"Overview":            "用户手写的旧简介",
+		"PremiereDate":        "1990-01-01T00:00:00.0000000Z",
+		"ProductionYear":      float64(1990),
+		"ProductionLocations": []any{"旧出生地"},
+		"ProviderIds":         map[string]any{"MetaTube": "keep-me"},
+	}
+	m.items["p-1"] = original
+	a := newProfileTestApp(t, m)
+
+	prof := profileWithFilled("p-1", "星野テスト",
+		map[string]string{"overview": "新简介", "production_locations": "新出生地"},
+		map[string]string{"overview": "用户手写的旧简介", "production_locations": "旧出生地"})
+	res, err := a.applyProfileFacts(context.Background(), prof, []string{"overview", "production_locations"})
+	if err != nil {
+		t.Fatalf("applyProfileFacts: %v", err)
+	}
+	if len(res.Overwritten) != 2 || len(res.Written) != 2 {
+		t.Fatalf("两个字段都该被覆盖：written=%v overwritten=%v", res.Written, res.Overwritten)
+	}
+	if res.RecordID == "" {
+		t.Fatal("覆盖写入同样要留快照，否则回滚无从下手")
+	}
+	if m.items["p-1"]["Overview"] != "新简介" {
+		t.Fatalf("覆盖没生效：%v", m.items["p-1"]["Overview"])
+	}
+
+	if _, err := a.rollbackSync(context.Background(), res.RecordID); err != nil {
+		t.Fatalf("rollbackSync: %v", err)
+	}
+	after := m.items["p-1"]
+	for _, k := range []string{"Overview", "PremiereDate", "ProductionYear", "ProductionLocations", "ProviderIds"} {
+		if diff := jsonDiff(original[k], after[k]); diff != "" {
+			t.Errorf("回滚后 %s 没还原：%s\n  期望 %#v\n  实际 %#v", k, diff, original[k], after[k])
+		}
+	}
+}
+
 // TestApplyThenRollbackRestores 是这套功能的**核心安全承诺**：
 // 写完能一键还原成写入前的样子，一个字段都不差。
 func TestApplyThenRollbackRestores(t *testing.T) {

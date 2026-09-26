@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -571,6 +573,48 @@ func parseMagnets(data []byte) []JBMagnet {
 		out = append(out, m)
 	}
 	return out
+}
+
+// reMagnetSize 只认「数字 + 单位」这一种形态（解析阶段已经把空白归一化掉了）。
+var reMagnetSize = regexp.MustCompile(`(?i)^\s*(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)?\s*$`)
+
+// magnetSizeBytes 把「1.83GB」这类体积串换算成可以比较的字节数。
+//
+// 解析不出来时返回 -1 而不是 0：0 会跟「0 B」混为一谈，而且排序时会被当成
+// 「比 KB 级还小」排到中间去。这里要的是「不认识的排最后」，用一个必定小于
+// 任何真实体积的哨兵值最省事。历史上确实出现过空体积（页面结构变动时），
+// 排除这种可能比假设它不会发生更划算。
+func magnetSizeBytes(s string) int64 {
+	m := reMagnetSize.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return -1
+	}
+	f, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return -1
+	}
+	var unit float64 = 1
+	switch strings.ToUpper(m[2]) {
+	case "TB":
+		unit = 1 << 40
+	case "GB":
+		unit = 1 << 30
+	case "MB":
+		unit = 1 << 20
+	case "KB":
+		unit = 1 << 10
+	}
+	return int64(f * unit)
+}
+
+// sortMagnetsBySize 就地把磁力列表按体积从大到小排序，体积解析不出来的排最后。
+//
+// 用 SliceStable：体积相同的两条（同一个种子的不同发布很常见）保持页面上的
+// 原始顺序，否则每次刷新顺序都在跳，用户会以为列表变了。
+func sortMagnetsBySize(mags []JBMagnet) {
+	sort.SliceStable(mags, func(i, j int) bool {
+		return magnetSizeBytes(mags[i].Size) > magnetSizeBytes(mags[j].Size)
+	})
 }
 
 // magnetDisplayName 从磁力链接的 dn 参数里提取可读名称。

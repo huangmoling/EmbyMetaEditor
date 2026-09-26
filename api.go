@@ -139,6 +139,7 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("GET /api/profile/history", a.handleProfileHistory)
 	mux.HandleFunc("POST /api/profile/rollback", a.handleProfileRollback)
 	mux.HandleFunc("GET /api/profile/aliases", a.handleProfileAliases)
+	mux.HandleFunc("GET /api/profile/works", a.handleProfileWorks)
 
 	// ---- MetaTube ----
 	mux.HandleFunc("GET /api/metatube/providers", a.handleMTProviders)

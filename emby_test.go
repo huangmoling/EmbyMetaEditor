@@ -30,8 +30,15 @@ type mockEmby struct {
 	// mock 必须照抄这个行为，否则「按库查看演员」的功能在单测里是假的。
 	personParent map[string]string
 	lastParentID string // 记录最近一次 /Persons 收到的 ParentId，供断言客户端确实传了
-	refresh      int
-	srv          *httptest.Server
+	// libFolders 模拟 /Library/VirtualFolders：媒体库登记信息（含磁盘路径）。
+	// 「这个演员在媒体库里有哪些作品」要靠它把作品归到某个库 —— 库名在
+	// 条目里是查不到的（条目的 ParentId 是库内部的中间文件夹）。
+	libFolders []LibraryFolder
+	// failLibFolders 让 /Library/VirtualFolders 报错，用来验证「归不到库也不能
+	// 让整个请求失败」这条降级承诺。
+	failLibFolders bool
+	refresh        int
+	srv            *httptest.Server
 }
 
 // mockServerManaged 是 POST /Items/{id} 不会改动的服务端托管字段。
@@ -59,6 +66,30 @@ func isGUIDish(s string) bool {
 		}
 	}
 	return true
+}
+
+// itemHasPerson 判断条目的演职员表里有没有给定的演员 —— 模拟 Emby 的 PersonIds 过滤。
+//
+// 真实响应的形态是 `People: [{Id, Name, Type, Role}]`；这里也认 `PersonIds: [...]`
+// 这种更简单的写法，方便夹具写得短一点。
+func itemHasPerson(it map[string]any, want map[string]bool) bool {
+	if people, ok := it["People"].([]any); ok {
+		for _, p := range people {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := pm["Id"].(string); want[strings.TrimSpace(id)] {
+				return true
+			}
+		}
+	}
+	for _, id := range toStringSlice(it["PersonIds"]) {
+		if want[strings.TrimSpace(id)] {
+			return true
+		}
+	}
+	return false
 }
 
 func newMockEmby(t *testing.T) *mockEmby {
@@ -101,8 +132,20 @@ func newMockEmby(t *testing.T) *mockEmby {
 	mux.HandleFunc("GET /Items", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		// PersonIds 过滤：真实 Emby 支持按演员筛条目（「这个演员有哪些作品」就靠它）。
+		// mock 必须照抄 —— 否则客户端忘了带这个参数，测试照样全绿（拿到全部条目），
+		// 而线上会返回「所有人的作品」。
+		wantPersons := map[string]bool{}
+		for _, id := range strings.Split(r.URL.Query().Get("PersonIds"), ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				wantPersons[id] = true
+			}
+		}
 		list := []map[string]any{}
 		for _, it := range m.items {
+			if len(wantPersons) > 0 && !itemHasPerson(it, wantPersons) {
+				continue
+			}
 			// 真实服务器上 /Items 是**投影**：SortName 不在列表里（实测全是 null），
 			// 只有详情接口才返回。mock 必须照抄，否则「前端拿 SortName 当番号」
 			// 这种 bug 在单测里永远发现不了。
@@ -116,6 +159,19 @@ func newMockEmby(t *testing.T) *mockEmby {
 			list = append(list, cp)
 		}
 		writeJSON(w, 200, map[string]any{"Items": list, "TotalRecordCount": len(list)})
+	})
+	mux.HandleFunc("GET /Library/VirtualFolders", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.failLibFolders {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		folders := m.libFolders
+		if folders == nil {
+			folders = []LibraryFolder{{Name: "电影", ItemID: "lib1", Locations: []string{"/data/movies"}}}
+		}
+		writeJSON(w, 200, folders)
 	})
 	// ---- 读：真实 4.9 构建只注册了用户作用域的详情路由 ----
 	//

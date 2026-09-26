@@ -39,10 +39,15 @@ func (a *App) handleProfileSources(w http.ResponseWriter, r *http.Request) {
 		out = append(out, srcView{Key: s.Key(), Label: s.Label()})
 	}
 	writeOK(w, map[string]any{
-		"sources":        out,
-		"alias_groups":   a.aliases.Count(),
-		"history_count":  len(a.sync.List(0)),
-		"write_strategy": "only_blank",
+		"sources":       out,
+		"alias_groups":  a.aliases.Count(),
+		"history_count": len(a.sync.List(0)),
+		// 批量（不带 keys）的默认策略。单卡面板上逐字段勾选时**以勾选为准**，
+		// 勾中已有值的字段就是覆盖 —— 这个字符串只管批量那条路径，
+		// 别把它读成「永远不覆盖」。
+		"write_strategy":        "only_blank",
+		"batch_write_strategy":  "only_blank",
+		"picked_write_strategy": "as_picked",
 	})
 }
 
@@ -68,7 +73,11 @@ func (a *App) handleProfilePreview(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, prof)
 }
 
-// handleProfileApply 抓取并写入（只填空白字段）。
+// handleProfileApply 抓取并写入单个演员。
+//
+// 请求里带 keys（界面逐字段勾选）时**以勾选为准**：勾中的字段即使 Emby 已有值
+// 也会被覆盖 —— 用户是看着「Emby 现有值 vs 本次抓取值」两列亲手勾的。
+// 不带 keys 时按「只填空白」处理。
 func (a *App) handleProfileApply(w http.ResponseWriter, r *http.Request) {
 	var in profileRequest
 	if err := decodeBody(r, &in); err != nil {
@@ -198,9 +207,15 @@ func (a *App) handleProfileBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := FetchOptions{Sources: batch.Sources, UseAliasMemo: useMemo}
 	keys := batch.Keys
+	// 批量路径界面不发 keys，走的就是「只填空白」。万一将来发了 keys，
+	// 日志也要如实说明是「按勾选写入（可覆盖）」，别让策略和日志各说各话。
+	policy := "只填空白字段"
+	if len(keys) > 0 {
+		policy = "按勾选字段写入（含覆盖已有值）"
+	}
 	job, jobCtx := a.jobs.New("actor-profile",
 		fmt.Sprintf("批量抓取演员资料（%d 位）", len(targets)), len(targets))
-	job.addLog("info", fmt.Sprintf("开始处理 %d 位演员，写入策略：只填空白字段", len(targets)))
+	job.addLog("info", fmt.Sprintf("开始处理 %d 位演员，写入策略：%s", len(targets), policy))
 
 	go func() {
 		sem := make(chan struct{}, maxInt(1, cfg.Concurrency))
@@ -261,6 +276,28 @@ func (a *App) handleProfileRollback(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	res, err := a.rollbackSync(ctx, in.ID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeOK(w, res)
+}
+
+// handleProfileWorks 这个演员在媒体库里有哪些作品（只读本地 Emby）。
+//
+// 单独一条接口而不是塞进 preview：preview 要联网抓三个外部站点（秒级），
+// 而作品列表只查本地 Emby（毫秒级）。合在一起会让「这个演员有哪些片」
+// 白等一遍外网，外网站点挂了还看不到。
+func (a *App) handleProfileWorks(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	personID := strings.TrimSpace(q.Get("person_id"))
+	if personID == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少演员 ID"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := a.PersonWorks(ctx, personID, atoiSafe(q.Get("start")), atoiSafe(q.Get("limit")))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

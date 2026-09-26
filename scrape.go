@@ -763,15 +763,14 @@ type ScanMovie struct {
 
 // ScanResult 是一次番号统计的结果。
 type ScanResult struct {
-	Star           JBStar      `json:"star"`
-	Candidates     []JBStar    `json:"candidates"`
-	Total          int         `json:"total"`
-	Matched        int         `json:"matched"`
-	Movies         []ScanMovie `json:"movies"`
-	Missing        []ScanMovie `json:"missing"`
-	LocalCount     int         `json:"local_count"`
-	LocalUnmatched []string    `json:"local_unmatched"`
-	Pages          int         `json:"pages"`
+	Star       JBStar      `json:"star"`
+	Candidates []JBStar    `json:"candidates"`
+	Total      int         `json:"total"`
+	Matched    int         `json:"matched"`
+	Movies     []ScanMovie `json:"movies"`
+	Missing    []ScanMovie `json:"missing"`
+	LocalCount int         `json:"local_count"`
+	Pages      int         `json:"pages"`
 }
 
 // ScanActorNumbers 统计某演员的全部番号，并与本地媒体库比对找出缺失。
@@ -809,13 +808,11 @@ func (a *App) ScanActorNumbers(ctx context.Context, starInput, parentID string, 
 	res.LocalCount = idx.Scanned
 	logf("info", fmt.Sprintf("本地媒体库共 %d 个影片条目", idx.Scanned))
 
-	localUsed := map[string]bool{}
 	for _, mv := range movies {
 		sm := ScanMovie{Number: mv.Number, Title: mv.Title, Date: mv.Date, Cover: mv.Cover, URL: mv.URL}
 		if ref, ok := idx.ByKey[canonNumber(mv.Number)]; ok {
 			sm.Local = true
 			sm.ItemID = ref.ID
-			localUsed[ref.ID] = true
 		}
 		res.Movies = append(res.Movies, sm)
 	}
@@ -826,13 +823,11 @@ func (a *App) ScanActorNumbers(ctx context.Context, starInput, parentID string, 
 			res.Missing = append(res.Missing, sm)
 		}
 	}
-	for _, it := range idx.Items {
-		if !localUsed[it.ID] && it.Number != "" {
-			res.LocalUnmatched = append(res.LocalUnmatched, it.Number)
-		}
-	}
+	// 这里刻意**不再**统计「本地有、javbus 未列出」的那批番号：
+	// 它除了占一块版面之外没有任何可操作的动作（既不缺、也不能抓），
+	// 而且库里同一个番号常有多个副本、javbus 侧也会改标题，
+	// 这份清单每天都不同，看得人以为出了错。要这个数据的场景自己查媒体库更快。
 	sort.Slice(res.Missing, func(i, j int) bool { return res.Missing[i].Date > res.Missing[j].Date })
-	sort.Strings(res.LocalUnmatched)
 	logf("info", fmt.Sprintf("已收录 %d 部，缺失 %d 部", res.Matched, len(res.Missing)))
 	return res, nil
 }
@@ -844,6 +839,30 @@ type MagnetResult struct {
 	Title   string     `json:"title"`
 	Magnets []JBMagnet `json:"magnets"`
 	Error   string     `json:"error,omitempty"`
+}
+
+// magnetResultFrom 把一次作品详情抓取的结果整理成给前端的样子。
+//
+// 单独抽出来是为了能被单测覆盖：真正决定列表顺序的那句 sortMagnetsBySize
+// 原来埋在 FetchMagnetsFor 里面，而那个函数必须联网（javbus 限速、要真实页面），
+// 单测碰不到 —— 于是「排序没接上」这种错只能靠人眼在界面上发现。
+// 现在只要给一个解析好的 JBMovie，不联网也能验证顺序。
+func magnetResultFrom(number, pageURL, fallbackTitle string, mv *JBMovie) MagnetResult {
+	out := MagnetResult{Number: number, URL: pageURL, Title: fallbackTitle}
+	if mv == nil {
+		out.Error = "没有拿到作品详情"
+		return out
+	}
+	// 复制一份再排：排序是展示策略，不该改动调用方手里那份解析结果。
+	out.Magnets = append([]JBMagnet(nil), mv.Magnets...)
+	sortMagnetsBySize(out.Magnets)
+	if mv.Title != "" {
+		out.Title = mv.Title
+	}
+	if len(out.Magnets) == 0 {
+		out.Error = "该作品暂无磁力链接"
+	}
+	return out
 }
 
 // FetchMagnetsFor 并发抓取一批番号的磁力列表。
@@ -874,13 +893,9 @@ func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurre
 			if err != nil {
 				out.Error = err.Error()
 			} else {
-				out.Magnets = mv.Magnets
-				if mv.Title != "" {
-					out.Title = mv.Title
-				}
-				if len(mv.Magnets) == 0 {
-					out.Error = "该作品暂无磁力链接"
-				}
+				// 按体积从大到小：一个番号常有十几条磁力，页面顺序是按发布时间
+				// 或随机给的，用户想找的几乎总是「最大的那个」。
+				out = magnetResultFrom(t.Number, t.URL, t.Title, mv)
 			}
 			results[i] = out
 			if job != nil {

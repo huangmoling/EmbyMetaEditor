@@ -27,7 +27,8 @@ const S = {
   ps: { start: 0, limit: 48, total: 0, items: [] },
   // prof 是「演员资料」面板的界面状态。sel 用 Set 存勾选的源，
   // 重新渲染（切换视图 / 重查列表）不会丢勾选。
-  prof: { sources: [], sel: new Set(), aliasN: 0, loaded: false },
+  // works 是抽屉里「媒体库作品」那一块：单独加载、单独分页，不参与资料抓取。
+  prof: { sources: [], sel: new Set(), aliasN: 0, loaded: false, works: { personId: '', items: [], total: 0, limit: 60, ready: false } },
   jb: { scan: null, selected: new Set(), magnets: [], targets: [], magTab: '' },
   watching: {},
 };
@@ -677,10 +678,54 @@ function profileBody(personId, name, keys) {
   return b;
 }
 
+// profileNoteTag 只用于首次渲染；之后行状态由 refreshProfileRow 就地更新。
 function profileNoteTag(f) {
   if (f.will_write) return '<span class="tag tag-green">将写入</span>';
   if (f.value) return '<span class="tag tag-amber">已有值，跳过</span>';
   return '<span class="tag">未抓取到</span>';
+}
+
+// over = Emby 里已经有值，但这次也抓到了新值 —— 勾上就是覆盖。
+// 这种行不预先勾（默认仍是「只填空白」），但**允许**用户主动勾选覆盖。
+const rowIsOver = (f) => !!(f.value && f.emby_value);
+
+// refreshProfileRow 勾选状态一变就重画这一行的判定文案与配色。
+// 为什么不能只在提交时才体现：用户要能一眼看到「我现在勾的这一项会覆盖掉原值」，
+// 而不是点完按钮才知道。
+function refreshProfileRow(tr) {
+  const cb = $('input[data-key]', tr);
+  if (!cb) return;
+  const over = tr.dataset.over === '1';
+  const will = cb.checked;
+  $('.pf-n', tr).innerHTML = !will
+    ? (over ? '<span class="tag tag-amber">已有值，跳过</span>' : '<span class="tag">未勾选</span>')
+    : (over ? '<span class="tag tag-red">将覆盖原值</span>' : '<span class="tag tag-green">将写入</span>');
+  tr.classList.toggle('pf-over', over && will);
+  tr.classList.toggle('pf-will', will && !over);
+}
+
+// refreshProfileApply 让按钮上的数字和勾选实时一致，并在有覆盖时变成危险色。
+// 覆盖是不可逆动作（有快照可回滚，但仍要显眼），所以不用 window.confirm ——
+// 那个在无头浏览器里会卡死（这个项目里踩过），改用「按钮自己变色 + 写清数量」。
+function refreshProfileApply() {
+  const rows = $$('#pfBody .pf-tbl tbody tr');
+  const picked = rows.filter((tr) => { const c = $('input[data-key]', tr); return c && c.checked; });
+  const over = picked.filter((tr) => tr.dataset.over === '1').length;
+  const b = $('#pfApply');
+  if (!b) return;
+  b.disabled = picked.length === 0;
+  b.textContent = picked.length
+    ? ('写入 ' + picked.length + ' 个字段' + (over ? '（含 ' + over + ' 项覆盖）' : ''))
+    : '没有可写入的字段';
+  b.classList.toggle('btn-danger', over > 0);
+  b.classList.toggle('btn-primary', over === 0);
+  const hint = $('#pfCount');
+  if (hint) {
+    hint.textContent = picked.length
+      ? (picked.length + ' 项待写入' + (over ? '，其中 ' + over + ' 项会覆盖 Emby 原值' : '，都是 Emby 里空着的字段'))
+      : '当前没有勾选任何字段';
+    hint.className = 'cnhint' + (over ? ' pf-warn' : '');
+  }
 }
 
 function renderProfileFact(f) {
@@ -720,19 +765,27 @@ function renderProfilePanel(personId, name, prof) {
   const srcTags = (prof.sources || []).map((s) => '<span class="tag tag-blue">' + esc(s) + '</span>').join('');
   const warns = (prof.warnings || []).map((w) => '<div class="alert">' + esc(w) + '</div>').join('');
 
-  const rows = fields.map((f) => '<tr class="' + (f.will_write ? 'pf-will' : (f.value ? 'pf-skip' : '')) + '">' +
-    '<td class="pf-f"><label class="switch" title="' + esc(PROFILE_FIELD_HINT[f.key] || '') + '">' +
-    '<input type="checkbox" data-key="' + esc(f.key) + '"' + (f.will_write ? ' checked' : ' disabled') + '>' +
-    '<b>' + esc(f.label) + '</b></label></td>' +
-    '<td class="pf-v pf-old">' + (f.emby_value
-      ? '<div class="pf-pre">' + esc(f.emby_value) + '</div>'
-      : '<span class="pf-dash">（空）</span>') + '</td>' +
-    '<td class="pf-v pf-new">' + (f.value
-      ? '<div class="pf-pre">' + esc(f.value) + '</div>' +
-        (f.source ? '<div class="pf-from">来自 ' + esc(f.source) + '</div>' : '')
-      : '<span class="pf-dash">—</span>') + '</td>' +
-    '<td class="pf-n">' + profileNoteTag(f) + '</td>' +
-    '</tr>').join('');
+  const rows = fields.map((f) => {
+    const over = rowIsOver(f);
+    // 抓到值就能勾（哪怕 Emby 里已经有值 —— 那是「覆盖」）；
+    // 没抓到值的字段勾了也没东西可写，直接禁用。
+    const canPick = !!f.value;
+    const cls = f.will_write ? 'pf-will' : (over ? 'pf-skip' : '');
+    return '<tr class="' + cls + '" data-over="' + (over ? '1' : '') + '">' +
+      '<td class="pf-f"><label class="switch" title="' + esc(PROFILE_FIELD_HINT[f.key] || '') + '">' +
+      '<input type="checkbox" data-key="' + esc(f.key) + '"' +
+      (f.will_write ? ' checked' : '') + (canPick ? '' : ' disabled') + '>' +
+      '<b>' + esc(f.label) + '</b></label></td>' +
+      '<td class="pf-v pf-old">' + (f.emby_value
+        ? '<div class="pf-pre">' + esc(f.emby_value) + '</div>'
+        : '<span class="pf-dash">（空）</span>') + '</td>' +
+      '<td class="pf-v pf-new">' + (f.value
+        ? '<div class="pf-pre">' + esc(f.value) + '</div>' +
+          (f.source ? '<div class="pf-from">来自 ' + esc(f.source) + '</div>' : '')
+        : '<span class="pf-dash">—</span>') + '</td>' +
+      '<td class="pf-n">' + profileNoteTag(f) + '</td>' +
+      '</tr>';
+  }).join('');
 
   const facts = (prof.facts || []).map(renderProfileFact).join('');
   const aliases = prof.aliases || [];
@@ -744,23 +797,32 @@ function renderProfilePanel(personId, name, prof) {
   body.innerHTML = warns +
     '<div class="pf-srcbar">命中来源：' + (srcTags || '<span class="cnhint">无</span>') +
     '<span class="grow"></span>' +
-    '<span class="cnhint">可写入字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
+    '<span class="cnhint">Emby 里为空的字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
     '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
-    '<th style="width:92px">字段</th><th>Emby 现有值</th><th>本次抓取</th><th style="width:100px">结果</th>' +
+    '<th style="width:92px">字段</th><th>Emby 现有值</th><th>本次抓取</th><th style="width:104px">结果</th>' +
     '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
     aliasLine +
     '<div class="pf-act">' +
     '<button class="btn btn-primary" id="pfApply">写入勾选字段</button>' +
     '<button class="btn" id="pfRe">重新抓取</button>' +
+    '<span class="grow"></span><span class="cnhint" id="pfCount"></span>' +
     '</div>' +
-    '<div class="cnhint" style="margin-top:8px">只写 Emby 里当前为空的字段；写入前会先落一份快照，「同步历史」里可以一键还原。</div>' +
+    '<div class="cnhint" style="margin-top:8px">默认只勾 Emby 里空着的字段。' +
+    '已有值的字段<strong>也可以勾上覆盖</strong> —— 覆盖前的原值同样会进快照，「同步历史」里随时可还原。' +
+    '抓不到值的字段不会写（覆盖成空等于清库）。</div>' +
+    '<div class="pf-works" id="pfWorks"></div>' +
     '<details class="adv"' + (facts ? '' : ' hidden') + '><summary>各资料源明细（' + (prof.facts || []).length + ' 个源命中）</summary>' +
     facts + '</details>';
+
+  $$('#pfBody input[data-key]').forEach((cb) => {
+    cb.onchange = () => { refreshProfileRow(cb.closest('tr')); refreshProfileApply(); };
+  });
+  refreshProfileApply();
 
   $('#pfRe').onclick = () => openProfilePanel(personId, name);
   $('#pfApply').onclick = async () => {
     const keys = $$('#pfBody input[data-key]:checked').map((c) => c.dataset.key);
-    if (!keys.length) { toast('没有勾选任何字段：Emby 里该有的都有了', 'info'); return; }
+    if (!keys.length) { toast('没有勾选任何字段', 'info'); return; }
     const b = $('#pfApply');
     b.disabled = true; b.innerHTML = '<span class="spin"></span> 写入中…';
     try {
@@ -771,9 +833,76 @@ function renderProfilePanel(personId, name, prof) {
       loadProfileSources(true);
     } catch (e) {
       toast(e.message, 'err');
-      b.disabled = false; b.textContent = '写入勾选字段';
+      b.disabled = false; refreshProfileApply();
     }
   };
+
+  // 作品列表单独加载：它只读本地 Emby（毫秒级），不该被上面三个外部资料源的
+  // 抓取拖住，反过来源站挂了也不该让它显示不出来。
+  loadProfileWorks(personId, false);
+}
+
+// ---------------- 该演员在媒体库里的作品 ----------------
+//
+// 放在资料抽屉里（同一个演员的上下文）：点开一位演员，想知道的是两件事 ——
+// 「他的资料对不对」和「我库里有哪些他的片」。分成两个入口反而割裂。
+// 只读本地 Emby，所以它有自己的加载态、自己的分页，不参与资料抓取。
+
+async function loadProfileWorks(personId, more) {
+  const box = $('#pfWorks');
+  if (!box) return;
+  const w = S.prof.works;
+  w.personId = personId;
+  if (!more) { w.items = []; w.total = 0; w.limit = 60; w.ready = false; }
+  else w.limit += 120;
+  if (!w.items.length) {
+    box.innerHTML = '<div class="pf-wh">媒体库作品 <span class="tag">…</span></div>' +
+      '<div class="cnhint"><span class="spin"></span> 正在读取媒体库…</div>';
+  }
+  try {
+    const d = await api('/api/profile/works?person_id=' + encodeURIComponent(personId) +
+      '&start=0&limit=' + w.limit);
+    w.items = d.items || [];
+    w.total = d.total || 0;
+    w.ready = true;
+    renderProfileWorks();
+  } catch (e) {
+    box.innerHTML = '<div class="pf-wh">媒体库作品</div>' +
+      '<div class="cnhint">读取失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderProfileWorks() {
+  const box = $('#pfWorks');
+  if (!box) return;
+  const w = S.prof.works;
+  const items = w.items || [];
+  if (!w.total) {
+    box.innerHTML = '<div class="pf-wh">媒体库作品 <span class="tag">0</span></div>' +
+      '<div class="cnhint">这个演员在媒体库里还没有作品。若库里确实有，' +
+      '多半是 Emby 里这位演员的名字和作品里的演职员名字对不上（可在 Emby 里合并同一人）。</div>';
+    return;
+  }
+  const cards = items.map((it) => {
+    // 封面走同源代取：CSP 是 img-src 'self'，外链一律显示不出来。
+    const src = it.image_tag ? embyImg(it.id, it.image_tag, 200) : '';
+    return '<div class="pf-wcard" title="' + esc(it.name) + '">' +
+      '<div class="wc">' + (src ? '<img loading="lazy" src="' + esc(src) + '" alt="">' :
+        '<span class="noimg">无封面</span>') + '</div>' +
+      '<div class="wt"><b>' + esc(it.number || it.name) + '</b>' +
+      '<span>' + esc(it.year ? String(it.year) : '') + (it.library ? ' · ' + esc(it.library) : '') + '</span></div>' +
+      '</div>';
+  }).join('');
+
+  const rest = w.total - items.length;
+  box.innerHTML = '<div class="pf-wh">媒体库作品 <span class="tag">' + w.total + '</span>' +
+    '<span class="grow"></span>' +
+    '<span class="cnhint">按首播日期倒序' + (rest > 0 ? '（已显示 ' + items.length + ' 部）' : '') + '</span>' +
+    (rest > 0 ? '<button class="btn btn-sm" id="pfWMore">再加载 ' + Math.min(120, rest) + ' 部</button>' : '') +
+    '</div><div class="pf-wgrid">' + cards + '</div>';
+
+  const more = $('#pfWMore');
+  if (more) more.onclick = () => loadProfileWorks(S.prof.works.personId, true);
 }
 
 async function openProfilePanel(personId, name) {
@@ -1017,11 +1146,9 @@ function renderJbMissing(res) {
     '<button class="btn btn-sm" id="jbExport">导出 JSON</button></h3>' +
     '<div class="missgrid" id="jbGrid">' + miss.map((m, i) => missCard(m, i)).join('') + '</div></div>' +
     '<div class="card" id="jbMagCard" style="display:none"><h3>磁力列表 <span class="spacer"></span>' +
+    '<span class="cnhint">按体积从大到小</span>' +
     '<button class="btn btn-sm" id="jbCopyOne">复制当前番号</button>' +
-    '<button class="btn btn-sm" id="jbCopyAll">复制全部</button></h3><div class="maglist" id="jbMagList"></div></div>' +
-    (res.local_unmatched && res.local_unmatched.length
-      ? '<div class="card"><h3>本地有、javbus 未列出（' + res.local_unmatched.length + '）</h3>' +
-        '<div style="max-height:180px;overflow:auto" class="mono">' + res.local_unmatched.map(esc).join('　') + '</div></div>' : '');
+    '<button class="btn btn-sm" id="jbCopyAll">复制全部</button></h3><div class="maglist" id="jbMagList"></div></div>';
 
   $$('#jbGrid .misscard').forEach((el) => el.onclick = () => {
     const n = el.dataset.n;
