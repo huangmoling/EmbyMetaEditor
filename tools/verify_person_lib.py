@@ -71,7 +71,8 @@ def main():
 
     def check(name, ok, detail=""):
         results.append((name, ok, detail))
-        print(("PASS  " if ok else "FAIL  ") + name + (("  | " + detail) if detail else ""))
+        print(("PASS  " if ok else "FAIL  ") + name +
+              (("  | " + str(detail)) if detail else ""))
 
     tgt = http_json("/json/new?about:blank", method="PUT")
     page = Page(tgt["webSocketDebuggerUrl"])

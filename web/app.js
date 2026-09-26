@@ -27,8 +27,13 @@ const S = {
   ps: { start: 0, limit: 48, total: 0, items: [] },
   // prof 是「演员资料」面板的界面状态。sel 用 Set 存勾选的源，
   // 重新渲染（切换视图 / 重查列表）不会丢勾选。
+  // cur 是抽屉当前正在看的演员（未抓取态也要知道是谁，好去读本地作品列表）。
   // works 是抽屉里「媒体库作品」那一块：单独加载、单独分页，不参与资料抓取。
-  prof: { sources: [], sel: new Set(), aliasN: 0, loaded: false, works: { personId: '', items: [], total: 0, limit: 60, ready: false } },
+  prof: {
+    sources: [], sel: new Set(), aliasN: 0, loaded: false,
+    cur: { personId: '', name: '' },
+    works: { personId: '', items: [], total: 0, limit: 60, ready: false },
+  },
   jb: { scan: null, selected: new Set(), magnets: [], targets: [], magTab: '' },
   watching: {},
 };
@@ -554,6 +559,43 @@ function gfFileName(url) {
   } catch (_) { return String(url || ''); }
 }
 
+// ---------------- 图片尺寸 / 体积 ----------------
+//
+// 同一个演员常有多张候选头像，缩略图都缩到同样大小，肉眼分不出哪张更清晰，
+// 所以把「宽×高 · 体积」标在图下面。两者都只能由服务端代取（浏览器拿不到
+// 一张图的字节数，跨域 fetch 又被 CSP 的 connect-src 'self' 挡着），
+// 所以走 /api/img/info —— 顺带把图写进服务端缓存，缩略图随后秒开。
+
+// fmtBytes 把字节数写成 KB / MB，用于候选图那一行小字。
+function fmtBytes(n) {
+  if (!n || n < 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+
+// imgMetaText 把探测结果拼成候选图下面那行小字。
+// 三种「没有数据」要分得清：没探到、探了但取不到、取到了但读不出像素，
+// 一律写「—」的话用户会以为是自己没搜到图。
+function imgMetaText(it) {
+  if (!it) return '尺寸未知';
+  if (!it.ok) return '读不到大小';
+  const dim = (it.width && it.height) ? (it.width + '×' + it.height) : '尺寸未知';
+  return dim + (it.bytes ? ' · ' + fmtBytes(it.bytes) : '');
+}
+
+// loadImageInfo 批量探测。返回 url -> 结果 的 Map，失败的整批不抛错（图照样显示）。
+async function loadImageInfo(urls) {
+  const uniq = Array.from(new Set((urls || []).filter(Boolean)));
+  const m = new Map();
+  if (!uniq.length) return m;
+  try {
+    const d = await api('/api/img/info', { method: 'POST', body: { urls: uniq } });
+    (d && d.items ? d.items : []).forEach((it) => m.set(it.url, it));
+  } catch (_) { /* 探测失败只是少了那行小字，不该影响挑图 */ }
+  return m;
+}
+
 async function pickAvatar(personId, name) {
   const host = openDrawer('<h3>' + esc(name) + '</h3><div class="sub">从 gfriends 头像库挑选一张</div>' +
     '<div class="field"><div class="row"><input class="input" id="pkQ" value="' + esc(name) + '">' +
@@ -565,12 +607,15 @@ async function pickAvatar(personId, name) {
       const hits = await api('/api/gfriends/search?q=' + encodeURIComponent(q));
       if (!hits.length) { $('#pkList').innerHTML = '<div class="empty">没有找到</div>'; return; }
       $('#pkList').innerHTML = hits.map((h) => '<div style="margin-bottom:14px"><div style="font-size:12px;color:var(--muted);margin-bottom:6px">' +
-        esc(h.name) + '（' + h.entries.length + ' 张）</div><div style="display:flex;gap:8px;flex-wrap:wrap">' +
-        h.entries.map((en, i) => '<img loading="lazy" data-name="' + esc(h.name) + '" data-file="' + esc(en.f) + '" data-group="' + esc(en.g) + '" ' +
-          'src="' + esc(imgSrc(en.f)) + '" alt="" title="' + esc(en.gz + ' / ' + gfFileName(en.f)) + '" ' +
-          'style="width:76px;height:104px;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer">').join('') +
+        esc(h.name) + '（' + h.entries.length + ' 张）</div><div class="pk-grid">' +
+        h.entries.map((en) => '<div class="pk-item">' +
+          '<img loading="lazy" data-name="' + esc(h.name) + '" data-file="' + esc(en.f) + '" data-group="' + esc(en.g) + '" ' +
+          'data-url="' + esc(en.f) + '" src="' + esc(imgSrc(en.f)) + '" alt="" ' +
+          'title="' + esc(en.gz + ' / ' + gfFileName(en.f)) + '">' +
+          '<span class="pk-meta">…</span></div>').join('') +
         '</div></div>').join('');
-      $$('#pkList img').forEach((im) => im.onclick = async () => {
+      const imgs = $$('#pkList img');
+      imgs.forEach((im) => im.onclick = async () => {
         im.style.opacity = '.4';
         try {
           const r = await api('/api/persons/avatar', {
@@ -579,6 +624,14 @@ async function pickAvatar(personId, name) {
           });
           toast(r.message, 'ok'); $('#drawerHost').innerHTML = ''; loadPersons(S.ps.start);
         } catch (e) { toast(e.message, 'err'); im.style.opacity = '1'; }
+      });
+      // 尺寸与体积是异步探的（要服务端去取原图），所以先出图、后补小字：
+      // 否则用户得等几十张图全探完才能看到缩略图。
+      loadImageInfo(imgs.map((im) => im.dataset.url)).then((info) => {
+        imgs.forEach((im) => {
+          const el = $('.pk-meta', im.parentElement);
+          if (el) el.textContent = imgMetaText(info.get(im.dataset.url));
+        });
       });
     } catch (e) { $('#pkList').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
   };
@@ -652,8 +705,25 @@ function renderProfileSources() {
   $$('#pfSources input').forEach((cb) => {
     cb.onchange = () => {
       if (cb.checked) S.prof.sel.add(cb.dataset.key); else S.prof.sel.delete(cb.dataset.key);
-      updateProfileState();
+      syncProfileSourceUI();
     };
+  });
+  updateProfileState();
+}
+
+// syncProfileSourceUI 让「资料抽屉里那组源」和「侧栏那组源」始终一致。
+//
+// 两处改的是同一个 S.prof.sel：抽屉里取消了某个源，侧栏必须同步显示成取消，
+// 否则用户会以为抽屉里的选择没生效（或反过来，以为侧栏的才是真的）。
+function syncProfileSourceUI() {
+  $$('#pfSources input[data-key], #pfSrcCols input[data-key]').forEach((cb) => {
+    cb.checked = S.prof.sel.has(cb.dataset.key);
+  });
+  // 抽屉里的整列跟着勾选上色：这样「这次从哪几个源导入」一眼可见，
+  // 不用去数小方框（实测选框在深色列里不好认）。
+  $$('#pfSrcCols .pf-srccol').forEach((col) => {
+    const cb = $('input[data-key]', col);
+    col.classList.toggle('on', !!(cb && cb.checked));
   });
   updateProfileState();
 }
@@ -664,6 +734,37 @@ function updateProfileState() {
   const n = S.prof.sel.size, all = S.prof.sources.length;
   el.textContent = all ? ('已启用 ' + n + '/' + all + ' 个源') : '未加载';
   el.className = 'tag ' + (n ? 'tag-green' : 'tag-amber');
+  const pick = $('#pfPickN');
+  if (pick) pick.textContent = all ? ('已选 ' + n + '/' + all) : '';
+}
+
+// profileSourcePicker 把资料源**分列**摆出来：一列一个源，写清这一列会填哪些字段。
+//
+// 为什么不像侧栏那样挤成一行小开关：用户在这里要做的是「这次从哪几个源导入」，
+// 是个需要判断的决定 —— 得先知道每个源给什么。挤成一行只剩名字，等于没给依据。
+// 顺序即优先级这件事也写在标题里，因为界面上的左右顺序就是真实取值顺序。
+function profileSourcePicker() {
+  const cols = S.prof.sources.map((s) => '<label class="pf-srccol" title="' + esc(s.key) + '">' +
+    '<span class="pf-srcname"><input type="checkbox" data-key="' + esc(s.key) + '"' +
+    (S.prof.sel.has(s.key) ? ' checked' : '') + '> <b>' + esc(s.label) + '</b></span>' +
+    (s.note ? '<span class="pf-srcnote">' + esc(s.note) + '</span>' : '') +
+    '</label>').join('');
+  return '<div class="pf-pickhead">抓取源 <span class="tag" id="pfPickN"></span>' +
+    '<span class="grow"></span>' +
+    '<span class="cnhint">按需勾选；从左到右即优先级（同一字段取最靠前的源）</span></div>' +
+    '<div class="pf-srcpick" id="pfSrcCols">' +
+    (cols || '<span class="cnhint">没有可用的资料源，请检查网络后重开本面板</span>') + '</div>';
+}
+
+// bindProfileSourcePicker 绑定抽屉里那些源勾选框，并立刻同步一次两处状态。
+function bindProfileSourcePicker() {
+  $$('#pfSrcCols input[data-key]').forEach((cb) => {
+    cb.onchange = () => {
+      if (cb.checked) S.prof.sel.add(cb.dataset.key); else S.prof.sel.delete(cb.dataset.key);
+      syncProfileSourceUI();
+    };
+  });
+  syncProfileSourceUI();
 }
 
 // profileBody 组装抓取/写入入参；keys 只在写入时给（界面上的逐字段勾选）。
@@ -795,6 +896,7 @@ function renderProfilePanel(personId, name, prof) {
     : '';
 
   body.innerHTML = warns +
+    profileSourcePicker() +
     '<div class="pf-srcbar">命中来源：' + (srcTags || '<span class="cnhint">无</span>') +
     '<span class="grow"></span>' +
     '<span class="cnhint">Emby 里为空的字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
@@ -804,7 +906,7 @@ function renderProfilePanel(personId, name, prof) {
     aliasLine +
     '<div class="pf-act">' +
     '<button class="btn btn-primary" id="pfApply">写入勾选字段</button>' +
-    '<button class="btn" id="pfRe">重新抓取</button>' +
+    '<button class="btn" id="pfFetch">抓取资料</button>' +
     '<span class="grow"></span><span class="cnhint" id="pfCount"></span>' +
     '</div>' +
     '<div class="cnhint" style="margin-top:8px">默认只勾 Emby 里空着的字段。' +
@@ -814,14 +916,20 @@ function renderProfilePanel(personId, name, prof) {
     '<details class="adv"' + (facts ? '' : ' hidden') + '><summary>各资料源明细（' + (prof.facts || []).length + ' 个源命中）</summary>' +
     facts + '</details>';
 
-  $$('#pfBody input[data-key]').forEach((cb) => {
+  bindProfileSourcePicker();
+  // 只绑对照表里的勾选框。源勾选框由 bindProfileSourcePicker 管，
+  // 两者的语义完全不同（一个选字段、一个选源），别用同一个选择器一锅端。
+  $$('#pfBody .pf-tbl input[data-key]').forEach((cb) => {
     cb.onchange = () => { refreshProfileRow(cb.closest('tr')); refreshProfileApply(); };
   });
   refreshProfileApply();
 
-  $('#pfRe').onclick = () => openProfilePanel(personId, name);
+  $('#pfFetch').onclick = () => fetchProfileInto();
   $('#pfApply').onclick = async () => {
-    const keys = $$('#pfBody input[data-key]:checked').map((c) => c.dataset.key);
+    // 注意范围是 .pf-tbl：抽屉里还有一组**选源**的勾选框（#pfSrcCols）也是
+    // input[data-key]，不加限定就会把源名当成字段名提交上去 ——
+    // 结果是「写入 0 个字段」而按钮上明明写着「写入 3 个字段」。
+    const keys = $$('#pfBody .pf-tbl input[data-key]:checked').map((c) => c.dataset.key);
     if (!keys.length) { toast('没有勾选任何字段', 'info'); return; }
     const b = $('#pfApply');
     b.disabled = true; b.innerHTML = '<span class="spin"></span> 写入中…';
@@ -837,8 +945,8 @@ function renderProfilePanel(personId, name, prof) {
     }
   };
 
-  // 作品列表单独加载：它只读本地 Emby（毫秒级），不该被上面三个外部资料源的
-  // 抓取拖住，反过来源站挂了也不该让它显示不出来。
+  // 抓到之后重刷一次作品列表：它只读本地 Emby（毫秒级），
+  // 不该被上面那三个外部资料源的抓取拖住，也没必要为它多等一轮。
   loadProfileWorks(personId, false);
 }
 
@@ -905,16 +1013,63 @@ function renderProfileWorks() {
   if (more) more.onclick = () => loadProfileWorks(S.prof.works.personId, true);
 }
 
+// openProfilePanel 只**打开**面板，不自动抓取。
+//
+// 为什么改掉「一打开就抓」：抓一次要并发访问三个外部站点，秒级起步，
+// 而多数时候用户点进来只是想看看「这个演员在库里有哪些片」，
+// 或者只想补某一个字段。一进来就替他联网，既慢又白给上游添流量，
+// 站点稍有波动还会让整个面板开不了。所以打开时只做两件**本地**事
+// （列出可选的源 + 读 Emby 里的作品），抓取交给「抓取资料」按钮。
 async function openProfilePanel(personId, name) {
+  S.prof.cur = { personId: personId, name: name };
   openDrawer('<h3>' + esc(name) + '</h3>' +
     '<div class="sub">抓取简介 / 出生日期 / 出生地 / 外部 ID，与 Emby 现有值逐字段比对</div>' +
-    '<div id="pfBody"><div class="empty"><span class="spin"></span> 正在并发访问各资料源…</div></div>');
+    '<div id="pfBody"></div>');
+  try { await loadProfileSources(); } catch (_) { /* 源清单拿不到时下面会给出提示 */ }
+  renderProfileIdle();
+}
+
+// renderProfileIdle 是面板的**未抓取态**：源选择 + 「抓取资料」按钮，
+// 外加只读本地 Emby 就能拿到的「媒体库作品」。抓取是显式动作。
+function renderProfileIdle() {
+  const body = $('#pfBody');
+  if (!body) return;
+  const cur = S.prof.cur || {};
+  body.innerHTML =
+    profileSourcePicker() +
+    '<div class="pf-act">' +
+    '<button class="btn btn-primary" id="pfFetch">抓取资料</button>' +
+    '<span class="grow"></span>' +
+    '<span class="cnhint">点「抓取资料」才会访问上面勾选的站点</span>' +
+    '</div>' +
+    '<div class="cnhint" style="margin-top:8px">抓取本身只读、不写 Emby：' +
+    '抓到后会列出「Emby 现有值 vs 本次抓取值」，<strong>你勾哪些才写哪些</strong>。</div>' +
+    '<div class="pf-works" id="pfWorks"></div>';
+  bindProfileSourcePicker();
+  $('#pfFetch').onclick = () => fetchProfileInto();
+  // 作品列表只读本地 Emby，毫秒级 —— 抓不抓资料都不影响它，所以一进来就加载。
+  loadProfileWorks(cur.personId, false);
+}
+
+// fetchProfileInto 是「抓取资料」按钮的实现：按当前勾选的源抓一次，然后重画成
+// 「现有值 vs 抓取值」对照表。失败时退回未抓取态并把原因写在最上面，
+// 而不是把整个面板变成一个错误页 —— 用户还得能改源重试、也还能看作品列表。
+async function fetchProfileInto() {
+  const body = $('#pfBody');
+  const cur = S.prof.cur || {};
+  if (!body || !cur.personId) return;
+  if (!S.prof.loaded) { toast('资料源还没加载好', 'err'); return; }
+  if (!S.prof.sel.size) { toast('至少勾选一个资料源', 'err'); return; }
+  const btn = $('#pfFetch');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 正在抓取…'; }
   try {
-    const prof = await api('/api/profile/preview', { method: 'POST', body: profileBody(personId, name) });
-    renderProfilePanel(personId, name, prof);
+    const prof = await api('/api/profile/preview', { method: 'POST', body: profileBody(cur.personId, cur.name) });
+    renderProfilePanel(cur.personId, cur.name, prof);
   } catch (e) {
-    const body = $('#pfBody');
-    if (body) body.innerHTML = '<div class="alert">' + esc(e.message) + '</div>';
+    toast(e.message, 'err');
+    renderProfileIdle();
+    const b = $('#pfBody');
+    if (b) b.insertAdjacentHTML('afterbegin', '<div class="alert">抓取失败：' + esc(e.message) + '</div>');
   }
 }
 

@@ -92,6 +92,21 @@ func findSource(key string) ProfileSource {
 	return nil
 }
 
+// actorSourceNotes 是给界面用的**一句话说明**，让用户在抽屉里选源时有依据。
+//
+// 只写这个源实际会填哪些字段（照着各自的 parse 函数来），不写「最准 / 最好」这类
+// 会过期的评价：这三个站都可能改版，字段会变，措辞要经得起改版。
+// 注意这里说的是**抓得到的字段**，不是「一定会写进 Emby」—— 写不写由「只填空白 /
+// 逐字段勾选」那套策略决定，那是另一层的事。
+var actorSourceNotes = map[string]string{
+	"AvDataBank": "字段最全：简介、出生日期、出生地、身高、三围、罩杯、血型、出道日、经纪公司，外部 ID 也来自这里",
+	"AvLeague":   "日文站点：出生日期、出生地、身高、三围、出道日，以及读音别名",
+	"Wikipedia":  "日文维基：整段简介（通常最完整），兼出生日期、出生地与读音别名",
+}
+
+// actorSourceNote 取某个源的界面说明；没登记就返回空串（界面会少一行，不会报错）。
+func actorSourceNote(key string) string { return actorSourceNotes[key] }
+
 // ---------- 姓名匹配 ----------
 
 // commonNameSuffixes 是搜索/标题里常见的噪声尾巴，比对前先削掉。

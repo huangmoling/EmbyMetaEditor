@@ -29,14 +29,16 @@ func (in profileRequest) opts() FetchOptions {
 }
 
 // handleProfileSources 列出可用的资料源（供界面渲染勾选项）。
+// note 是给界面的一句话说明：用户在抽屉里**逐个源挑**时才有的选。
 func (a *App) handleProfileSources(w http.ResponseWriter, r *http.Request) {
 	type srcView struct {
 		Key   string `json:"key"`
 		Label string `json:"label"`
+		Note  string `json:"note"`
 	}
 	var out []srcView
 	for _, s := range actorSources() {
-		out = append(out, srcView{Key: s.Key(), Label: s.Label()})
+		out = append(out, srcView{Key: s.Key(), Label: s.Label(), Note: actorSourceNote(s.Key())})
 	}
 	writeOK(w, map[string]any{
 		"sources":       out,

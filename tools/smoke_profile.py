@@ -130,7 +130,13 @@ def main():
           src.get("write_strategy"))
     check("单卡勾选写入策略为 as_picked（勾了就写，含覆盖）",
           src.get("picked_write_strategy") == "as_picked", src.get("picked_write_strategy"))
+    # 界面在抽屉里把源**分列**列出来，靠的就是这个 note —— 没下发的话
+    # 用户看到的就是三个光秃秃的名字，等于没给他选源的依据。
+    no_note = [s["key"] for s in src.get("sources") or [] if len((s.get("note") or "").strip()) < 8]
+    check("每个源都带一句「会填哪些字段」的说明", not no_note, no_note)
     print("     源：%s" % "、".join("%s(%s)" % (s["label"], s["key"]) for s in src.get("sources") or []))
+    for s in src.get("sources") or []:
+        print("       %-14s %s" % (s["label"], s.get("note") or ""))
 
     # ---------- 2. 挑一个真实演员 ----------
     print("\n2) 从库里挑一个真实演员做预览")

@@ -511,6 +511,24 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .pf-srcbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; font-size: 12px; }
 
+/* 抓取源：抽屉里**分列**摆（一列一个源），与侧栏那行小开关是同一份状态的两种呈现。
+   抽屉那份写清了每个源会填什么字段 —— 用户在这里要做的是「这次从哪几个源导入」，
+   得先知道每个源给什么才谈得上选。 */
+.pf-pickhead {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13px; font-weight: 600; margin: 0 0 8px;
+}
+.pf-srcpick { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.pf-srccol {
+  display: flex; flex-direction: column; gap: 4px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 8px 10px; background: var(--surface);
+}
+.pf-srccol:hover { border-color: var(--accent); }
+.pf-srccol.on { border-color: var(--accent); background: var(--accent-soft); }
+.pf-srcname { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.pf-srcnote { font-size: 11px; color: var(--muted); line-height: 1.55; }
+
 table.pf-tbl { table-layout: fixed; }
 table.pf-tbl th, table.pf-tbl td { vertical-align: top; }
 table.pf-tbl td.pf-v { padding-top: 8px; padding-bottom: 8px; }
@@ -583,3 +601,16 @@ table.pf-tbl td.pf-v { padding-top: 8px; padding-bottom: 8px; }
 .sh-i b { display: block; font-size: 13px; }
 .sh-i span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
 .sh-i .sh-ch { color: var(--text-2); }
+
+/* ---------- 选择头像弹窗：候选图 + 「宽×高 · 体积」 ----------
+   同一个演员常有多张候选，缩略图都缩到同一尺寸，肉眼分不出哪张更清晰，
+   所以每张下面挂一行尺寸与体积。小字用 muted 色，不抢图的注意力。 */
+.pk-grid { display: flex; gap: 8px; flex-wrap: wrap; }
+.pk-item { display: flex; flex-direction: column; gap: 4px; width: 88px; }
+.pk-item img {
+  width: 88px; height: 118px; object-fit: cover; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface-2);
+  cursor: pointer; display: block;
+}
+.pk-item img:hover { border-color: var(--accent); }
+.pk-meta { font-size: 10.5px; color: var(--muted); text-align: center; line-height: 1.45; }

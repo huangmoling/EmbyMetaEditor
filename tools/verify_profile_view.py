@@ -1,4 +1,4 @@
-"""用 CDP 驱动无头 Edge，验证「演员资料」面板的渲染与勾选状态。
+"""用 CDP 驱动无头 Edge，验证「演员资料」面板的渲染、抓取时机与勾选状态。
 
 为什么需要界面层回归（静态检查覆盖不到的部分）：
 
@@ -8,7 +8,11 @@
   就会覆盖掉自己攒的资料，而服务端那层虽然也拦不住（勾选的语义就是「以勾选为准」），
   界面上看起来却像是「默认帮你选好了」。
 
-  同样地，「回滚」是破坏性操作，脚本要确认它**不是点一下就执行**（需要二次确认）；
+  **抓取的时机**同样只能在这一层验：打开面板时**不许联网抓资料**（要发请求就是
+  白等几秒 + 白给上游添流量），媒体库作品要立刻出来，抓取只能由「抓取资料」按钮触发。
+  这一条靠数 Network 请求来验 —— 服务端单测里没有「什么时候该发请求」这回事。
+
+  同理，「回滚」是破坏性操作，脚本要确认它**不是点一下就执行**（需要二次确认）；
   再点一次「资料」按钮、关掉抽屉这些流程也要确认没报错、没 CSP 拦截。
   「媒体库作品」的封面必须走同源代取（CSP 是 `img-src 'self'`），
   所以这里不只看有没有 `<img>`，还要看 `naturalWidth` —— 外链的图在命令行是 200、
@@ -19,7 +23,7 @@
      （用真实 config.json，演员列表与作品列表都要能连上 Emby）
   2. 无头 Edge 带 `--remote-debugging-port=9333`
 
-**只读**：只点「资料」打开预览面板（预览不写任何东西）、打开「同步历史」，
+**只读**：只点「资料」打开面板（打开与预览都不写任何东西）、打开「同步历史」，
 以及勾选/取消一个「覆盖」复选框（只改界面状态，脚本会断言它**没有**发出写入请求）。
 回滚按钮只点一次（停在「确认回滚？」那步），**不会真的回滚** —— 因此第 9 步只有在
 历史里存在**尚未回滚**的记录时才会真正执行；跑完 `smoke_profile.py`（它会 apply 后
@@ -80,6 +84,27 @@ TABLE_JS = """(() => {
   };
 })()"""
 
+# 打开面板的**未抓取态**：只该有「抓取源」（分列）+「抓取资料」按钮，
+# 不许有对照表、不许有旧文案，也不许已经偷偷发了抓取请求（请求数另外数）。
+IDLE_JS = """(() => {
+  const cols = [...document.querySelectorAll('#pfSrcCols .pf-srccol')];
+  const boxes = [...document.querySelectorAll('#pfSrcCols input[data-key]')];
+  return {
+    cols: cols.length,
+    keys: boxes.map(b => b.dataset.key),
+    on: cols.filter(c => c.classList.contains('on')).length,
+    checked: boxes.filter(b => b.checked).length,
+    notes: cols.filter(c => (c.querySelector('.pf-srcnote') || {textContent: ''})
+                            .textContent.trim().length > 8).length,
+    pickN: (document.querySelector('#pfPickN') || {}).textContent || '',
+    fetchBtn: (document.querySelector('#pfFetch') || {}).textContent ?
+              document.querySelector('#pfFetch').textContent.trim() : '',
+    hasApply: !!document.querySelector('#pfApply'),
+    hasTable: !!document.querySelector('.pf-tbl'),
+    staleText: document.body.textContent.indexOf('重新抓取') >= 0,
+  };
+})()"""
+
 # 资料面板底部的「媒体库作品」：单独接口、单独加载，所以单独取一次快照。
 WORKS_JS = """(() => {
   const box = document.querySelector('#pfWorks');
@@ -123,6 +148,8 @@ def main():
     apply_calls = []
     # 作品列表的请求 URL：用来断言分页时确实带了更大的 limit
     works_calls = []
+    # 抓取资料的请求：用来证明「打开面板不抓取，只有点按钮才抓」
+    preview_calls = []
     page.rollback_tap = None
     orig_keep = page._keep
 
@@ -136,6 +163,8 @@ def main():
                 apply_calls.append(u)
             if "/api/profile/works" in u:
                 works_calls.append(u)
+            if "/api/profile/preview" in u:
+                preview_calls.append(u)
         orig_keep(msg)
 
     page._keep = keep
@@ -239,7 +268,7 @@ def main():
     bad_no = [b for b in btns["noImg"] if b["text"] != "刮削头像"]
     check("无头像的卡片按钮是「刮削头像」", not bad_no, bad_no[:2])
 
-    print("\n7) 搜一个真实演员，点「资料」预览（只读，不写任何东西）")
+    print("\n7) 搜一个真实演员，点「资料」—— 只打开面板，**不自动抓取**")
     # 「只看无头像」默认勾着，而有头像的演员才更可能「填了一半」——
     # 要同时验到「Emby 已有值 → 禁用」和「空白 → 可写」两面，先把它取消掉。
     page.eval("""(() => {
@@ -259,6 +288,8 @@ def main():
         page.pump(0.4)
 
     tbl, star, tried = None, None, []
+    idle_checked = False
+    fetch_clicks = 0  # 点「抓取资料」的次数，最后和真实请求数对账
     wk_total = -1  # 「媒体库作品」报出来的真实总数，7d 用它验证分页后能回到真实值
     for name in STARS:
         js_name = json.dumps(name, ensure_ascii=False)
@@ -278,6 +309,7 @@ def main():
             print("     %-10s 库里没有，换下一个" % name)
             continue
         page.pump(0.3)
+        before_preview = len(preview_calls)
         page.eval("""(() => {
           const c = [...document.querySelectorAll('#psList .pcard')]
                       .find(x => x.dataset.name === %s);
@@ -285,12 +317,71 @@ def main():
           return true;
         })()""" % js_name)
         page.wait_for("!!document.querySelector('#pfBody')", timeout=20, desc="资料抽屉打开")
+
+        # ---- 未抓取态：只在第一次进来时逐条断言，后面几轮只是重复 ----
+        try:
+            page.wait_for("document.querySelectorAll('#pfWorks .pf-wcard').length > 0"
+                          " || !!document.querySelector('#pfWorks .cnhint')",
+                          timeout=90, desc="作品区有结果（未抓取态也要显示）")
+        except TimeoutError:
+            pass
+        page.pump(1.0)  # 顺便给「万一它偷偷发了请求」留出被抓到的时间
+        idle = page.eval(IDLE_JS)
+        if not idle_checked:
+            idle_checked = True
+            print("     抓取源分列 %d 个：%s / 按钮 %r"
+                  % (idle["cols"], idle["keys"], idle["fetchBtn"]))
+            check("打开面板不发抓取请求（抓取必须点按钮才发生）",
+                  len(preview_calls) == before_preview, preview_calls[before_preview:])
+            check("未抓取态没有对照表（没有「假装已经抓过」）",
+                  not idle["hasTable"] and not idle["hasApply"], idle)
+            check("资料源在抽屉里**分列**列出（>=3 列）", idle["cols"] >= 3, idle)
+            check("每列都写了这个源会填什么字段",
+                  idle["notes"] == idle["cols"], idle)
+            check("默认全选，选中列有 on 标记",
+                  idle["checked"] == idle["cols"] and idle["on"] == idle["cols"], idle)
+            check("按钮文案是「抓取资料」", idle["fetchBtn"] == "抓取资料", idle["fetchBtn"])
+            check("界面上不再有「重新抓取」这个旧文案", not idle["staleText"], idle)
+
+            print("\n7a) 抽屉里取消一个源 → 侧栏那份同步跟着变（同一份状态）")
+            sync = page.eval("""(() => {
+              const cb = document.querySelector('#pfSrcCols input[data-key]');
+              const key = cb.dataset.key;
+              cb.checked = false; cb.dispatchEvent(new Event('change', {bubbles: true}));
+              const side = document.querySelector('#pfSources input[data-key="' + key + '"]');
+              const col = cb.closest('.pf-srccol');
+              return {
+                key: key,
+                sideChecked: side ? side.checked : null,
+                state: document.querySelector('#pfState').textContent,
+                pickN: (document.querySelector('#pfPickN') || {}).textContent || '',
+                colOn: col.classList.contains('on'),
+                applied: S.prof.sel.has(key),
+              };
+            })()""")
+            print("     取消 %s：侧栏勾选=%s / 状态=%r"
+                  % (sync["key"], sync["sideChecked"], sync["state"]))
+            check("抽屉里取消后，侧栏同一项也变成未勾选", sync["sideChecked"] is False, sync)
+            check("取消后这一列不再是选中态", not sync["colOn"] and not sync["applied"], sync)
+            check("侧栏状态标签跟着变（不是只有一个地方知道）",
+                  "/%d 个源" % 3 != sync["state"] and "已启用" in sync["state"], sync)
+            # 还原成默认全选，免得后面真去抓取时少一个源
+            page.eval("""(() => {
+              const cb = document.querySelector('#pfSrcCols input[data-key]');
+              cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles: true}));
+              return true;
+            })()""")
+            page.pump(0.3)
+
+        print("\n7) %s：点「抓取资料」（这一步才会联网）" % name)
+        fetch_clicks += 1
+        page.eval("document.querySelector('#pfFetch').click();")
         try:
             page.wait_for("!!document.querySelector('#pfApply')", timeout=180,
-                          desc="预览返回并渲染出对照表（要能连上 av-db.net）")
+                          desc="抓到结果并渲染出对照表（要能连上 av-db.net）")
         except TimeoutError:
-            tried.append((name, "预览没出结果"))
-            print("     %-10s 预览没出结果，换下一个" % name)
+            tried.append((name, "抓取没出结果"))
+            print("     %-10s 抓取没出结果，换下一个" % name)
             close_drawer()
             continue
         page.pump(0.4)
@@ -308,6 +399,11 @@ def main():
               % (name, snap["embyRows"], snap["overRows"], snap["willRows"]))
         close_drawer()
 
+    # 这条是本轮的核心：抓取**只能**由按钮触发 —— 点了几次按钮，就该只有几次请求。
+    # 少了说明按钮没生效，多了说明某处在偷偷自动抓（那就等于打开面板就联网）。
+    check("抓取请求数正好等于点「抓取资料」的次数",
+          len(preview_calls) == fetch_clicks,
+          "请求 %d / 点击 %d" % (len(preview_calls), fetch_clicks))
     check("找到一个「已有值（含可覆盖）+ 有空白」都有样本的演员", tbl is not None, tried)
     if tbl is None:
         # 前面已经把抽屉都关掉了，后面的步骤还要接着跑，但表相关的断言无从谈起
@@ -497,9 +593,15 @@ def main():
         print("\n9) 回滚二次确认  —— 跳过（当前没有未回滚的历史记录）")
 
     print("\n10) 页面错误与控制台")
-    errs = page.errors()
-    hard = [e for e in errs if e.get("method") != "__http__"]
-    http_bad = [e for e in errs if e.get("method") == "__http__" and "favicon" not in (e.get("url") or "")]
+    # Page.errors() 返回的是**格式化好的字符串**（"未捕获异常: …" / "HTTP 502 <- url"），
+    # 不是事件对象 —— 这里原来按 dict 处理（e.get("method")），一旦真有报错就会
+    # 抛 AttributeError 把整个脚本炸掉 —— 也就是说它只在"一切正常"时才不炸。
+    # 按前缀分类，别再用字典那套。
+    errs = [str(e) for e in page.errors()]
+    hard = [e for e in errs if not e.startswith("HTTP ")]
+    http_bad = [e for e in errs if e.startswith("HTTP ") and "favicon" not in e]
+    for e in (hard + http_bad)[:6]:
+        print("   ! " + e)
     check("没有未捕获异常 / console 报错 / CSP 拦截", not hard, hard[:3])
     check("没有 4xx/5xx 响应", not http_bad, http_bad[:3])
 

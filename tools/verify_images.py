@@ -96,7 +96,8 @@ def main():
 
     def check(name, ok, detail=""):
         results.append((name, ok, detail))
-        print(("PASS  " if ok else "FAIL  ") + name + (("  | " + detail) if detail else ""))
+        print(("PASS  " if ok else "FAIL  ") + name +
+              (("  | " + str(detail)) if detail else ""))
 
     def report(label, info):
         print("   %s：卡片 %d / <img> %d / 走代理 %d" %

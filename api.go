@@ -164,6 +164,9 @@ func (a *App) route() *http.ServeMux {
 
 	// ---- 图片代理（javbus 等有 Referer 防盗链）----
 	mux.HandleFunc("GET /api/img", a.handleImageProxy)
+	// 图片尺寸 / 体积探测，给「选择头像」弹窗用（见 imageinfo.go）。
+	// 同样是白名单代取，所以放在一起。
+	mux.HandleFunc("POST /api/img/info", a.handleImageInfo)
 
 	// ---- Emby 图片代取（浏览器不再直接拿令牌去连 Emby）----
 	mux.HandleFunc("GET /api/emby/image", a.handleEmbyImage)
