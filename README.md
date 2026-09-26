@@ -5,20 +5,21 @@
 > **界面自带访问认证** —— 用户名 + 密码，和 Emby 登录是两回事。密码只存 PBKDF2-SHA256 派生值，
 > 会话是内存里的随机令牌；即使把端口开放到局域网也不至于「谁打开谁就是管理员」。详见[「关于访问认证」](#关于访问认证)。
 
-> **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.6 MB，无需安装任何运行库）
+> **下载** —— [最新版 `EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows 64 位，约 8.8 MB，无需安装任何运行库）
 >
 > **Docker** —— [`aag111/emby-meta-editor`](https://hub.docker.com/r/aag111/emby-meta-editor)（linux/amd64 + arm64），一条命令起容器，见[「Docker 镜像」](#docker-镜像)。
 >
 > 不想下载也可以从源码构建，见[「从源码构建」](#从源码构建)。
 
-围绕六件事：
+围绕八件事：
 
 | 模块 | 能力 |
 |---|---|
 | **访问认证** | 保护「谁能打开这个界面」：用户名 + 密码登录，PBKDF2 派生存储，登录失败按 IP 退避 |
 | **Emby 登录** | 用户名 / 密码 或 API Key 两种方式，凭据本地保存 |
 | **MetaTube 刮削** | 单个 / 批量刮削元数据与图片，**服务地址自行配置**（公共后端已下线，建议自建） |
-| **gfriends 头像库** | 10 万+ 张头像索引；演员列表可**按媒体库筛选**，缺头像的一眼看完，单个挑或批量刮 |
+| **gfriends 头像库** | 10 万+ 张头像索引；演员列表可**按媒体库筛选**，缺头像的一眼看完，单个挑或批量刮；索引与图片各带**两层 CDN 容错** |
+| **演员资料** | 抓演员本人的简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID（AVデータバンク + AV-League + Wikipedia 三源合并）；**只填空白**，可一键回滚 |
 | **番号补全** | 按演员抓取全部番号，与本地媒体库比对找出缺失，抓取磁力列表；**按番号并排分页**，磁力结果**带连通性诊断** |
 | **国产传媒专项刮削** | 选媒体库 → 列出条目 → **单个刮削 / 勾选多个批量刮削 / 直接编辑元数据**；四站（xChina / 麻豆区 / 麻豆社 / 7mmtv）并发搜索，**封面 → 标题 → 标签 → 日期** 按优先级合并 |
 | **媒体库统计** | 各媒体库条目数、电影 / 剧集 / 集数 |
@@ -358,8 +359,8 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致。
 不加这个参数的话 Go 会往产物里嵌当前 commit 的 VCS 信息，体积和哈希都会变 —— 那是正常的，不是源码漂移。
 
-> 仓库里的 exe **跟着 main 走**（改完就重建提交），下载链 `releases/latest/download/` 只在下一次发版时更新，两者不一定同步：
-> v1.0.9 那个 Release 的 md5 是 `2b1c342322b667d364dba15bcfd42070`，当前 main 的是 `662dc2e8438988833dbe01588cb9b18d`（多了演员资料与 gfriends 两层 CDN 容错，还没发版）。
+> 仓库里的 exe **跟着 main 走**（改完就重建提交），下载链 `releases/latest/download/` 要**发版时**才更新，两者不一定同步 —— 所以下载下来的 exe 可能比 main 落后一个版本。
+> 当前对齐的是 **v1.1.0**：Release 与 main 的 md5 同为 `10e14aa0f3e41506e3b3fece09b79526`。
 
 跑测试：
 
@@ -571,10 +572,10 @@ docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/
 配好后打 tag 即发布：
 
 ```bash
-git tag v1.0.9 && git push origin v1.0.9
+git tag v1.1.0 && git push origin v1.1.0
 ```
 
-镜像标签由 tag 推导：`v1.0.9` → `1.0.9` / `1.0` / `1` / `latest`（`latest` 始终跟着最新正式版）。
+镜像标签由 tag 推导：`v1.1.0` → `1.1.0` / `1.1` / `1` / `latest`（`latest` 始终跟着最新正式版）。
 手动触发（`workflow_dispatch`）没有 tag 可比，只会推 `latest`。
 镜像名固定为 `<DOCKERHUB_USERNAME>/emby-meta-editor`，第一次推送时 Docker Hub 会自动创建仓库
 （公开仓库，匿名即可拉取）—— 所以 Docker Hub 的用户名改起来只动 secret，不用改代码；

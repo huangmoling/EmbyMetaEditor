@@ -91,7 +91,7 @@ def candidates(version):
 def expected_version_strings(version, revision):
     """镜像里的二进制应当带有哪个版本串（返回值 + 说明）。
 
-    tag 构建时 metadata-action 给出的 version 就是语义版本（`1.0.9`），二进制里是 `v1.0.9`。
+    tag 构建时 metadata-action 给出的 version 就是语义版本（`1.1.0`），二进制里是 `v1.1.0`。
     **workflow_dispatch 构建时只有一个 raw 标签 `latest`** —— 拿它去拼 `vlatest` 永远找不到，
     那不是镜像的毛病。这时改从**镜像对应提交**的 `version.go` 里取常量：既避开了假失败，
     又顺带验了「镜像里的二进制确实来自那个提交的源码」。
