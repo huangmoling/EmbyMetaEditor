@@ -355,8 +355,11 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 
 单文件 exe，前端资源（`web/`）和图标（`rsrc_windows_amd64.syso`）都通过 `go:embed` / PE 资源嵌进去了，拷走 exe 就能跑。
 
-加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致（v1.0.9 的 md5 `2b1c342322b667d364dba15bcfd42070`）。
+加了 `-buildvcs=false`，构建是**可复现**的：照着上面这条命令重建，得到的文件与仓库里那个 `EmbyMetaEditor.exe` 逐字节一致。
 不加这个参数的话 Go 会往产物里嵌当前 commit 的 VCS 信息，体积和哈希都会变 —— 那是正常的，不是源码漂移。
+
+> 仓库里的 exe **跟着 main 走**（改完就重建提交），下载链 `releases/latest/download/` 只在下一次发版时更新，两者不一定同步：
+> v1.0.9 那个 Release 的 md5 是 `2b1c342322b667d364dba15bcfd42070`，当前 main 的是 `662dc2e8438988833dbe01588cb9b18d`（多了演员资料与 gfriends 两层 CDN 容错，还没发版）。
 
 跑测试：
 
@@ -364,7 +367,7 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 go test ./...
 ```
 
-183 个用例，覆盖访问认证（PBKDF2 派生与坏哈希、会话签发/过期/踢其他会话、失败退避、同源校验、配置脱敏）、番号归一化（含 `91CM-014` 这类数字开头番号、**以及「`.mp4` 被当成番号」这种误报**）、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、图片代理的主机分类与缓存、演员按媒体库过滤、国产传媒四站解析与**只认精确匹配**的合并逻辑（含按勾选 id 批量、封面 raw→base64 回退上传）、**元数据编辑的「只提交改动项」语义**、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
+202 个用例，覆盖访问认证（PBKDF2 派生与坏哈希、会话签发/过期/踢其他会话、失败退避、同源校验、配置脱敏）、番号归一化（含 `91CM-014` 这类数字开头番号、**以及「`.mp4` 被当成番号」这种误报**）、javbus 页面解析（含备用结构回退、裸 `<tr>` 片段、真实详情页片段）、连通性诊断的五种失败形态、MetaTube 字段兼容与 provider 结构兼容、Emby 用户身份解析的多级回退、图片代理的主机分类与缓存、演员按媒体库过滤、国产传媒四站解析与**只认精确匹配**的合并逻辑（含按勾选 id 批量、封面 raw→base64 回退上传）、**元数据编辑的「只提交改动项」语义**、演员资料的字段合并与「只填空白 + 回滚」（含类型化 nil、`ProviderIds` 断言失配那两个只在真实 Emby 上才暴露的坑）、**gfriends 的两层 CDN 容错**（回落只在主基址全挂时触发、候选基址必须都在图片代理白名单里、客户端给的地址不用于下载）、以及用 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
 国产传媒的夹具是 `tools/extract_cn_fixtures.py` 从 `cache/debug/` 里落盘的**真实响应**里按容器标签逐字节切出来的，不手写 —— 手写夹具最容易「顺手把 `<tr>` 补成 `<table>`」，结果单测全绿、线上全挂。
 

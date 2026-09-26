@@ -110,25 +110,25 @@ def expected_version_strings(version, revision):
     return [m.group(1)], "%s（来自镜像提交 %s 的 version.go）" % (m.group(1), ref[:12])
 
 
-def check_embedded_frontend(tok, amd_manifest, version, revision=""):
-    """解开 amd64 的层，确认二进制里内嵌的前端确实是修好的那一版。
+def layer_blob(tok, amd_manifest):
+    """把 amd64 的各层解开、拼成一个大字节串（前端资源与二进制都在里面）。"""
+    blob = b""
+    for layer in amd_manifest.get("layers", []):
+        raw, _ = get("%s/v2/%s/blobs/%s" % (REGISTRY, REPO, layer["digest"]), tok)
+        try:
+            blob += gzip.decompress(raw)
+        except Exception:  # noqa: BLE001
+            blob += raw
+    return blob
+
+
+def check_embedded_frontend(blob, version, revision=""):
+    """确认二进制里内嵌的前端确实是修好的那一版。
 
     为什么必须查这个：web/ 是 `go:embed` 编进二进制的。源码修对了、镜像忘了重建，
     Actions 照样绿、镜像照样能拉、容器照样能起 —— 只有界面还是坏的。
     2026-09 的 gfriends 头像弹窗就是这么漏出去的：v1.0.8 镜像里仍是 CDN 裸外链。
     """
-    blob = b""
-    try:
-        for layer in amd_manifest.get("layers", []):
-            raw, _ = get("%s/v2/%s/blobs/%s" % (REGISTRY, REPO, layer["digest"]), tok)
-            try:
-                blob += gzip.decompress(raw)
-            except Exception:  # noqa: BLE001
-                blob += raw
-    except Exception as e:  # noqa: BLE001
-        print("  提示：层拉不下来（%s），跳过内嵌前端检查" % e)
-        return
-
     i = blob.find(b"function pickAvatar")
     if i < 0:
         check("镜像里能找到内嵌的 app.js", False, "没找到 pickAvatar")
@@ -146,6 +146,24 @@ def check_embedded_frontend(tok, amd_manifest, version, revision=""):
         return
     check("二进制版本串与镜像对应提交一致",
           any(w.encode() in blob for w in want), detail)
+
+
+def check_embedded_backend(blob):
+    """确认镜像里的**后端**也确实是这一份源码。
+
+    revision 相等已经能推出这一点，但那是「标签说的」；这里再在二进制里实查两条
+    只有这份代码才有的字面量，避免将来出现「标签对、内容不对」（比如复用旧产物）时
+    静态检查全绿。改动前端资源类的功能时这条不用动，改后端常量时记得同步。
+
+    注意查的是**源码里真实存在的字面量**：jsdelivr 的节点名（`cdn`/`gcore`/`fastly`）
+    是 `fmt.Sprintf` 拼进 URL 的，二进制里根本没有 `gcore.jsdelivr.net` 这种完整串 ——
+    写成那样会误报 FAIL。
+    """
+    for marker, what in [
+        ("xinxin8816/gfriends", "gfriends 镜像仓库（CDN 容错）"),
+        ("https://%s.jsdelivr.net/gh/%s@%s/", "jsdelivr 分片节点模板"),
+    ]:
+        check("后端含 %s" % what, marker.encode() in blob, marker)
 
 
 def main():
@@ -224,8 +242,15 @@ def main():
     print("  User = %r" % user)
     check("以非 root 运行", user not in ("", "root", "0"))
 
-    # 最后一道：镜像里的前端到底修没修 —— 静态检查看不出来，只有解开层才知道
-    check_embedded_frontend(tok, amd, labels.get("org.opencontainers.image.version") or "", rev)
+    # 最后一道：镜像里的前后端到底是不是这一份 —— 静态检查看不出来，只有解开层才知道
+    blob = b""
+    try:
+        blob = layer_blob(tok, amd)
+    except Exception as e:  # noqa: BLE001
+        print("  提示：层拉不下来（%s），跳过内嵌内容检查" % e)
+    if blob:
+        check_embedded_frontend(blob, labels.get("org.opencontainers.image.version") or "", rev)
+        check_embedded_backend(blob)
 
     print("\n%s" % ("全部通过" if not FAILED else "%d 项未通过：%s" % (len(FAILED), "；".join(FAILED))))
     return 1 if FAILED else 0
