@@ -162,10 +162,19 @@ API Key 在 Emby 后台「高级 → API 密钥」生成，直接填进「设置
 
 ### 关于 gfriends
 
-`raw.githubusercontent.com` 在国内基本直连不了，所以默认走 jsdelivr CDN。索引文件有 6.5 MB，代码里带了三重备用地址（jsdelivr / gcore / fastly），换 CDN 不用重新下索引。
+`raw.githubusercontent.com` 在国内基本直连不了，所以默认走 jsdelivr CDN。索引文件有 6.5 MB，代码里带**两层备用地址**，换 CDN 不用重新下索引：
+
+| 故障面 | 备用 |
+|---|---|
+| **仓库** | `gfriends/gfriends`（主）→ `xinxin8816/gfriends`（内容一致的镜像，索引与全部图片逐字节相同）。主仓库被删 / 改名 / 被 jsdelivr 限流时还有得用 |
+| **CDN 节点** | `cdn.jsdelivr.net` → `gcore.` / `fastly.`（jsdelivr 的公开分片域名，DNS 与边缘节点各自独立）→ `raw.githubusercontent.com`（完全不同的基础设施，连 jsdelivr 整体挂掉都能兜住） |
+
+**索引和图片都走这套备用列表**，只兜索引等于没兜（索引下得回来、图全下载失败，「刮削头像 / 选图」照样整体不可用）。图片的回落只在**主基址一张都没取下来**时才触发，正常网络下零额外请求；备用基址单次尝试上限 30 秒，不至于把一次刮削拖到十几分钟。
+
+设置里自己填了别的镜像站（内网自建等）时**不会**被追加这些外网地址 —— 按你的配置原样使用。
 
 - **高清优先**：同一演员在库里往往有多张头像（不同分辨率），自动刮削时会先量每张的尺寸（宽 × 高），选最大的一张上传——对齐 Emby 自带 gfriends 插件的行为。
-- **手动选择**：演员列表点「选择」可以看到所有候选头像，点哪张换哪张。选中后上传的就是你点的那张；如果那张在索引里已被移除，会明确报错提示重新搜索，不会静默换成第一张。
+- **手动选择**：演员列表点「选图」可以看到所有候选头像，点哪张换哪张。选中后上传的就是你点的那张；如果那张在索引里已被移除，会明确报错提示重新搜索，不会静默换成第一张。客户端传回的地址**只用来定位是哪一张**，实际下载永远走服务端配置的基址（不会拿它当「去任意地址取图」的入口）。
 
 ### 关于演员资料（演员头像页）
 
@@ -687,6 +696,9 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | 回滚之后，字段该还原的没还原、外部 ID 被整个抹掉 | 两个各自独立的坑凑在一起：① 快照里缺失的值被转成 `[]string(nil)`，装箱进 `any` 之后 `v == nil` 是 **false**（类型化的 nil 不等于 nil），于是既没走进「清空」分支又被 nil 守卫跳过；② `patch["ProviderIds"].(map[string]any)` 遇到 `map[string]string`（回滚快照正是这种）会**静默断言失败**，发出去一个空 map | ① `util.go` 加 `isNilVal()`（用 `reflect` 判 `Slice/Map/Ptr/…` 的 `IsNil`），`updateItem` 的守卫与 `rollbackSync` 的补空都用它；② 抽出 `providerIDsFrom(v any)` 同时处理两种 map 类型。两条都有回归用例（`TestRollbackClearsFieldsThatWereAbsent` / `TestApplyThenRollbackRestores`） |
 | 同步历史里每条记录都点不动（`record_id` 是空串，回滚无从下手） | `SyncStore.Add(rec SyncRecord)` 是**值传递**，函数内部生成的 ID 传不回调用方，`res.RecordID` 永远是空的 | `Add` 改成返回 ID，调用方 `res.RecordID = a.sync.Add(rec)` |
 | 批量补资料时列表只跑一页就停了；按名字传入的演员每个字段都判成「可写」 | 前者：`/Persons` 带 `SearchTerm` 时 Emby 返回的 `TotalRecordCount` **恒为 0**（不带搜索词才正常），拿 `total` 当终止条件就提前收工。后者：名字解析失败时 `person_id` 留空，读不到 Emby 现有值，于是所有字段都像空白，写入时才报「缺少演员 ID」 | 前者：分页改成「本页数量 < 每页上限才停」，不看 `total`。后者：`profileTargets` 对纯名字的条目先 `PersonByName` 解析，解析不到的**直接丢掉**，契约收紧为「返回的每个目标 ID 必须非空」——四条回归用例守着 |
+| gfriends 换了 CDN 节点 / 仓库之后，索引照样能下回来，但每个演员的候选图**全部下载失败** | 原实现只给**索引**配了备用地址（jsdelivr cdn / gcore / fastly + raw），图片下载永远只用配置里那一个基址。于是 `cdn.jsdelivr.net` 一挂，「刮削头像 / 选图」整体不可用 —— 索引有兜底反而让人以为这套容错是好的 | `gfriendsCDNBases()` 把同一套备用列表用到图片上：主基址**一张都没取下来**才依次换备用基址（正常网络零额外请求），备用基址单次尝试 30 秒上限。索引与图片都改由「仓库 × 节点」两维展开（主仓库 `gfriends/gfriends` → 镜像 `xinxin8816/gfriends`）。`TestPickBestGfriendsFallsBackToMirror` 守着（掐掉回落循环即变红） |
+| 备用基址的图服务端能取到、界面上却是破图 | 图片代理白名单里写的是**精确**主机 `cdn.jsdelivr.net`，`gcore.` / `fastly.` / `raw.githubusercontent.com` 全不在名单里。这类 bug 命令行 `curl` 那几个地址都是 200，只有浏览器经 `/api/img` 才被拒 | 白名单改成后缀匹配 `.jsdelivr.net` / `.githubusercontent.com`；`TestGfriendsCDNBasesAreProxyAllowed` 遍历全部候选基址反查白名单，漏一个就红 |
+| 「裸文件名也能命中」这条分支其实永远不成立 | 索引里的 `File` 形如 `三上悠亜-1.jpg?t=1657944780`，比对时只对**传入值**剥了 `?t=`、没剥索引那一侧的，所以带缓存戳的条目永远比不上（注释里写了这个能力，实际做不到） | 抽出 `gfriendFileBase()` 两边都剥，文件名本身仍要求精确相等（不退回「匹配失败就回落第一张」）。`TestMatchGfriendEntryAcceptsAnyBase` 覆盖带戳 / 不带戳 / 换一张图三种情况 |
 
 ### 一个改不回来的字段
 

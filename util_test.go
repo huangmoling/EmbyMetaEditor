@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -214,6 +215,46 @@ func TestGfriendsTreeCandidates(t *testing.T) {
 			t.Errorf("候选地址重复: %q", u)
 		}
 		seen[u] = true
+	}
+}
+
+// 索引的备用地址要同时覆盖「另一个仓库」和「另一套 CDN 基础设施」两个故障面。
+func TestGfriendsTreeCandidatesCoversRepoAndCDN(t *testing.T) {
+	got := gfriendsTreeCandidates("https://cdn.jsdelivr.net/gh/gfriends/gfriends@master/Filetree.json")
+	has := func(sub string) bool {
+		for _, u := range got {
+			if strings.Contains(u, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	// 镜像仓库（主仓库被删 / 被 jsdelivr 限流时的兜底）
+	if !has("xinxin8816/gfriends") {
+		t.Errorf("候选里应有镜像仓库 xinxin8816/gfriends: %v", got)
+	}
+	// jsdelivr 的其它分片域名
+	for _, node := range []string{"gcore.jsdelivr.net", "fastly.jsdelivr.net"} {
+		if !has(node) {
+			t.Errorf("候选里应有分片节点 %s: %v", node, got)
+		}
+	}
+	// 和 jsdelivr 完全不同的基础设施
+	if !has("raw.githubusercontent.com") {
+		t.Errorf("候选里应有 raw.githubusercontent.com: %v", got)
+	}
+	if len(got) != len(dedupeURLs(got)) {
+		t.Errorf("候选里出现重复: %v", got)
+	}
+}
+
+// 用户自定义了别的镜像站时不能硬塞默认地址 —— 内网自建镜像就是这么用的，
+// 追加外网地址既绕过了他的配置，又会白白多等一轮超时。
+func TestGfriendsTreeCandidatesKeepsCustomPrimary(t *testing.T) {
+	custom := "https://mirror.example.com/gfriends/Filetree.json"
+	got := gfriendsTreeCandidates(custom)
+	if len(got) != 1 || got[0] != custom {
+		t.Errorf("自定义主地址时不应追加备用地址: %v", got)
 	}
 }
 

@@ -40,7 +40,10 @@ var imageCDNHosts = []string{
 	"javbus.com", "www.javbus.com",
 	"javcdn.com", "www.javcdn.com",
 	"pics.dmm.co.jp", "awsimgsrc.dmm.co.jp",
-	"cdn.jsdelivr.net",
+	// gfriends 头像走 jsdelivr，而 jsdelivr 有 cdn./gcore./fastly. 多个分片域名
+	// （见 gfriends.go 的 gfriendsCDNNodes）。用后缀匹配一次覆盖全部，
+	// 同时兜住 raw.githubusercontent.com —— 那是 gfriends 的另一层备用地址。
+	".jsdelivr.net", ".githubusercontent.com",
 
 	// ---- 国产传媒（见 cnmedia.go）----
 	//

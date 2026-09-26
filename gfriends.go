@@ -278,30 +278,100 @@ func (g *Gfriends) Count() int {
 	return len(g.byName)
 }
 
-// gfriendsTreeCandidates 给出索引文件的多个候选地址，保证单点故障时仍可下载。
-func gfriendsTreeCandidates(primary string) []string {
-	set := []string{}
-	add := func(u string) {
+// gfriends 头像库有**两个独立**的故障面，备用地址要同时覆盖：
+//
+//  1. 仓库：`gfriends/gfriends` 是主仓库，`xinxin8816/gfriends` 是内容一致的镜像
+//     （Filetree.json 与全部 Content 图片逐字节相同，实测都 200）。主仓库被删 / 改名 /
+//     被 jsdelivr 限流时，镜像还在。
+//  2. CDN 节点：jsdelivr 对外有多个公开分片域名，后端是同一份缓存，但 DNS 与边缘节点
+//     各自独立 —— 某个分片被污染或限流时，换一个往往立刻可用。
+//
+// 而 raw.githubusercontent.com 走的是 GitHub 自己的基础设施，连 jsdelivr 整体挂掉都能兜住。
+const (
+	gfriendsRepo       = "gfriends/gfriends"
+	gfriendsMirrorRepo = "xinxin8816/gfriends"
+	gfriendsRef        = "master"
+	gfriendsTreeFile   = "Filetree.json"
+)
+
+// gfriendsCDNNodes 是 jsdelivr 的公开分片域名（按默认节点优先排序）。
+var gfriendsCDNNodes = []string{"cdn", "gcore", "fastly"}
+
+// gfriendsRepos 返回索引 / 图片的候选仓库，主仓库在前、镜像仓库在后。
+func gfriendsRepos() []string {
+	return []string{gfriendsRepo, gfriendsMirrorRepo}
+}
+
+// isDefaultGfriendCDN 判断地址是否落在「我们已知备用地址」的 CDN 上。
+//
+// 只有默认配置（jsdelivr / raw.githubusercontent）才补备用地址。用户自己填了别的
+// 镜像站就原样使用 —— 我们不知道那个站点的备用地址是什么，硬塞 jsdelivr 反而
+// 可能把他特意配的源绕过去（内网自建镜像就是这么用的）。
+func isDefaultGfriendCDN(base string) bool {
+	b := strings.TrimSpace(base)
+	return b == "" || strings.Contains(b, "jsdelivr.net") || strings.Contains(b, "githubusercontent")
+}
+
+// gfriendsCDNBaseURLs 按「仓库 × 节点」展开出全部可用的 CDN 基址（带结尾斜杠）。
+func gfriendsCDNBaseURLs() []string {
+	out := make([]string, 0, len(gfriendsRepos())*(len(gfriendsCDNNodes)+1))
+	for _, repo := range gfriendsRepos() {
+		for _, node := range gfriendsCDNNodes {
+			out = append(out, fmt.Sprintf("https://%s.jsdelivr.net/gh/%s@%s/", node, repo, gfriendsRef))
+		}
+		out = append(out, fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/", repo, gfriendsRef))
+	}
+	return out
+}
+
+// dedupeURLs 按顺序去重（保持首次出现的顺序）。
+func dedupeURLs(urls []string) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
 		u = strings.TrimSpace(u)
 		if u == "" {
-			return
+			continue
 		}
-		for _, e := range set {
+		dup := false
+		for _, e := range out {
 			if e == u {
-				return
+				dup = true
+				break
 			}
 		}
-		set = append(set, u)
+		if !dup {
+			out = append(out, u)
+		}
 	}
-	add(primary)
-	// 依据主地址推断同源备用地址
-	if strings.Contains(primary, "jsdelivr.net") || strings.Contains(primary, "githubusercontent") || primary == "" {
-		add("https://cdn.jsdelivr.net/gh/gfriends/gfriends@master/Filetree.json")
-		add("https://gcore.jsdelivr.net/gh/gfriends/gfriends@master/Filetree.json")
-		add("https://fastly.jsdelivr.net/gh/gfriends/gfriends@master/Filetree.json")
-		add("https://raw.githubusercontent.com/gfriends/gfriends/master/Filetree.json")
+	return out
+}
+
+// gfriendsTreeCandidates 给出索引文件的多个候选地址，保证单点故障时仍可下载。
+func gfriendsTreeCandidates(primary string) []string {
+	set := []string{primary}
+	if isDefaultGfriendCDN(primary) {
+		for _, base := range gfriendsCDNBaseURLs() {
+			set = append(set, base+gfriendsTreeFile)
+		}
 	}
-	return set
+	return dedupeURLs(set)
+}
+
+// gfriendsCDNBases 给出头像**图片**的候选基址，第一项永远是用配置里的那个。
+//
+// 索引能换仓库、图片换不了的话只解决一半问题：cdn.jsdelivr.net 挂掉时索引照样能
+// 从镜像下回来，但每个演员的候选图全下载失败，表现是「刮削头像 / 选图」整体不可用。
+func gfriendsCDNBases(cdn string) []string {
+	prim := strings.TrimSpace(cdn)
+	// 统一成带结尾斜杠，否则 "…@master" 和 "…@master/" 会被当成两个基址各试一遍。
+	if prim != "" {
+		prim = strings.TrimRight(prim, "/") + "/"
+	}
+	set := []string{prim}
+	if isDefaultGfriendCDN(cdn) {
+		set = append(set, gfriendsCDNBaseURLs()...)
+	}
+	return dedupeURLs(set)
 }
 
 // groupZh 把分组目录名转成可读备注。
