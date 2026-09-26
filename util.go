@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,6 +19,27 @@ import (
 
 	"golang.org/x/net/html"
 )
+
+// isNilVal 判断装进 any 的是不是「类型化的 nil」：nil slice / nil map / nil 指针等。
+//
+// 为什么需要：`v == nil` 只认真正的 nil 接口。一个 `[]string(nil)` 装进 any 之后
+// 接口本身并不为 nil，于是会被当成有效值放进请求体、序列化成 JSON 的 null。
+// 而 Emby 的 POST /Items/{id} 是**整对象替换**，一个 null 就等于把这个字段清空 ——
+// 这正是「一次看着无害的写入毁掉条目」的那类事故。
+//
+// 注意别把它当成「删掉空值」用：`[]string{}`（空但非 nil）仍然会照常发出去，
+// 「清空某字段」这种有意的写入不受影响。
+func isNilVal(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Map, reflect.Ptr, reflect.Interface, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	}
+	return false
+}
 
 // ---------- 基础工具 ----------
 

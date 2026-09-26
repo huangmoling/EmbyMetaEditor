@@ -221,7 +221,7 @@
             <option value="gfriends">仅 gfriends</option>
             <option value="metatube">仅 MetaTube</option>
           </select>
-          <label class="switch"><input type="checkbox" id="psOverwrite"> 覆盖已有头像</label>
+          <label class="switch"><input type="checkbox" id="psOverwrite" title="勾上以后，已有头像的演员也会被替换掉"> 强制覆盖已有头像</label>
           <input class="input" id="psLimit" type="number" value="100" min="1" style="width:82px">
           <button class="btn" id="psSearch">查询</button>
           <button class="btn btn-primary" id="psBatch">批量刮削头像</button>
@@ -236,6 +236,31 @@
             <button class="btn" id="gfSearch" style="flex:none">搜索</button>
           </div>
           <div id="gfResult" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h3>演员资料（简介 / 出生日期 / 出生地 / 外部 ID） <span class="spacer"></span>
+            <span class="tag" id="pfState">未加载</span>
+            <button class="btn btn-sm" id="pfHistory">同步历史 / 回滚</button>
+          </h3>
+          <div class="field">
+            <label>抓取源（列表顺序即优先级，同一字段取最靠前那个源的值）</label>
+            <div class="pf-srcs" id="pfSources"><span class="spin"></span> 加载中…</div>
+            <div class="hint">
+              写入策略固定为<b>只填空白字段</b>：Emby 里已经有值的一律不动，界面上也勾不动。
+              每次写入前都会留一份快照，可以从「同步历史」一键还原。<br>
+              各源的标签会并进简介的最后一行 —— 这个 Emby 构建对「人物」条目不保存 Emby
+              自己的标签字段，所以不单独写入。
+            </div>
+          </div>
+          <div class="pf-actions">
+            <label class="switch"><input type="checkbox" id="pfAlias" checked>
+              使用别名记忆（<span id="pfAliasN">0</span> 组同人写法，提高搜索命中率）</label>
+            <div class="grow"></div>
+            <input class="input" id="pfLimit" type="number" value="24" min="1" style="width:76px"
+              title="当前筛选条件里，最多处理多少位演员">
+            <button class="btn" id="pfBatchPage">批量处理当前页</button>
+            <button class="btn btn-primary" id="pfBatchLimit">按当前条件批量前 N 位</button>
+          </div>
         </div>
         <div class="plist" id="psList"><div class="empty">尚未加载</div></div>
         <div class="pager" id="psPager"></div>

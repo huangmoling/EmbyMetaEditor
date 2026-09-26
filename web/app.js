@@ -25,6 +25,9 @@ const S = {
   libs: [],
   lb: { start: 0, limit: 24, total: 0, items: [] },
   ps: { start: 0, limit: 48, total: 0, items: [] },
+  // prof 是「演员资料」面板的界面状态。sel 用 Set 存勾选的源，
+  // 重新渲染（切换视图 / 重查列表）不会丢勾选。
+  prof: { sources: [], sel: new Set(), aliasN: 0, loaded: false },
   jb: { scan: null, selected: new Set(), magnets: [], targets: [], magTab: '' },
   watching: {},
 };
@@ -257,7 +260,7 @@ function switchView(v) {
   $('#viewTitle').textContent = VIEW_TITLES[v] || v;
   if (v === 'stats') loadStats();
   if (v === 'library') { ensureLibs(); loadItems(0); }
-  if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); }
+  if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); loadProfileSources(); }
   if (v === 'cn') { ensureLibs(); cnSyncSelUI(); }
   if (v === 'settings') fillSettings();
 }
@@ -506,6 +509,10 @@ async function loadPersons(start) {
 
 function renderPersonCard(p) {
   const img = p.has_image ? '<img loading="lazy" src="' + personImg(p, 120) + '">' : esc((p.Name || '?').slice(0, 1));
+  // 已有头像的人，「刮削」按钮直接变成「重写」并带上强制覆盖 —— 这是用户明确要的能力：
+  // 头像来源随时可能换（gfriends 收录了更清晰的版本），不必先去工具栏勾开关。
+  const avLabel = p.has_image ? '重写头像' : '刮削头像';
+  const avTitle = p.has_image ? '用 gfriends / MetaTube 的图替换掉当前头像' : '按当前来源设置抓一张头像';
   return '<div class="pcard" data-id="' + esc(p.Id) + '" data-name="' + esc(p.Name) + '">' +
     '<div class="av">' + img + '</div>' +
     '<div class="info"><b title="' + esc(p.Name) + '">' + esc(p.Name) + '</b>' +
@@ -513,12 +520,13 @@ function renderPersonCard(p) {
       : (p.gfriends > 0 ? '<span class="tag tag-blue">gfriends 命中 ' + p.gfriends + '</span>' : '<span class="tag tag-amber">库中无记录</span>')) +
     '</div></div>' +
     '<div class="ops">' +
-    '<button class="btn btn-sm btn-primary" data-act="av">刮削</button>' +
-    '<button class="btn btn-sm" data-act="pick">选择</button>' +
+    '<button class="btn btn-sm btn-primary" data-act="av" title="' + esc(avTitle) + '">' + esc(avLabel) + '</button>' +
+    '<button class="btn btn-sm" data-act="pick" title="从 gfriends 头像库里挑一张">选图</button>' +
+    '<button class="btn btn-sm" data-act="prof" title="抓取简介 / 出生日期 / 出生地 / 外部 ID">资料</button>' +
     '</div></div>';
 }
 
-async function scrapeAvatar(personId, name, btn) {
+async function scrapeAvatar(personId, name, btn, force) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>'; }
   try {
     const r = await api('/api/persons/avatar', {
@@ -526,14 +534,14 @@ async function scrapeAvatar(personId, name, btn) {
       body: {
         person_id: personId, name: name,
         source: $('#psSource').value,
-        overwrite: $('#psOverwrite').checked,
+        overwrite: force === true ? true : $('#psOverwrite').checked,
       },
     });
     toast(name + '：' + r.message, 'ok');
     loadPersons(S.ps.start);
   } catch (e) {
     toast(name + '：' + e.message, 'err');
-    if (btn) { btn.disabled = false; btn.textContent = '刮削'; }
+    if (btn) { btn.disabled = false; btn.innerHTML = '重写头像'; }
   }
 }
 
@@ -584,6 +592,310 @@ async function refreshGfState() {
     $('#gfState').textContent = st.loaded ? ('已加载 ' + num(st.names) + ' 位演员') : (st.loading ? '加载中…' : '未加载');
     $('#gfState').className = 'tag ' + (st.loaded ? 'tag-green' : 'tag-amber');
   } catch (e) { /* ignore */ }
+}
+
+// ---------------- 演员资料 ----------------
+// 抓取与写回策略全在服务端（actorprofile.go / profile.go），前端只做展示与勾选。
+// 界面上必须**并排显示「Emby 现有值 vs 本次抓取值」**：「只填空白」这条策略如果不可见，
+// 用户看到「没写入」会以为是抓取失败，而不是被正确跳过了。
+// 只列服务端真正会写的字段。**这里没有 tags**：实测这个 Emby 构建对 Person
+// 不保存 Tags（POST 返回 204，但任何接口都读不回来），所以服务端把各源的标签
+// 并进了简介，不再单列一个「写不进去」的字段来骗人。
+const PROFILE_FIELD_HINT = {
+  overview: '写入 Emby 的 Overview（各源的标签也会并成最后一行）',
+  premiere_date: '写入 PremiereDate（出生日期）',
+  production_year: '跟出生日期一起写入 ProductionYear',
+  production_locations: '写入 ProductionLocations',
+  provider_ids: '写入 ProviderIds，key 用来源名',
+};
+
+// safeLink 只放行 http(s)，避免把服务端返回的字符串直接塞进 href。
+function safeLink(url) {
+  try { const u = new URL(url, location.href); return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : ''; }
+  catch (_) { return ''; }
+}
+
+function fmtTime(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+async function loadProfileSources(force) {
+  const box = $('#pfSources');
+  if (!box) return;
+  if (S.prof.loaded && !force) { renderProfileSources(); return; }
+  try {
+    const d = await api('/api/profile/sources');
+    S.prof.sources = d.sources || [];
+    // 首次加载默认全选；之后重载要保留用户已经取消掉的项（sel 是 Set，只往里加不覆盖）
+    if (!S.prof.loaded) S.prof.sources.forEach((s) => S.prof.sel.add(s.key));
+    S.prof.aliasN = d.alias_groups || 0;
+    S.prof.loaded = true;
+    renderProfileSources();
+    if ($('#pfAliasN')) $('#pfAliasN').textContent = num(S.prof.aliasN);
+  } catch (e) {
+    box.innerHTML = '<span class="cnhint">资料源加载失败：' + esc(e.message) + '</span>';
+  }
+}
+
+function renderProfileSources() {
+  const box = $('#pfSources');
+  if (!box) return;
+  if (!S.prof.sources.length) { box.innerHTML = '<span class="cnhint">没有可用的资料源</span>'; return; }
+  box.innerHTML = S.prof.sources.map((s) => '<label class="switch pf-src" title="' + esc(s.key) + '">' +
+    '<input type="checkbox" data-key="' + esc(s.key) + '"' + (S.prof.sel.has(s.key) ? ' checked' : '') + '> ' +
+    esc(s.label) + '</label>').join('');
+  $$('#pfSources input').forEach((cb) => {
+    cb.onchange = () => {
+      if (cb.checked) S.prof.sel.add(cb.dataset.key); else S.prof.sel.delete(cb.dataset.key);
+      updateProfileState();
+    };
+  });
+  updateProfileState();
+}
+
+function updateProfileState() {
+  const el = $('#pfState');
+  if (!el) return;
+  const n = S.prof.sel.size, all = S.prof.sources.length;
+  el.textContent = all ? ('已启用 ' + n + '/' + all + ' 个源') : '未加载';
+  el.className = 'tag ' + (n ? 'tag-green' : 'tag-amber');
+}
+
+// profileBody 组装抓取/写入入参；keys 只在写入时给（界面上的逐字段勾选）。
+function profileBody(personId, name, keys) {
+  const b = {
+    person_id: personId || '',
+    name: name,
+    sources: Array.from(S.prof.sel),
+    use_alias_memo: $('#pfAlias') ? $('#pfAlias').checked : true,
+  };
+  if (keys) b.keys = keys;
+  return b;
+}
+
+function profileNoteTag(f) {
+  if (f.will_write) return '<span class="tag tag-green">将写入</span>';
+  if (f.value) return '<span class="tag tag-amber">已有值，跳过</span>';
+  return '<span class="tag">未抓取到</span>';
+}
+
+function renderProfileFact(f) {
+  const sizes = [f.bust, f.waist, f.hip].filter(Boolean).join(' / ');
+  const kv = [
+    ['出生日期', f.birth_date], ['出生地', f.birth_place],
+    ['身高', f.height && (f.height + ' cm')],
+    ['三围', sizes], ['罩杯', f.cup], ['血型', f.blood_type],
+    ['出道', f.debut_date || f.debut_span],
+    ['经纪', f.agency && (f.agency + (f.agency_span ? '（' + f.agency_span + '）' : ''))],
+    ['兴趣/特长', f.hobby],
+    ['别名', (f.aliases || []).join('、')],
+    ['源站 ID', f.provider_id],
+  ].filter((x) => x[1]);
+  const score = f.match_score || 0;
+  const cls = score >= 95 ? 'tag-green' : (score >= 80 ? 'tag-amber' : 'tag-red');
+  const link = safeLink(f.source_url);
+  return '<div class="pf-fact">' +
+    '<div class="pf-facthead">' +
+    '<span class="tag ' + cls + '" title="姓名置信度：95 以上才算确认是同一人">' +
+    esc(f.source_label || f.source) + ' · 匹配 ' + score + '</span>' +
+    '<b>' + esc(f.matched_name || '') + '</b>' +
+    (f.elapsed_ms ? '<span class="cnhint">' + f.elapsed_ms + ' ms</span>' : '') +
+    '<span class="grow"></span>' +
+    (link ? '<a class="pf-link" target="_blank" rel="noopener noreferrer" href="' + esc(link) + '">源站页面 ↗</a>' : '') +
+    '</div>' +
+    (kv.length
+      ? '<div class="pf-kv">' + kv.map((x) => '<span class="k">' + x[0] + '</span><span class="v">' + esc(x[1]) + '</span>').join('') + '</div>'
+      : '<div class="cnhint">这个源只提供了外部 ID，没有可用的资料字段</div>') +
+    '</div>';
+}
+
+function renderProfilePanel(personId, name, prof) {
+  const body = $('#pfBody');
+  if (!body) return;
+  const fields = prof.fields || [];
+  const srcTags = (prof.sources || []).map((s) => '<span class="tag tag-blue">' + esc(s) + '</span>').join('');
+  const warns = (prof.warnings || []).map((w) => '<div class="alert">' + esc(w) + '</div>').join('');
+
+  const rows = fields.map((f) => '<tr class="' + (f.will_write ? 'pf-will' : (f.value ? 'pf-skip' : '')) + '">' +
+    '<td class="pf-f"><label class="switch" title="' + esc(PROFILE_FIELD_HINT[f.key] || '') + '">' +
+    '<input type="checkbox" data-key="' + esc(f.key) + '"' + (f.will_write ? ' checked' : ' disabled') + '>' +
+    '<b>' + esc(f.label) + '</b></label></td>' +
+    '<td class="pf-v pf-old">' + (f.emby_value
+      ? '<div class="pf-pre">' + esc(f.emby_value) + '</div>'
+      : '<span class="pf-dash">（空）</span>') + '</td>' +
+    '<td class="pf-v pf-new">' + (f.value
+      ? '<div class="pf-pre">' + esc(f.value) + '</div>' +
+        (f.source ? '<div class="pf-from">来自 ' + esc(f.source) + '</div>' : '')
+      : '<span class="pf-dash">—</span>') + '</td>' +
+    '<td class="pf-n">' + profileNoteTag(f) + '</td>' +
+    '</tr>').join('');
+
+  const facts = (prof.facts || []).map(renderProfileFact).join('');
+  const aliases = prof.aliases || [];
+  const aliasLine = aliases.length
+    ? '<div class="pf-alias">抓到的别名 ' + aliases.map((a) => '<span class="tag">' + esc(a) + '</span>').join('') +
+      '<span class="cnhint">写入成功后会记进别名记忆，下次各源搜索命中率更高</span></div>'
+    : '';
+
+  body.innerHTML = warns +
+    '<div class="pf-srcbar">命中来源：' + (srcTags || '<span class="cnhint">无</span>') +
+    '<span class="grow"></span>' +
+    '<span class="cnhint">可写入字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
+    '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
+    '<th style="width:92px">字段</th><th>Emby 现有值</th><th>本次抓取</th><th style="width:100px">结果</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    aliasLine +
+    '<div class="pf-act">' +
+    '<button class="btn btn-primary" id="pfApply">写入勾选字段</button>' +
+    '<button class="btn" id="pfRe">重新抓取</button>' +
+    '</div>' +
+    '<div class="cnhint" style="margin-top:8px">只写 Emby 里当前为空的字段；写入前会先落一份快照，「同步历史」里可以一键还原。</div>' +
+    '<details class="adv"' + (facts ? '' : ' hidden') + '><summary>各资料源明细（' + (prof.facts || []).length + ' 个源命中）</summary>' +
+    facts + '</details>';
+
+  $('#pfRe').onclick = () => openProfilePanel(personId, name);
+  $('#pfApply').onclick = async () => {
+    const keys = $$('#pfBody input[data-key]:checked').map((c) => c.dataset.key);
+    if (!keys.length) { toast('没有勾选任何字段：Emby 里该有的都有了', 'info'); return; }
+    const b = $('#pfApply');
+    b.disabled = true; b.innerHTML = '<span class="spin"></span> 写入中…';
+    try {
+      const r = await api('/api/profile/apply', { method: 'POST', body: profileBody(personId, name, keys) });
+      toast(name + '：' + r.message, 'ok');
+      $('#drawerHost').innerHTML = '';
+      loadPersons(S.ps.start);
+      loadProfileSources(true);
+    } catch (e) {
+      toast(e.message, 'err');
+      b.disabled = false; b.textContent = '写入勾选字段';
+    }
+  };
+}
+
+async function openProfilePanel(personId, name) {
+  openDrawer('<h3>' + esc(name) + '</h3>' +
+    '<div class="sub">抓取简介 / 出生日期 / 出生地 / 外部 ID，与 Emby 现有值逐字段比对</div>' +
+    '<div id="pfBody"><div class="empty"><span class="spin"></span> 正在并发访问各资料源…</div></div>');
+  try {
+    const prof = await api('/api/profile/preview', { method: 'POST', body: profileBody(personId, name) });
+    renderProfilePanel(personId, name, prof);
+  } catch (e) {
+    const body = $('#pfBody');
+    if (body) body.innerHTML = '<div class="alert">' + esc(e.message) + '</div>';
+  }
+}
+
+// collectProfileTargets 按**当前列表筛选条件**（搜索词 / 媒体库 / 只看无头像）翻页取人选。
+//
+// 为什么不在服务端按 limit 取：那样「当前条件」只认媒体库，搜索词和「只看无头像」
+// 会静默失效 —— 用户以为在批量处理屏幕上看到的这批人，实际处理的是另一批。
+// 这里复用同一个 /api/persons 接口，筛选逻辑就不存在第二份实现。
+async function collectProfileTargets(limit) {
+  const q = $('#psQ').value.trim();
+  const parentID = $('#psLib').value;
+  const missing = $('#psMissing').checked;
+  const out = [];
+  const pageSize = 100;
+  for (let start = 0; out.length < limit; start += pageSize) {
+    const params = new URLSearchParams({
+      q: q, start: start, limit: pageSize,
+      parent_id: parentID, missing_image: missing ? 'true' : 'false',
+    });
+    const d = await api('/api/persons?' + params.toString());
+    const items = d.items || [];
+    for (const p of items) {
+      out.push({ id: p.Id, name: p.Name });
+      if (out.length >= limit) break;
+    }
+    // 翻页终止条件只看「这一页是不是满的」，**不看 d.total**：
+    // /api/persons 带搜索词或缺失过滤时 total 会是 0（实测 Emby 的 /Persons
+    // 在过滤场景下不回 TotalRecordCount），拿它当判据会第一页就退出，
+    // 界面上写着「前 300 位」实际只处理了 100 位。
+    if (items.length < pageSize) break;
+  }
+  return out;
+}
+
+async function batchProfile(mode) {
+  if (!S.prof.loaded) { toast('资料源还没加载好', 'err'); return; }
+  if (!S.prof.sel.size) { toast('至少勾选一个资料源', 'err'); return; }
+  let items, title;
+  try {
+    if (mode === 'page') {
+      items = S.ps.items.map((p) => ({ id: p.Id, name: p.Name }));
+      title = '批量抓取演员资料（当前页 ' + items.length + ' 位）';
+    } else {
+      const limit = Math.max(1, Number($('#pfLimit').value) || 24);
+      items = await collectProfileTargets(limit);
+      title = '批量抓取演员资料（前 ' + limit + ' 位）';
+    }
+  } catch (e) { toast('取演员列表失败：' + e.message, 'err'); return; }
+  if (!items.length) { toast('当前条件下没有可处理的演员', 'err'); return; }
+  try {
+    const r = await api('/api/profile/batch', {
+      method: 'POST',
+      body: {
+        items: items,
+        sources: Array.from(S.prof.sel),
+        use_alias_memo: $('#pfAlias').checked,
+      },
+    });
+    watchJob(r.job_id, title, () => { loadPersons(S.ps.start); loadProfileSources(true); });
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function openSyncHistory() {
+  openDrawer('<h3>资料同步历史</h3>' +
+    '<div class="sub">每次资料写入前都会留一份快照，可以从这里一键还原到写入前的状态</div>' +
+    '<div id="shBody"><div class="empty"><span class="spin"></span> 加载中…</div></div>');
+  const body = $('#shBody');
+  try {
+    const d = await api('/api/profile/history?limit=200');
+    const recs = d.records || [];
+    if (!recs.length) { body.innerHTML = '<div class="empty">还没有任何资料写入记录</div>'; return; }
+    body.innerHTML = recs.map((r) => '<div class="sh-row' + (r.rolled_back ? ' sh-done' : '') + '">' +
+      '<div class="sh-i"><b>' + esc(r.name) + '</b>' +
+      '<span>' + fmtTime(r.created_at) + ' · ' + esc((r.sources || []).join(' / ') || '—') + '</span>' +
+      '<span class="sh-ch">' + esc((r.changed || []).join('、')) + '</span></div>' +
+      (r.rolled_back
+        ? '<span class="tag tag-green">已回滚</span>'
+        : '<button class="btn btn-sm" data-rid="' + esc(r.id) + '" data-name="' + esc(r.name) + '">回滚</button>') +
+      '</div>').join('');
+    // 回滚是不可逆的写操作，用「点两次」代替 window.confirm()：
+    // 原生弹窗在无头浏览器（回归脚本）里会直接卡住。
+    $$('#shBody button[data-rid]').forEach((btn) => {
+      btn.onclick = async () => {
+        if (btn.dataset.armed !== '1') {
+          btn.dataset.armed = '1';
+          btn.classList.add('btn-danger');
+          btn.textContent = '确认回滚？';
+          setTimeout(() => {
+            if (btn.dataset.armed !== '1') return;
+            btn.dataset.armed = '0';
+            btn.classList.remove('btn-danger');
+            btn.textContent = '回滚';
+          }, 4000);
+          return;
+        }
+        btn.disabled = true; btn.textContent = '回滚中…';
+        try {
+          const r = await api('/api/profile/rollback', { method: 'POST', body: { id: btn.dataset.rid } });
+          toast(btn.dataset.name + '：' + r.message, 'ok');
+          openSyncHistory();
+          loadPersons(S.ps.start);
+        } catch (e) {
+          toast(e.message, 'err');
+          btn.disabled = false; btn.textContent = '回滚';
+        }
+      };
+    });
+  } catch (e) {
+    body.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
 }
 
 // ---------------- 番号补全 ----------------
@@ -1311,8 +1623,16 @@ function bind() {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
     const card = btn.closest('.pcard');
-    if (btn.dataset.act === 'av') scrapeAvatar(card.dataset.id, card.dataset.name, btn);
-    else pickAvatar(card.dataset.id, card.dataset.name);
+    const act = btn.dataset.act;
+    if (act === 'av') {
+      // 「重写头像」= 强制覆盖（按钮文案已经说明了），「刮削头像」才看工具栏那个开关
+      const hasImage = !!btn.closest('.pcard').querySelector('.av img');
+      scrapeAvatar(card.dataset.id, card.dataset.name, btn, hasImage ? true : undefined);
+    } else if (act === 'pick') {
+      pickAvatar(card.dataset.id, card.dataset.name);
+    } else if (act === 'prof') {
+      openProfilePanel(card.dataset.id, card.dataset.name);
+    }
   };
   $('#psBatch').onclick = async () => {
     try {
@@ -1348,6 +1668,10 @@ function bind() {
     } catch (e) { $('#gfResult').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
   };
   $('#gfQ').onkeydown = (e) => { if (e.key === 'Enter') $('#gfSearch').click(); };
+
+  $('#pfBatchPage').onclick = () => batchProfile('page');
+  $('#pfBatchLimit').onclick = () => batchProfile('limit');
+  $('#pfHistory').onclick = openSyncHistory;
 
   $('#jbScan').onclick = jbScan;
   $('#jbStar').onkeydown = (e) => { if (e.key === 'Enter') jbScan(); };

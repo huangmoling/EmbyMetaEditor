@@ -26,6 +26,10 @@ type App struct {
 	sess  *sessions
 	limit *attemptLimiter
 
+	// 演员资料管理：别名记忆与同步历史，两者都落 cache/，重启后保留。
+	aliases *AliasStore
+	sync    *SyncStore
+
 	// 国产传媒客户端按站点地址缓存：同一个批次里必须复用同一个实例，
 	// 否则每次请求都新建，限速器（按站点共享）就成了摆设。
 	cnMu sync.Mutex
@@ -36,14 +40,20 @@ type App struct {
 func NewApp(store *Store, web fs.FS) *App {
 	gf := NewGfriends(store.Get)
 	gf.LoadFromCache()
+	aliases := NewAliasStore()
+	aliases.LoadFromCache()
+	syncStore := NewSyncStore()
+	syncStore.LoadFromCache()
 	return &App{
-		store:  store,
-		gf:     gf,
-		jobs:   NewJobRegistry(),
-		images: NewImageProxy(newHTTPClient(store.Get())),
-		web:    web,
-		sess:   newSessions(),
-		limit:  newAttemptLimiter(),
+		store:   store,
+		gf:      gf,
+		jobs:    NewJobRegistry(),
+		images:  NewImageProxy(newHTTPClient(store.Get())),
+		web:     web,
+		sess:    newSessions(),
+		limit:   newAttemptLimiter(),
+		aliases: aliases,
+		sync:    syncStore,
 	}
 }
 
@@ -120,6 +130,15 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("GET /api/persons", a.handlePersons)
 	mux.HandleFunc("POST /api/persons/avatar", a.handlePersonAvatar)
 	mux.HandleFunc("POST /api/persons/avatars", a.handlePersonAvatarBatch)
+
+	// ---- 演员资料管理 ----
+	mux.HandleFunc("GET /api/profile/sources", a.handleProfileSources)
+	mux.HandleFunc("POST /api/profile/preview", a.handleProfilePreview)
+	mux.HandleFunc("POST /api/profile/apply", a.handleProfileApply)
+	mux.HandleFunc("POST /api/profile/batch", a.handleProfileBatch)
+	mux.HandleFunc("GET /api/profile/history", a.handleProfileHistory)
+	mux.HandleFunc("POST /api/profile/rollback", a.handleProfileRollback)
+	mux.HandleFunc("GET /api/profile/aliases", a.handleProfileAliases)
 
 	// ---- MetaTube ----
 	mux.HandleFunc("GET /api/metatube/providers", a.handleMTProviders)

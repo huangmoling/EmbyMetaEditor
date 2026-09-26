@@ -167,6 +167,23 @@ API Key 在 Emby 后台「高级 → API 密钥」生成，直接填进「设置
 - **高清优先**：同一演员在库里往往有多张头像（不同分辨率），自动刮削时会先量每张的尺寸（宽 × 高），选最大的一张上传——对齐 Emby 自带 gfriends 插件的行为。
 - **手动选择**：演员列表点「选择」可以看到所有候选头像，点哪张换哪张。选中后上传的就是你点的那张；如果那张在索引里已被移除，会明确报错提示重新搜索，不会静默换成第一张。
 
+### 关于演员资料（演员头像页）
+
+除了头像，「演员头像」页的每张卡片还能抓**演员本人的资料**：简介、出生日期、出生年份、出生地、外部 ID。三个源并发搜，按字段优先级合并：
+
+| 源 | 取什么 |
+|---|---|
+| **AVデータバンク**（`av-db.net`） | 字段最全：生年月日 / 出身地 / 身长・三围 / 血型 / 爱好 / 所属事务所 / 别名 / 标签，也是外部 ID（`avdb`）的来源 |
+| **AV-League**（`av-league.com`） | 生年月日 / 出身地 / 三围 / 所属事务所，命中时用来互相印证 |
+| **Wikipedia（日文）** | 简介段落，偏生平与职业经历 |
+
+**只填空白，绝不覆盖。** 写入前先读一遍 Emby 里现有的值：已经有的字段**界面上就不给勾**（勾选框 disabled）。每次写入前留一份快照，「同步历史」里可以一键还原到写入前的状态 —— 回滚是破坏性操作，所以要**点两次**才真的执行。
+
+- 抓取前用「同字串 + 读音拆分」两轮匹配，避免把同名不同人写成同一个人；命中后还要「详情页姓名确认」才算数（`minMatchScore` / `minDetailMatchScore`）。
+- 「使用别名记忆」会把「简繁 / 假名 / 罗马字」这类同一人的写法记进 `cache/actor_aliases.json`（和旧版「Emby演员扩展器」的 `data/演员别名记忆.json` 同构），下次直接命中，不用再猜。
+- **标签（「タグ」）不写进 Emby 的 `Tags`，而是并进简介的最后一行。** 原因是这个 Emby 构建对 `Person` 条目的 `Tags` 是**收下但不保存**的（POST 204，但详情 / 列表 / 标签字典里都没有），写了会「看起来成功、实际没有」，还会把用户自己填的标签覆盖掉。详见「踩过的坑」。
+- 支持批量：工具栏「按当前条件」或「按数量上限」，一次给多个演员补资料。
+
 ### 关于 javbus
 
 - 站点需要 `age=verified` 之类的 Cookie 才给看内容，默认值已内置。
@@ -312,7 +329,12 @@ curl "http://127.0.0.1:8097/api/cn/search?q=91CM-014"
 |---|---|
 | ![诊断失败](screenshots/09-连通性诊断-失败.png) | ![磁力分页](screenshots/magnet_tabs.png) |
 
-（截图里的数据来自本地 mock Emby / mock javbus，仅用于展示界面。）
+| 演员资料（简介 / 出生日期 / 出生地 / 外部 ID） |
+|---|
+| ![演员资料](screenshots/16-演员资料面板.png) |
+
+（截图里的数据来自本地 mock Emby / mock javbus，仅用于展示界面。
+演员资料那张是在真实 Emby 上截的 —— 截之前脚本会先把侧栏的账号行藏掉。）
 
 ---
 
@@ -448,6 +470,38 @@ python tools/verify_cn_view.py
 > 统计图片前会先 `scrollIntoView()` —— `loading="lazy"` 的图在视口外永远是 pending，
 > 不滚一遍就会误报「没图」。这正是发现「接口返回 200 但页面全白」那个 bug 的关键。
 
+演员**资料**（简介 / 出生日期 / 出生地 / 外部 ID）的服务端冒烟：
+
+```bash
+python tools/smoke_profile.py                 # 只读
+PROFILE_LIVE=1 python tools/smoke_profile.py  # 再加上真实写入 → 校验 → 回滚 → 校验还原
+```
+
+只读模式验：资料源清单与写入策略（`only_blank`）、挑一个真实演员**逐字段**核对「只填空白」、
+连续预览不产生同步历史、以及错误路径（空名 / 空 ID / 查不到的演员一律 4xx，坏的回滚 ID 报错）。
+`PROFILE_LIVE=1` 会真的写进 Emby 再回滚，验证「写完确实变了、回滚后逐字段还原、同一条不能回滚两次」。
+
+> 跑之前把 `NO_PROXY` 带上 `127.0.0.1`（本机若设了 http 代理，`127.0.0.1` 也会被转发出去，
+> 脚本会满屏 502）。跑完它会往 `cache/sync_history.json` 留记录 —— 这是正常的。
+
+演员资料面板的**界面**回归（需要无头 Edge + 真实 config.json）：
+
+```bash
+python tools/verify_profile_view.py
+```
+
+断言：资料源默认全选且状态标签跟着勾选变、工具栏有「强制覆盖已有头像」、每张卡三个操作
+（头像 / 选图 / 资料）、有头像的卡按钮是「重写头像」、无头像的是「刮削头像」；
+再搜一个真实演员打开预览，断言对照表**渲染出全部受管字段**、**没有 `tags` 行**、
+「Emby 已有值」的行勾选框是 disabled、「将写入」的行勾上且可点、判定为跳过的行不许勾；
+最后打开「同步历史」，断言每条记录都有明确状态（回滚按钮 或 已回滚标签）。
+全程只读（回滚按钮只点到「确认回滚？」那步），并检查没有 console 报错 / CSP 拦截 / 4xx-5xx。
+
+> 脚本会保证样本**非空** —— 找不到「Emby 已有值 ≥ 1 **且** 可写 ≥ 1」的演员就逐个换候选，
+> 换完都找不到直接判 FAIL。否则「只填空白」那几条断言会在一个抓不到资料的演员上**空过**。
+> 候选名单可用 `VERIFY_STARS="玉木くるみ,心花ゆら"` 覆盖。
+> 「只看无头像」默认勾着，而有头像的演员才更可能"填了一半"，所以脚本会先取消这个过滤。
+
 ---
 
 ## Docker 镜像
@@ -533,11 +587,14 @@ gfriends.go          gfriends 索引下载 / 缓存 / 查询
 javbus.go            javbus 抓取、HTML 解析、连通性诊断
 cnmedia.go           国产传媒四站抓取、番号归一化、精确匹配合并
 scrape.go            刮削编排、番号比对
+actorprofile.go      演员资料来源适配（AVデータバンク / AV-League / Wikipedia）、姓名匹配、字段合并
+profile.go           演员资料编排：只填空白、同步快照与回滚、别名记忆
+api_profile.go       演员资料相关路由（sources / preview / apply / batch / history / rollback / aliases）
 jobs.go              后台任务与进度
 util.go              番号归一化、HTML 辅助、HTTP 客户端
 console_windows.go   Windows 控制台切 UTF-8
 web/                 前端（原生 JS，无构建步骤）
-tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 演员按库筛选 / 磁力分页 / 国产传媒 / 夹具切取 / 实机冒烟
+tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 演员按库筛选 / 磁力分页 / 国产传媒 / 演员资料 / 夹具切取 / 实机冒烟
 app.ico              图标源文件
 Dockerfile           Docker 镜像定义（两阶段，静态链接）
 .dockerignore        排除 config.json / cache 等，别把凭据带进构建上下文
@@ -557,6 +614,8 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | `verify_person_lib.py` | 演员按媒体库筛选的**交互**（切库、总数、卡片换批、切回） | 起 exe + 无头 Edge |
 | `verify_magnet_tabs.py` | 磁力列表**按番号分页**（标签切换、复制当前 / 全部、空态） | 起 exe + 无头 Edge |
 | `verify_cn_view.py` | 国产传媒**选库→列表→单选/多选刮削→编辑元数据**（41 项，写路径全用假 `api()`） | 起 exe + 无头 Edge |
+| `smoke_profile.py` | 演员资料只读冒烟（源清单 / 只填空白 / 预览无副作用 / 错误路径）；`PROFILE_LIVE=1` 再加真实写入 → 回滚 → 校验还原 | 起 exe + 真实 config |
+| `verify_profile_view.py` | 演员资料面板**渲染**（源勾选、头像按钮文案、对照表禁用/勾选、同步历史状态；样本非空） | 起 exe + 无头 Edge |
 | `extract_cn_fixtures.py` | 从 `cache/debug/` 的原始响应里切测试夹具 | 落盘的原始 HTML |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
 | `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest，比对 `revision` = 本地 tag、`source` = 本仓库、入口参数、非 root） | 能连 Docker Hub |
@@ -617,6 +676,11 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | 登录失败**两次**之后，本人输对密码也被挡 | 退避表取了 `idx = fails`，第二次失败就吃到 3 秒锁，「前两次不罚」形同虚设 | 改成 `idx = fails - 1`；`tools/smoke_auth.py` 把「连续失败才退避」固定成断言 |
 | 「保存设置」把存好的 Emby API Key / javbus cookie 抹掉了 | `/api/config` 不再下发明文密钥后，前端输入框本来就是空的，后端却还在无条件赋值 —— 空串被当成「清空」 | 密钥一律「留空 = 不修改」（含 `/api/emby/login` 里的 API Key），`smoke_auth.py` 有一条断言专门守着它 |
 | 修完「数字开头番号」之后，**每个 mp4 条目都多出一个「番号 `MP-4`」** | 为了支持 `91CM-014` 放宽了正则（允许数字前缀、数字部分只要求 1 位），结果 `.mp4` 被拆成 `MP` + `4`。角标、写进 `Tags` 的内容、javbus 搜索关键词全跟着错 —— 修之前抽样 200 条「有番号」的有 196 条 | `numberSourceFields()` 抽番号前先抹掉文件扩展名（`reFileExt`），并把 `MP` / `CD` 这类容器 / 分卷标记加进 `cnNoisePrefix`。回归用例 `TestCNItemNumberIgnoresFileExtension` 守着 |
+| 给演员写 `Tags`（标签）总是「成功」，读回来却永远是空 | 这个 Emby 构建对 `Person` 条目的 `Tags` 是**收下不保存**：`POST /Items/{id}` 返回 204，但详情、列表、`TagItems`、全局标签字典里都查不到，按标签搜也是 0 条。同一批实测里 `Overview` / `PremiereDate` / `ProductionYear` / `ProductionLocations` / `ProviderIds` 都能正常存 | 演员资料**不写 `Tags`**，各源抓到的标签并进简介的最后一行。否则每跑一次都会「重复写入成功」、还顺手覆盖用户自己填的标签 |
+| 想清空某个字段时，发 `null` 或干脆不带这个键，服务端都不为所动 | 这个构建里**只有发空数组 `[]` 才能清空数组字段**（如 `ProductionLocations`），`null` 和省略键都等于「不改」 | 回滚时把快照里缺失的数组 / map / 数字字段补成 `[]` / `{}` / `0` 再发，而不是发 `nil` |
+| 回滚之后，字段该还原的没还原、外部 ID 被整个抹掉 | 两个各自独立的坑凑在一起：① 快照里缺失的值被转成 `[]string(nil)`，装箱进 `any` 之后 `v == nil` 是 **false**（类型化的 nil 不等于 nil），于是既没走进「清空」分支又被 nil 守卫跳过；② `patch["ProviderIds"].(map[string]any)` 遇到 `map[string]string`（回滚快照正是这种）会**静默断言失败**，发出去一个空 map | ① `util.go` 加 `isNilVal()`（用 `reflect` 判 `Slice/Map/Ptr/…` 的 `IsNil`），`updateItem` 的守卫与 `rollbackSync` 的补空都用它；② 抽出 `providerIDsFrom(v any)` 同时处理两种 map 类型。两条都有回归用例（`TestRollbackClearsFieldsThatWereAbsent` / `TestApplyThenRollbackRestores`） |
+| 同步历史里每条记录都点不动（`record_id` 是空串，回滚无从下手） | `SyncStore.Add(rec SyncRecord)` 是**值传递**，函数内部生成的 ID 传不回调用方，`res.RecordID` 永远是空的 | `Add` 改成返回 ID，调用方 `res.RecordID = a.sync.Add(rec)` |
+| 批量补资料时列表只跑一页就停了；按名字传入的演员每个字段都判成「可写」 | 前者：`/Persons` 带 `SearchTerm` 时 Emby 返回的 `TotalRecordCount` **恒为 0**（不带搜索词才正常），拿 `total` 当终止条件就提前收工。后者：名字解析失败时 `person_id` 留空，读不到 Emby 现有值，于是所有字段都像空白，写入时才报「缺少演员 ID」 | 前者：分页改成「本页数量 < 每页上限才停」，不看 `total`。后者：`profileTargets` 对纯名字的条目先 `PersonByName` 解析，解析不到的**直接丢掉**，契约收紧为「返回的每个目标 ID 必须非空」——四条回归用例守着 |
 
 ### 一个改不回来的字段
 

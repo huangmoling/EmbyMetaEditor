@@ -281,7 +281,7 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .mcard.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 
 /* ---------- 演员列表 ---------- */
-.plist { display: grid; grid-template-columns: repeat(auto-fill, minmax(238px, 1fr)); gap: 11px; }
+.plist { display: grid; grid-template-columns: repeat(auto-fill, minmax(272px, 1fr)); gap: 11px; }
 .pcard {
   display: flex; gap: 11px; align-items: center; background: var(--surface);
   border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; box-shadow: var(--shadow);
@@ -295,7 +295,9 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .pcard .info { flex: 1; min-width: 0; }
 .pcard .info b { display: block; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pcard .info .sub { font-size: 11px; color: var(--muted); margin-top: 3px; display: flex; gap: 5px; flex-wrap: wrap; }
-.pcard .ops { display: flex; flex-direction: column; gap: 4px; }
+.pcard .ops { display: flex; flex-direction: column; gap: 4px; flex: none; }
+/* 三个按钮竖排（重写/刮削头像、选图、资料），文案不能折行，否则卡片高度会跳 */
+.pcard .ops .btn { white-space: nowrap; }
 
 /* ---------- 番号结果 ---------- */
 .missgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
@@ -499,3 +501,55 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .pager { display: flex; align-items: center; gap: 10px; justify-content: center; padding: 16px 0 4px; font-size: 12.5px; color: var(--muted); }
 .mono { font-family: var(--mono); font-size: 11.5px; }
 .scroll-x { overflow-x: auto; }
+
+/* ---------- 演员资料（抓取源 / 现有值 vs 抓取值 / 同步历史） ---------- */
+.grow { flex: 1; min-width: 0; }
+
+.pf-srcs { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.pf-src { font-size: 12.5px; }
+.pf-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+
+.pf-srcbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; font-size: 12px; }
+
+table.pf-tbl { table-layout: fixed; }
+table.pf-tbl th, table.pf-tbl td { vertical-align: top; }
+table.pf-tbl td.pf-v { padding-top: 8px; padding-bottom: 8px; }
+.pf-f { white-space: nowrap; }
+.pf-n { white-space: nowrap; }
+.pf-pre {
+  white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.55;
+  max-height: 132px; overflow: auto;
+}
+.pf-old .pf-pre { color: var(--text-2); }
+.pf-new .pf-pre { color: var(--text); }
+.pf-dash { color: var(--muted); font-size: 12px; }
+.pf-from { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.pf-will td { background: var(--success-soft); }
+.pf-will td.pf-n .tag { font-weight: 600; }
+
+.pf-alias {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: 12px; font-size: 12px; color: var(--text-2);
+}
+.pf-alias .cnhint { margin-left: 4px; }
+.pf-act { display: flex; gap: 8px; margin-top: 16px; }
+
+.pf-fact { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 8px; }
+.pf-facthead { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+.pf-facthead b { font-size: 12.5px; }
+.pf-kv { display: grid; grid-template-columns: 84px 1fr; gap: 4px 10px; font-size: 12px; }
+.pf-kv .k { color: var(--muted); }
+.pf-kv .v { word-break: break-word; }
+.pf-link { font-size: 12px; color: var(--accent); text-decoration: none; flex: none; }
+.pf-link:hover { text-decoration: underline; }
+
+.sh-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 2px; border-bottom: 1px solid var(--border);
+}
+.sh-row:last-child { border-bottom: 0; }
+.sh-row.sh-done { opacity: .62; }
+.sh-i { flex: 1; min-width: 0; }
+.sh-i b { display: block; font-size: 13px; }
+.sh-i span { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.sh-i .sh-ch { color: var(--text-2); }

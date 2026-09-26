@@ -410,6 +410,18 @@ var embyUnsafeWriteFields = map[string]bool{
 // 另外 ProviderIds 不能缺、也不能是 null，否则服务端直接 400
 // （Value cannot be null. (Parameter 'source')）。
 func (e *Emby) UpdateItem(ctx context.Context, id string, patch map[string]any) error {
+	return e.updateItem(ctx, id, patch, true)
+}
+
+// UpdateItemExact 与 UpdateItem 同源，但 ProviderIds 采用**原样替换**而不是合并。
+//
+// 为什么需要这个：合并式写入只能加/改，**删不掉**已存在的外部 ID。
+// 「同步历史 → 回滚」必须把外部 ID 恢复成写入前的样子，所以那条路径要用这个。
+func (e *Emby) UpdateItemExact(ctx context.Context, id string, patch map[string]any) error {
+	return e.updateItem(ctx, id, patch, false)
+}
+
+func (e *Emby) updateItem(ctx context.Context, id string, patch map[string]any, mergeProviders bool) error {
 	if len(patch) == 0 {
 		return nil
 	}
@@ -427,31 +439,57 @@ func (e *Emby) UpdateItem(ctx context.Context, id string, patch map[string]any) 
 	}
 	body["Id"] = id
 	for k, v := range patch {
-		if v == nil {
+		// 必须连**类型化的 nil** 一起挡掉：一个 nil []string / nil map 装进 any 之后
+		// 接口本身不等于 nil，`v == nil` 放它过去，序列化就成了 null ——
+		// 而 POST /Items/{id} 是整对象替换，null 会把这个字段清空。
+		if v == nil || isNilVal(v) {
 			continue
 		}
 		body[k] = v
 	}
 
-	// ProviderIds：合并已有外部 ID，且保证非 nil
-	merged := map[string]any{}
-	if exist, ok := cur["ProviderIds"].(map[string]any); ok {
-		for k, v := range exist {
-			merged[k] = v
-		}
+	// ProviderIds：缺了或为 null 会直接 400，所以无论哪条路径都要保证非 nil
+	if !mergeProviders {
+		// 原样替换：回滚就靠这条路径把外部 ID 恢复成写入前的样子。
+		body["ProviderIds"] = providerIDsFrom(patch["ProviderIds"])
+		_, _, err = e.do(ctx, http.MethodPost, "/Items/"+id, nil, body, nil)
+		return err
 	}
-	if pv, ok := patch["ProviderIds"].(map[string]any); ok {
-		for k, v := range pv {
-			if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
-				continue
-			}
-			merged[k] = v
-		}
+
+	merged := providerIDsFrom(cur["ProviderIds"])
+	for k, v := range providerIDsFrom(patch["ProviderIds"]) {
+		merged[k] = v
 	}
 	body["ProviderIds"] = merged
 
 	_, _, err = e.do(ctx, http.MethodPost, "/Items/"+id, nil, body, nil)
 	return err
+}
+
+// providerIDsFrom 把各种形态的 ProviderIds 归一成 map[string]any（顺手丢掉空值）。
+//
+// 调用方给的可能是 map[string]any（现组装的 patch），也可能是 map[string]string
+// （回滚快照，来自 itemStrMap）。**只认前者是个静默事故**：类型断言失败不报错，
+// 结果是一个空 map 被当成「清空」发出去，外部 ID 全没（单测当场抓到）。
+func providerIDsFrom(v any) map[string]any {
+	out := map[string]any{}
+	switch pv := v.(type) {
+	case map[string]any:
+		for k, x := range pv {
+			if s, ok := x.(string); ok && strings.TrimSpace(s) == "" {
+				continue
+			}
+			out[k] = x
+		}
+	case map[string]string:
+		for k, s := range pv {
+			if strings.TrimSpace(s) == "" {
+				continue
+			}
+			out[k] = s
+		}
+	}
+	return out
 }
 
 // ---------- 图片 ----------

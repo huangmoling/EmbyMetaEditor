@@ -70,13 +70,13 @@ def main():
                   timeout=180, desc="演员卡片出现（要能连上 Emby）")
     page.pump(0.5)
 
-    print("\n3) 点第一张卡片的「选择」，弹出挑选弹窗")
+    print("\n3) 点第一张卡片的「选图」，弹出挑选弹窗")
     opened = page.eval("""(() => {
       const b = document.querySelector('#psList .pcard button[data-act="pick"]');
       if (b) b.click();
       return !!b;
     })()""")
-    check("演员卡片上有「选择」按钮", bool(opened))
+    check("演员卡片上有「选图」按钮（data-act=pick）", bool(opened))
     if not opened:
         return 1
     page.wait_for("!!document.querySelector('#pkList')", timeout=60, desc="挑选弹窗打开")

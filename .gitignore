@@ -25,6 +25,8 @@ screenshots/*
 !screenshots/07-*.png
 !screenshots/08-*.png
 !screenshots/09-*.png
+# 演员资料面板：截图脚本会先把侧栏的账号行（「在线 · <user>」）藏掉再截，否则会公开 Emby 用户名
+!screenshots/16-*.png
 # 磁力分页那张是 mock 数据（假番号 + 假磁力哈希），可以公开
 !screenshots/magnet_tabs.png
 
