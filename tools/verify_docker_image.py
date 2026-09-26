@@ -6,8 +6,12 @@
   自己拉一遍：先看是不是多架构、再看配置 blob 里的 `org.opencontainers.image.revision`
   是否等于本地 HEAD、`source` 是否指向本仓库。全部用匿名 pull token，不需要登录。
 
-最后还会**解开 amd64 的层**，在二进制里实查内嵌的 `web/`：这正是唯一能抓出
+最后还会**解开 amd64 的层**，在二进制里实查内嵌的 `web/` 与后端字面量：这正是唯一能抓出
 「源码修了、镜像没重建」的断言 —— 静态检查（revision / 入口 / 非 root）在那种情况下全是绿的。
+`check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复，以及 v1.2.0 的资料面板
+「媒体库作品」区块和「将覆盖原值」文案；`check_embedded_backend` 查 gfriends CDN 模板、
+`GET /api/profile/works`、`/Library/VirtualFolders` 与磁力体积正则。
+**加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL）。
 
 用法： python tools/verify_docker_image.py [镜像名] [tag]
 默认： aag111/emby-meta-editor:latest
@@ -140,6 +144,15 @@ def check_embedded_frontend(blob, version, revision=""):
     check("候选头像走同源代理（imgSrc）", "imgSrc(en.f)" in seg)
     check("候选头像已无 CDN 裸外链", "'src=\"' + esc(en.f)" not in seg)
 
+    # 下面两条同样只在**前端真的被重建**时才会出现：
+    # v1.2.0 的资料面板多了「媒体库作品」区块，以及勾选覆盖的「将覆盖原值」判定文案。
+    # 只改后端、忘了重建前端时，上面那两条 gfriends 断言仍然全绿，靠这两条才抓得住。
+    for marker, what in [
+        ("将覆盖原值", "资料面板的勾选覆盖判定（v1.2.0）"),
+        ("媒体库作品", "资料面板的媒体库作品区块（v1.2.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -162,6 +175,11 @@ def check_embedded_backend(blob):
     for marker, what in [
         ("xinxin8816/gfriends", "gfriends 镜像仓库（CDN 容错）"),
         ("https://%s.jsdelivr.net/gh/%s@%s/", "jsdelivr 分片节点模板"),
+        # v1.2.0：演员作品列表 + 磁力按体积排序。
+        # 加之前先在本地产物里 grep 过一遍（这个文件顶部的坑位注释里写了原因）。
+        ("GET /api/profile/works", "演员作品列表路由（v1.2.0）"),
+        ("/Library/VirtualFolders", "库名映射来源（v1.2.0）"),
+        ("(?i)^\\s*(\\d+(?:\\.\\d+)?)\\s*(TB|GB|MB|KB|B)?\\s*$", "磁力体积解析正则（v1.2.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 
