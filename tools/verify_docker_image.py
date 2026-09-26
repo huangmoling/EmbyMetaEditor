@@ -6,12 +6,20 @@
   自己拉一遍：先看是不是多架构、再看配置 blob 里的 `org.opencontainers.image.revision`
   是否等于本地 HEAD、`source` 是否指向本仓库。全部用匿名 pull token，不需要登录。
 
+最后还会**解开 amd64 的层**，在二进制里实查内嵌的 `web/`：这正是唯一能抓出
+「源码修了、镜像没重建」的断言 —— 静态检查（revision / 入口 / 非 root）在那种情况下全是绿的。
+
 用法： python tools/verify_docker_image.py [镜像名] [tag]
 默认： aag111/emby-meta-editor:latest
 退出码 0 = 校验通过。
+
+注意：`workflow_dispatch`（不带 tag）构建出来的镜像 `revision` = 触发时的 main HEAD。
+所以**在这个脚本之后又提交了东西的话，本脚本会 FAIL** —— 那是真话（镜像确实落后于 HEAD），
+重新触发一次构建即可。
 """
 import gzip
 import json
+import re
 import subprocess
 import sys
 import time
@@ -80,7 +88,29 @@ def candidates(version):
     return out
 
 
-def check_embedded_frontend(tok, amd_manifest, version):
+def expected_version_strings(version, revision):
+    """镜像里的二进制应当带有哪个版本串（返回值 + 说明）。
+
+    tag 构建时 metadata-action 给出的 version 就是语义版本（`1.0.9`），二进制里是 `v1.0.9`。
+    **workflow_dispatch 构建时只有一个 raw 标签 `latest`** —— 拿它去拼 `vlatest` 永远找不到，
+    那不是镜像的毛病。这时改从**镜像对应提交**的 `version.go` 里取常量：既避开了假失败，
+    又顺带验了「镜像里的二进制确实来自那个提交的源码」。
+    """
+    if version and version[:1].isdigit():
+        return ["v" + version], "标签 v" + version
+    ref = revision or "HEAD"
+    try:
+        src = subprocess.check_output(["git", "show", "%s:version.go" % ref],
+                                      stderr=subprocess.DEVNULL, text=True)
+    except Exception:  # noqa: BLE001
+        return [], "拿不到 %s 的 version.go" % ref[:12]
+    m = re.search(r'appVersion\s*=\s*"([^"]+)"', src)
+    if not m:
+        return [], "%s 的 version.go 里没有 appVersion" % ref[:12]
+    return [m.group(1)], "%s（来自镜像提交 %s 的 version.go）" % (m.group(1), ref[:12])
+
+
+def check_embedded_frontend(tok, amd_manifest, version, revision=""):
     """解开 amd64 的层，确认二进制里内嵌的前端确实是修好的那一版。
 
     为什么必须查这个：web/ 是 `go:embed` 编进二进制的。源码修对了、镜像忘了重建，
@@ -109,9 +139,13 @@ def check_embedded_frontend(tok, amd_manifest, version):
     # 光看地址永远发现不了。
     check("候选头像走同源代理（imgSrc）", "imgSrc(en.f)" in seg)
     check("候选头像已无 CDN 裸外链", "'src=\"' + esc(en.f)" not in seg)
-    if version:
-        check("二进制版本串与镜像标签一致",
-              ("v" + version).encode() in blob, "v" + version)
+
+    want, detail = expected_version_strings(version, revision)
+    if not want:
+        print("  提示：%s，跳过版本串检查" % detail)
+        return
+    check("二进制版本串与镜像对应提交一致",
+          any(w.encode() in blob for w in want), detail)
 
 
 def main():
@@ -191,7 +225,7 @@ def main():
     check("以非 root 运行", user not in ("", "root", "0"))
 
     # 最后一道：镜像里的前端到底修没修 —— 静态检查看不出来，只有解开层才知道
-    check_embedded_frontend(tok, amd, labels.get("org.opencontainers.image.version") or "")
+    check_embedded_frontend(tok, amd, labels.get("org.opencontainers.image.version") or "", rev)
 
     print("\n%s" % ("全部通过" if not FAILED else "%d 项未通过：%s" % (len(FAILED), "；".join(FAILED))))
     return 1 if FAILED else 0

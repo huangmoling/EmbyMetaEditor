@@ -571,6 +571,12 @@ README 与 `docker-compose.yml` 里写死的 `aag111/` 换用户名时一并替�
 > **注意**：Docker Hub 用户名（`aag111`）和 GitHub 用户名（`huangmoling`）不是同一个，
 > 别照搬 GitHub 名去写镜像地址。
 
+> 手动触发构建出来的镜像，`org.opencontainers.image.revision` = 触发时的 `main` HEAD。
+> 也就是说**构建之后再往 main 提交，镜像就落后了** —— `tools/verify_docker_image.py`
+> 会如实报 FAIL（它比对 `revision` 与本地 HEAD），重新触发一次构建即可，不是推失败了。
+> 另外 dispatch 构建的镜像版本标签是 `latest`（不是语义版本），所以那个脚本会改从
+> **镜像对应提交的 `version.go`** 里取版本串来比，而不是拿 `latest` 去拼一个不存在的 `vlatest`。
+
 ---
 
 ## 目录结构
@@ -618,7 +624,7 @@ docker-compose.yml   拉镜像运行的 compose 写法
 | `verify_profile_view.py` | 演员资料面板**渲染**（源勾选、头像按钮文案、对照表禁用/勾选、同步历史状态；样本非空） | 起 exe + 无头 Edge |
 | `extract_cn_fixtures.py` | 从 `cache/debug/` 的原始响应里切测试夹具 | 落盘的原始 HTML |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
-| `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest，比对 `revision` = 本地 tag、`source` = 本仓库、入口参数、非 root） | 能连 Docker Hub |
+| `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest：多架构、`revision` = 本地 tag / HEAD、`source` = 本仓库、入口参数、非 root；**再解开层在二进制里实查内嵌的 `app.js` 和版本串**） | 能连 Docker Hub |
 | `live_test.go`（`EMBY_LIVE=1 go test -run TestLive`） | 实机**写**路径，幂等不改变数据 | 真实 config |
 
 ---
