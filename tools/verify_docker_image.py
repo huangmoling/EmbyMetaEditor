@@ -144,12 +144,22 @@ def check_embedded_frontend(blob, version, revision=""):
     check("候选头像走同源代理（imgSrc）", "imgSrc(en.f)" in seg)
     check("候选头像已无 CDN 裸外链", "'src=\"' + esc(en.f)" not in seg)
 
-    # 下面两条同样只在**前端真的被重建**时才会出现：
+    # 下面这两条同样只在**前端真的被重建**时才会出现：
     # v1.2.0 的资料面板多了「媒体库作品」区块，以及勾选覆盖的「将覆盖原值」判定文案。
     # 只改后端、忘了重建前端时，上面那两条 gfriends 断言仍然全绿，靠这两条才抓得住。
     for marker, what in [
         ("将覆盖原值", "资料面板的勾选覆盖判定（v1.2.0）"),
         ("媒体库作品", "资料面板的媒体库作品区块（v1.2.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
+    # v1.3.0：选图弹窗那行「宽×高 · 体积」，以及资料面板的「源分列 + 手动抓取」。
+    # 这三处的字面量都是**产物里实查过**的（加断言前先在 exe 里 grep 一遍，
+    # 免得踩 `gcore.jsdelivr.net` 那种「拼出来的串在二进制里根本不存在」的误报）。
+    for marker, what in [
+        ("pk-meta", "选图弹窗的尺寸/体积小字（v1.3.0）"),
+        ("pf-srccol", "资料面板的抓取源分列（v1.3.0）"),
+        ("抓取资料", "资料面板的「抓取资料」按钮（v1.3.0）"),
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
@@ -180,6 +190,10 @@ def check_embedded_backend(blob):
         ("GET /api/profile/works", "演员作品列表路由（v1.2.0）"),
         ("/Library/VirtualFolders", "库名映射来源（v1.2.0）"),
         ("(?i)^\\s*(\\d+(?:\\.\\d+)?)\\s*(TB|GB|MB|KB|B)?\\s*$", "磁力体积解析正则（v1.2.0）"),
+        # v1.3.0：图片尺寸/体积探测 + 各资料源的界面说明文案。
+        ("POST /api/img/info", "图片尺寸/体积探测路由（v1.3.0）"),
+        ("字段最全：简介、出生日期", "资料源的界面说明文案（v1.3.0）"),
+        ("读不到大小", "探测失败时的分档文案（v1.3.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 
