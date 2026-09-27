@@ -30,6 +30,15 @@ type mockEmby struct {
 	// mock 必须照抄这个行为，否则「按库查看演员」的功能在单测里是假的。
 	personParent map[string]string
 	lastParentID string // 记录最近一次 /Persons 收到的 ParentId，供断言客户端确实传了
+	// personTypes 模拟 Emby 的 PersonTypes 过滤。真实 Emby 上一个人可以同时是
+	// 演员和导演（本站 Actor=9497 / Director=1189，而并集是 10559，说明大量重叠），
+	// 所以这里存的是「一个人有哪些类型」而不是单个类型。
+	// 没登记的按 Actor 算 —— 线上每个人都至少有 1 个类型，而本文件里早先的夹具
+	// 都是当演员用的，这样加过滤不会把它们全滤没。
+	personTypes map[string][]string
+	// lastPersonTypes 记录最近一次 /Persons 收到的 PersonTypes，
+	// 用来断言「界面选的类型真的传到了 Emby」，而不是只在我们这层过滤。
+	lastPersonTypes string
 	// libFolders 模拟 /Library/VirtualFolders：媒体库登记信息（含磁盘路径）。
 	// 「这个演员在媒体库里有哪些作品」要靠它把作品归到某个库 —— 库名在
 	// 条目里是查不到的（条目的 ParentId 是库内部的中间文件夹）。
@@ -97,6 +106,7 @@ func newMockEmby(t *testing.T) *mockEmby {
 		items:        map[string]map[string]any{},
 		patched:      map[string]map[string]any{},
 		personParent: map[string]string{},
+		personTypes:  map[string][]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /Users/AuthenticateByName", func(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +270,28 @@ func newMockEmby(t *testing.T) *mockEmby {
 				}
 			}
 			items = filtered
+		}
+		types := r.URL.Query().Get("PersonTypes")
+		m.lastPersonTypes = types
+		if types != "" {
+			want := map[string]bool{}
+			for _, t := range strings.Split(types, ",") {
+				want[strings.TrimSpace(t)] = true
+			}
+			kept := make([]Person, 0, len(items))
+			for _, p := range items {
+				own := m.personTypes[p.Id]
+				if own == nil {
+					own = []string{"Actor"}
+				}
+				for _, t := range own {
+					if want[t] {
+						kept = append(kept, p)
+						break
+					}
+				}
+			}
+			items = kept
 		}
 		if items == nil {
 			items = []Person{}

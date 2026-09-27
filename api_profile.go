@@ -121,7 +121,7 @@ type profileTarget struct{ ID, Name string }
 // applyActorProfile 拿到空 ID 会直接报「缺少演员 ID」，但它前面那次 fetchActorProfile
 // 因为读不到 Emby 现有值，会把每个字段都判成「空白、将写入」—— 日志上看着像要成功，
 // 实际全失败，而且批量任务里这种失败特别难和「真的没资料」区分开。
-func profileTargets(ctx context.Context, e *Emby, items []profileBatchItem, names []string, limit int, parentID string) ([]profileTarget, error) {
+func profileTargets(ctx context.Context, e *Emby, items []profileBatchItem, names []string, limit int, parentID, personTypes string) ([]profileTarget, error) {
 	var raw []profileTarget
 	for _, it := range items {
 		if n := strings.TrimSpace(it.Name); n != "" {
@@ -141,7 +141,7 @@ func profileTargets(ctx context.Context, e *Emby, items []profileBatchItem, name
 		}
 		start := 0
 		for len(raw) < limit {
-			pr, err := e.Persons(ctx, start, 500, "", parentID)
+			pr, err := e.Persons(ctx, start, 500, "", parentID, personTypes)
 			if err != nil {
 				return nil, err
 			}
@@ -180,6 +180,7 @@ func (a *App) handleProfileBatch(w http.ResponseWriter, r *http.Request) {
 		Names        []string           `json:"names"`
 		Limit        int                `json:"limit"`
 		ParentID     string             `json:"parent_id"`
+		PersonTypes  string             `json:"person_types"` // 与「演员头像」页的类型筛选一致
 		Sources      []string           `json:"sources"`
 		Keys         []string           `json:"keys"`
 		UseAliasMemo *bool              `json:"use_alias_memo"`
@@ -193,7 +194,8 @@ func (a *App) handleProfileBatch(w http.ResponseWriter, r *http.Request) {
 	e := NewEmby(cfg)
 	ctx := r.Context()
 
-	targets, err := profileTargets(ctx, e, batch.Items, batch.Names, batch.Limit, batch.ParentID)
+	targets, err := profileTargets(ctx, e, batch.Items, batch.Names, batch.Limit, batch.ParentID,
+		personTypesParam(batch.PersonTypes))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

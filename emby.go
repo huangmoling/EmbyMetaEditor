@@ -637,7 +637,16 @@ type PersonsResult struct {
 //
 // parentID 非空时只返回该媒体库下出现过的演员（实测 Emby 4.9 支持 `ParentId`：
 // 全局 10592 人 → 按库过滤后 464 / 2664 / 594 人）。传空串即全局。
-func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID string) (*PersonsResult, error) {
+//
+// personTypes 是 Emby 的 `PersonTypes` 过滤，多个类型用逗号分隔（实测可用）：
+// 本站 Emby 上 Actor=9497 / Director=1189 / Writer=1 / Producer=2，不过滤是 10561，
+// 两者之差说明「人物」条目里混着一批既不是演员也不是导演的东西（工作室名之类）。
+// 传空串表示不过滤。
+//
+// 注意：返回的每个 item 里 `Type` 恒为 `"Person"`，**拿不到它在这部片子里是演员
+// 还是导演** —— 角色类型只存在于过滤参数这一侧，所以界面上区分演员/导演要靠
+// 这个参数分别查，而不是靠读 item 字段。
+func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID, personTypes string) (*PersonsResult, error) {
 	q := url.Values{}
 	q.Set("StartIndex", itoa(start))
 	if limit > 0 {
@@ -649,6 +658,9 @@ func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID s
 	}
 	if parentID != "" {
 		q.Set("ParentId", parentID)
+	}
+	if personTypes != "" {
+		q.Set("PersonTypes", personTypes)
 	}
 	if e.UserID != "" {
 		q.Set("UserId", e.UserID)
@@ -662,7 +674,7 @@ func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID s
 
 // PersonByName 按名字精确查询人物。
 func (e *Emby) PersonByName(ctx context.Context, name string) (*Person, error) {
-	res, err := e.Persons(ctx, 0, 50, name, "")
+	res, err := e.Persons(ctx, 0, 50, name, "", "")
 	if err != nil {
 		return nil, err
 	}

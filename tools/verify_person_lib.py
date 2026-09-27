@@ -1,15 +1,18 @@
-"""用 CDP 驱动无头 Edge，验证「演员头像」页的媒体库下拉**真的生效**。
+"""用 CDP 驱动无头 Edge，验证「演员头像」页的两个下拉**真的生效**。
 
 为什么要验到渲染层：接口返回 200 不等于界面变了。中间任何一环断掉
 （下拉没填选项、onchange 没绑、参数没拼进 URL、后端没透传），
-用户看到的都是「选了库但列表纹丝不动」。
+用户看到的都是「选了但列表纹丝不动」。
 
 验证内容：
   1. #psLib 有选项（全部媒体库 + 真实库名）
   2. 选中某个库后，分页说明里出现该库名（说明前端把库名和总数对上了）
-  3. 该库的演员数与「全部媒体库」不同（说明过滤真的到了 Emby）
+  3. 该库的人物数与「全部媒体库」不同（说明过滤真的到了 Emby）
   4. 切换库后卡片确实换了（不是同一批人）
-  5. 没有 console 报错
+  5. #psType 默认是「演员 + 导演」而不是「全部」——Emby 的人物库里连片商名都算人物，
+     默认全量列出来一半是杂物
+  6. 切成「仅演员」「仅导演」「全部人物」后总数与卡片都跟着变
+  7. 没有 console 报错
 
 跑之前需要：
   1. EmbyMetaEditor.exe -port 8097 -open=false   （用真实 config.json）
@@ -41,14 +44,40 @@ SNAP = """(() => {
     empty: empty ? empty.textContent : '',
     libValue: document.querySelector('#psLib').value,
     libCount: document.querySelector('#psLib').options.length,
+    typeValue: document.querySelector('#psType').value,
   };
 })()"""
 
 
 def total_of(pager):
-    """从分页说明里抠出「共 N 位演员」。"""
-    m = re.search(r"共\s*([\d,]+)\s*位演员", pager)
+    """从分页说明里抠出「共 N 位人物」。"""
+    m = re.search(r"共\s*([\d,]+)\s*位人物", pager)
     return int(m.group(1).replace(",", "")) if m else -1
+
+
+def set_select(page, sel, value):
+    """给下拉赋值并派发 change —— 直接改 value 不会触发 onchange。"""
+    return page.eval("""(() => {
+      const s = document.querySelector(%s);
+      s.value = %s;
+      s.dispatchEvent(new Event('change', {bubbles: true}));
+      return s.value;
+    })()""" % (repr(sel), repr(value)))
+
+
+def wait_total(page, old, timeout=180):
+    """等分页说明里的总数换成别的值（列表刷新完成的信号）。
+
+    不拿「前几个字符」当条件：那种判据在两种状态下都成立，会立刻通过、
+    读到还没刷新的旧值。总数变了才是真的刷新了。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        page.pump(0.5)
+        t = total_of(page.eval("document.querySelector('#psPager').textContent || ''"))
+        if t > 0 and t != old:
+            return t
+    return total_of(page.eval("document.querySelector('#psPager').textContent || ''"))
 
 
 def safe_shot(page, name):
@@ -174,6 +203,55 @@ def main():
     check("能切回全部媒体库", total_of(back["pager"]) == base_total,
           "共 %d 位（原 %d 位）" % (total_of(back["pager"]), base_total))
 
+    # ---- 人物类型（Emby 的 PersonTypes）----
+    # 这一节盯的是「默认不能是全部」和「三种取值真的分别生效」。
+    # Emby 的人物库把片商名之类也当人物存，全量列出来一半是杂物。
+    print("\n3) 人物类型筛选")
+    check("默认类型是「演员 + 导演」而不是全部",
+          page.eval("document.querySelector('#psType').value") == "Actor,Director",
+          page.eval("document.querySelector('#psType').value"))
+
+    both_total = total_of(back["pager"])
+    by_type = {}
+    for value, label in (("Actor", "仅演员"), ("Director", "仅导演"), ("all", "全部人物")):
+        set_select(page, "#psType", value)
+        t = wait_total(page, both_total)
+        snap = page.eval(SNAP)
+        by_type[value] = (t, snap)
+        print("   %s（%s）：共 %d 位 / 卡片 %d / 首位 %s"
+              % (label, value, t, snap["cards"],
+                 snap["names"][0] if snap["names"] else "-"))
+        check("切换成「%s」后下拉值已更新" % label, snap["typeValue"] == value, snap["typeValue"])
+
+    actor_t = by_type["Actor"][0]
+    director_t = by_type["Director"][0]
+    all_t = by_type["all"][0]
+
+    check("「仅演员」比「演员 + 导演」少", 0 < actor_t < both_total,
+          "%d < %d" % (actor_t, both_total))
+    check("「仅导演」比「演员 + 导演」少", 0 < director_t < both_total,
+          "%d < %d" % (director_t, both_total))
+    # 默认与「全部人物」的差值取决于这个库里有没有「既非演员也非导演」的人物，
+    # 不能写成硬编码的绝对数，只能比大小。
+    check("默认不多于「全部人物」", both_total <= all_t, "%d <= %d" % (both_total, all_t))
+    if both_total == all_t:
+        print("   注意：这个库里没有既非演员也非导演的人物，默认过滤在这台机器上看不出差别")
+    check("三档类型给出三个不同总数（过滤作用在集合上，不只是换了参数）",
+          len({actor_t, director_t, all_t}) == 3,
+          "演员 %d / 导演 %d / 全部 %d" % (actor_t, director_t, all_t))
+    # 这里**不能**断言「演员页与导演页的人名不一样」：Emby 里被刮错的条目常常同时挂着
+    # Actor 和 Director 两个类型，而它们正好排在最前面（实测这台机器上前 48 条两边
+    # 完全一致）。所以人名相同不代表过滤没生效 —— 判据只能是总数。
+    if by_type["Actor"][1]["names"] == by_type["Director"][1]["names"]:
+        print("   提示：首屏人名两边一致（这些条目同时标了演员和导演），以总数判断过滤是否生效")
+
+    # 还原成默认，免得截图停在「全部人物」上
+    set_select(page, "#psType", "Actor,Director")
+    wait_total(page, all_t)
+    check("能切回默认的「演员 + 导演」",
+          total_of(page.eval("document.querySelector('#psPager').textContent || ''")) == both_total,
+          "共 %d 位（原 %d 位）" % (total_of(page.eval("document.querySelector('#psPager').textContent || ''")), both_total))
+
     safe_shot(page, "14-演员按库过滤.png")
     return finish(results, page)
 
@@ -198,7 +276,7 @@ def finish(results, page):
     bad = [r for r in results if not r[1]]
     print("共 %d 项，通过 %d，失败 %d" % (len(results), len(results) - len(bad), len(bad)))
     for n, _, d in bad:
-        print("  失败：" + n + "  " + d)
+        print("  失败：" + n + "  " + str(d))
     print("=" * 70)
     sys.exit(1 if bad else 0)
 

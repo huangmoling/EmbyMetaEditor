@@ -626,7 +626,7 @@ func TestEmbyPersonsScopesToParent(t *testing.T) {
 	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", UserID: "u1"})
 	ctx := context.Background()
 
-	all, err := e.Persons(ctx, 0, 50, "", "")
+	all, err := e.Persons(ctx, 0, 50, "", "", "")
 	if err != nil {
 		t.Fatalf("全局查询失败: %v", err)
 	}
@@ -634,7 +634,7 @@ func TestEmbyPersonsScopesToParent(t *testing.T) {
 		t.Errorf("不传 ParentId 应返回全部 3 人，实际 %d", all.TotalRecordCount)
 	}
 
-	got, err := e.Persons(ctx, 0, 50, "", "502847")
+	got, err := e.Persons(ctx, 0, 50, "", "502847", "")
 	if err != nil {
 		t.Fatalf("按库查询失败: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestEmbyPersonsScopesToParent(t *testing.T) {
 		t.Errorf("ParentId 应发给服务端，服务端实际收到 %q", m.lastParentID)
 	}
 
-	empty, err := e.Persons(ctx, 0, 50, "", "502850")
+	empty, err := e.Persons(ctx, 0, 50, "", "502850", "")
 	if err != nil {
 		t.Fatalf("查询空库失败: %v", err)
 	}
@@ -743,6 +743,151 @@ func TestHandlePersonAvatarBatchPassesParentID(t *testing.T) {
 	}
 }
 
+// personTypesParam 是「人物类型」下拉与 Emby 之间的唯一一道换算。
+//
+// 它有两个不能反的约定：
+//   - 缺省**不是**「不过滤」而是「演员 + 导演」。Emby 的人物库连片商名都算人物，
+//     不设默认值的话这个页面默认就把上千条杂物摊在用户脸上。
+//   - 认不出来的值退回默认，而不是放行。它是过滤器，不是命令。
+func TestPersonTypesParam(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "Actor,Director"},
+		{"   ", "Actor,Director"},
+		{"all", ""},
+		{"ALL", ""},
+		{"Actor", "Actor"},
+		{"Director", "Director"},
+		{"Actor,Director", "Actor,Director"},
+		{"Actor, Director", "Actor,Director"}, // 允许带空格
+		{"Writer", "Writer"},
+		{"Studio", "Actor,Director"},        // 不是 Emby 认可的类型 → 退回默认
+		{"Actor,Bogus", "Actor"},            // 认得出几个留几个
+		{"Bogus,Another", "Actor,Director"}, // 一个都不认识 → 退回默认
+	}
+	for _, c := range cases {
+		if got := personTypesParam(c.in); got != c.want {
+			t.Errorf("personTypesParam(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+// 下拉选的类型必须一路传到 Emby。在本地过滤是不够的：Emby 那边的
+// TotalRecordCount 才是翻页的依据，本地过滤会让页码和总数对不上。
+func TestHandlePersonsPassesPersonTypes(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+	m.persons = []Person{
+		{Id: "a1", Name: "女演员"},
+		{Id: "d1", Name: "监督"},
+		{Id: "b1", Name: "身兼两职"},
+	}
+	m.personTypes = map[string][]string{
+		"a1": {"Actor"},
+		"d1": {"Director"},
+		"b1": {"Actor", "Director"},
+	}
+
+	srv := httptest.NewServer(app.route())
+	defer srv.Close()
+
+	get := func(query string) []string {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/api/persons?limit=10" + query)
+		if err != nil {
+			t.Fatalf("请求失败: %v", err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Data struct {
+				Items []struct {
+					Name string `json:"Name"`
+				} `json:"items"`
+				Total int `json:"total"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("解析失败: %v", err)
+		}
+		if len(out.Data.Items) != out.Data.Total {
+			t.Errorf("总数应与返回条数一致：total=%d items=%d", out.Data.Total, len(out.Data.Items))
+		}
+		names := make([]string, 0, len(out.Data.Items))
+		for _, it := range out.Data.Items {
+			names = append(names, it.Name)
+		}
+		return names
+	}
+
+	// 不带 types → 默认「演员 + 导演」：导演也算，两条都在
+	if got := get(""); !sameStrings(got, []string{"女演员", "监督", "身兼两职"}) {
+		t.Errorf("默认应返回演员与导演，实际 %v", got)
+	}
+	if m.lastPersonTypes != "Actor,Director" {
+		t.Errorf("默认应把 PersonTypes=Actor,Director 传给 Emby，实际 %q", m.lastPersonTypes)
+	}
+
+	// 只要演员
+	if got := get("&types=Actor"); !sameStrings(got, []string{"女演员", "身兼两职"}) {
+		t.Errorf("types=Actor 应只返回演员，实际 %v", got)
+	}
+	// 只要导演
+	if got := get("&types=Director"); !sameStrings(got, []string{"监督", "身兼两职"}) {
+		t.Errorf("types=Director 应只返回导演，实际 %v", got)
+	}
+	// 全部人物 → 不过滤
+	if got := get("&types=all"); len(got) != 3 {
+		t.Errorf("types=all 不该过滤，实际 %v", got)
+	}
+	if m.lastPersonTypes != "" {
+		t.Errorf("types=all 应不带 PersonTypes，实际 %q", m.lastPersonTypes)
+	}
+	// 乱填 → 退回默认，绝不能变成「不过滤」
+	get("&types=Studio")
+	if m.lastPersonTypes != "Actor,Director" {
+		t.Errorf("认不出的类型应退回默认，实际 %q", m.lastPersonTypes)
+	}
+}
+
+// 批量刮头像同样要受类型限制：界面上筛的是导演，任务里就不该把全库演员刮一遍。
+func TestHandlePersonAvatarBatchPassesPersonTypes(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+	m.persons = []Person{{Id: "a1", Name: "女演员"}, {Id: "d1", Name: "监督"}}
+	m.personTypes = map[string][]string{"a1": {"Actor"}, "d1": {"Director"}}
+
+	srv := httptest.NewServer(app.route())
+	defer srv.Close()
+
+	body := `{"mode":"missing","limit":10,"source":"gfriends","person_types":"Director"}`
+	resp, err := http.Post(srv.URL+"/api/persons/avatars", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("应返回 200，实际 %d", resp.StatusCode)
+	}
+	if m.lastPersonTypes != "Director" {
+		t.Errorf("批量刮头像也要把 person_types 传给 Emby，服务端实际收到 %q", m.lastPersonTypes)
+	}
+}
+
+// sameStrings 比字符串切片（顺序敏感）。这里不引入 reflect.DeepEqual，
+// 因为 nil 与空切片的差异会造出和被测行为无关的失败。
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // 真实 Emby 对格式非法的 ParentId 是 500，不是返回空列表。
 // 这条用来钉住 mock 的复现能力 —— 否则「客户端传了坏 GUID」这类问题在单测里永远看不见。
 func TestMockPersonsRejectsMalformedParent(t *testing.T) {
@@ -753,13 +898,13 @@ func TestMockPersonsRejectsMalformedParent(t *testing.T) {
 	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", UserID: "u1"})
 	ctx := context.Background()
 
-	if _, err := e.Persons(ctx, 0, 50, "", "502847"); err != nil {
+	if _, err := e.Persons(ctx, 0, 50, "", "502847", ""); err != nil {
 		t.Fatalf("真实短写形式的库 Id 不应报错: %v", err)
 	}
-	if _, err := e.Persons(ctx, 0, 50, "", strings.Repeat("0", 32)); err != nil {
+	if _, err := e.Persons(ctx, 0, 50, "", strings.Repeat("0", 32), ""); err != nil {
 		t.Fatalf("全零 GUID 格式合法（只是查不到），不应报错: %v", err)
 	}
-	_, err := e.Persons(ctx, 0, 50, "", "__no_such_library__")
+	_, err := e.Persons(ctx, 0, 50, "", "__no_such_library__", "")
 	if err == nil {
 		t.Fatal("格式非法的 ParentId 应当报错（线上是 500 Unrecognized Guid format.）")
 	}

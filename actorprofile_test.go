@@ -419,7 +419,7 @@ func TestProfileTargetsKeepsItemsIDs(t *testing.T) {
 		{ID: "p-2", Name: " 葵つかさ "}, // 名字两侧空白要吃掉
 		{ID: "", Name: ""},          // 空条目直接丢
 	}
-	got, err := profileTargets(context.Background(), e, in, nil, 0, "")
+	got, err := profileTargets(context.Background(), e, in, nil, 0, "", "")
 	if err != nil {
 		t.Fatalf("profileTargets: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestProfileTargetsResolvesNameOnly(t *testing.T) {
 	}
 	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", DeviceID: "dev1"})
 
-	got, err := profileTargets(context.Background(), e, nil, []string{"三上悠亜", "查无此人"}, 0, "")
+	got, err := profileTargets(context.Background(), e, nil, []string{"三上悠亜", "查无此人"}, 0, "", "")
 	if err != nil {
 		t.Fatalf("profileTargets: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestProfileTargetsFallsBackToLimit(t *testing.T) {
 	m.personParent["p-3"] = "502848"
 	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", DeviceID: "dev1"})
 
-	got, err := profileTargets(context.Background(), e, nil, nil, 1, "502847")
+	got, err := profileTargets(context.Background(), e, nil, nil, 1, "502847", "")
 	if err != nil {
 		t.Fatalf("profileTargets: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestProfileTargetsEmpty(t *testing.T) {
 	m := newMockEmby(t)
 	e := NewEmby(Config{EmbyURL: m.srv.URL, Token: "tok-123", DeviceID: "dev1"})
 
-	got, err := profileTargets(context.Background(), e, nil, []string{"查无此人"}, 0, "")
+	got, err := profileTargets(context.Background(), e, nil, []string{"查无此人"}, 0, "", "")
 	if err != nil {
 		t.Fatalf("profileTargets: %v", err)
 	}

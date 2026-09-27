@@ -365,6 +365,6 @@ bad = [r for r in results if not r[1]]
 print("共 %d 项，通过 %d，失败 %d" % (len(results), len(results) - len(bad), len(bad)))
 if bad:
     for n, _, d in bad:
-        print("  失败：" + n + "  " + d)
+        print("  失败：" + n + "  " + str(d))
 print("=" * 70)
 sys.exit(1 if bad else 0)

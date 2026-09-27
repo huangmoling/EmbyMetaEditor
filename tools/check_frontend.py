@@ -122,9 +122,10 @@ def main():
             print("      " + u)
 
     # --- 5. img 模板必须走同源地址 ---
-    # 服务端的 CSP 是 img-src 'self'（见 auth.go setSecurityHeaders），任何直连外部
-    # 图床的 <img src> 都会被浏览器拦掉，表现是一片破图 —— 而且只在浏览器里看得出来，
-    # curl 上游地址反而是 200。所以模板里的地址只能来自 imgSrc / embyImg / personImg。
+    # 服务端的 CSP 允许外部图片（img-src 里有 http/https，见 auth.go），但**我们自己
+    # 插进页面的图**仍然只能来自 imgSrc / embyImg / personImg：直连外链会带上 Referer、
+    # 泄露 Emby 地址，而且 javbus 这类图床有防盗链，直连 403、经服务端代取才 200。
+    # （CSP 那条只放给第三方塞进来的图，比如磁力预览工具。）
     proxies = ("imgSrc(", "embyImg(", "personImg(")
     # 允许先算好再引用（missCard 里的 `const src = imgSrc(m.cover)` 就是这种写法）。
     proxied_vars = set(re.findall(
@@ -147,6 +148,35 @@ def main():
         bad += 1
     else:
         print("PASS  img 模板全部走同源地址")
+
+    # --- 6. 剪贴板只能走 copyText ---
+    # navigator.clipboard 是**安全上下文**才提供的 API：本机 http://127.0.0.1:8097 有，
+    # 但 Docker / NAS 上常见的 http://<局域网IP>:8097 没有。在那里直接调它会在 onclick
+    # 里抛 TypeError，没人接 —— 连「复制失败」的提示都没有，用户看到的就是「点了没反应」。
+    # 所以除了 copyText 内部那一次（它带存在性判断 + execCommand 回退），别处不许直接碰。
+    code_only = "\n".join(
+        ln for ln in js.splitlines()
+        if not ln.strip().startswith(("//", "*", "/*")))
+    m = re.search(r"function copyText\([\s\S]*?(?=\nfunction |\Z)", code_only)
+    body = m.group(0) if m else ""
+    leaks = [ln.strip()[:90] for ln in code_only.replace(body, "").splitlines()
+             if "navigator.clipboard" in ln]
+    print(f"      copyText 内 navigator.clipboard 出现 {body.count('navigator.clipboard')} 次，"
+          f"其余地方 {len(leaks)} 次")
+    if not body:
+        print("FAIL  app.js 里找不到 copyText —— 复制必须走这个统一入口")
+        bad += 1
+    elif leaks:
+        print("FAIL  这些地方绕过了 copyText，非安全上下文下会静默失效：")
+        for t in leaks:
+            print("      " + t)
+        bad += 1
+    elif "navigator.clipboard &&" not in body or "execCommand" not in js:
+        print("FAIL  copyText 缺少「先判断 API 是否存在」或「execCommand 回退」，"
+              "Docker 上依然复制不了")
+        bad += 1
+    else:
+        print("PASS  剪贴板调用都走 copyText，且带回退")
 
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0

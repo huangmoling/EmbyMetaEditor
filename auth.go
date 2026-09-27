@@ -312,7 +312,17 @@ func (a *App) guard(next http.Handler) http.Handler {
 // 关于 CSP：界面里有内联 style 和内联 onclick，所以 script/style 必须带
 // 'unsafe-inline'，否则整个界面直接白屏 —— 这一条挡不住 XSS，但把
 // 「加载外部脚本 / 被 iframe 套走」这两类封死了，配合 X-Frame-Options 够用。
-// 图片全部走本机 /api/img 与 /api/emby/image（服务端代取），所以 img-src 收得很紧。
+//
+// img-src 必须放行外部 http/https，**不能只留 'self'**：界面自己取图确实全部走
+// 本机 /api/img 与 /api/emby/image（服务端代取，见 imgSrc/embyImg），但页面上
+// 还会出现**不是我们插入**的图 —— 最典型的是磁力预览工具（javbus 那侧的行为）
+// 直接把预览截图塞进本站 DOM。v1.0.8 加了 img-src 'self' 之后，这些图全被 CSP
+// 拦掉，表现是「弹窗里一堆破图」，而同一个图片地址在 javbus 上正常 —— 那上面
+// 没有 CSP。实测违反记录：`img-src <- https://www.javbus.com/pics/sample/c421_1.jpg`；
+// 该图并没有防盗链（经本机 /api/img 代取能正常返回 120x90）。
+//
+// connect-src 仍然收在 'self'：界面自己的请求只打本机后端，放宽它等于给
+// 任意脚本开一条外发通道，收益为零。真要抓外部数据一律走服务端接口。
 func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -321,7 +331,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	h.Set("Cross-Origin-Opener-Policy", "same-origin")
 	h.Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; "+
+			"img-src 'self' data: blob: http: https:; connect-src 'self'; font-src 'self' data:; "+
 			"frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 }
 

@@ -77,6 +77,60 @@ function toast(msg, kind) {
 
 const num = (n) => (n == null ? '0' : Number(n).toLocaleString('zh-CN'));
 
+// ---------------- 复制到剪贴板 ----------------
+//
+// 为什么不能直接写 navigator.clipboard.writeText：
+// 那是**安全上下文**才提供的 API。本机开 http://127.0.0.1:8097 算安全上下文（没问题），
+// 但 Docker / NAS 上的常见访问方式是 http://<局域网IP>:8097 —— 那是普通 http，
+// navigator.clipboard 直接是 undefined，`navigator.clipboard.writeText(...)` 会抛
+// TypeError。这个异常发生在 onclick 里，没人接，**连「复制失败」的提示都不会有**，
+// 用户看到的就是「点了没反应」。所以这里必须有回退。
+function legacyCopy(text) {
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    // 不能 display:none / visibility:hidden —— 那样 select() 选不中，
+    // execCommand 会直接返回 false。用 1px + opacity:0 藏起来，位置留在视口内。
+    ta.style.cssText =
+      'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0';
+    document.body.appendChild(ta);
+    const sel = document.getSelection();
+    const prev = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    let ok = false;
+    try {
+      ta.select();
+      ta.setSelectionRange(0, ta.value.length);
+      ok = document.execCommand('copy');
+    } catch (_) { ok = false; }
+    ta.remove();
+    // 把用户原来的选区还回去，别因为我们复制一下就把人家选中的文本清了
+    if (prev && sel) { sel.removeAllRanges(); sel.addRange(prev); }
+    if (ok) resolve(); else reject(new Error('浏览器拒绝了复制'));
+  });
+}
+
+// copyText 返回 Promise：优先用剪贴板 API，不可用或被拒（比如文档没获得焦点时
+// 会 NotAllowedError）就回退 execCommand，两条路都不行才 reject。
+function copyText(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return Promise.reject(new Error('没有可复制的内容'));
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      return navigator.clipboard.writeText(s).catch(() => legacyCopy(s));
+    } catch (_) { /* 落到回退 */ }
+  }
+  return legacyCopy(s);
+}
+
+// doCopy 是界面上唯一该调用的入口：无论成功还是失败都一定有提示。
+// 之前直接 .then(成功, 失败) 的写法，在「API 不存在抛异常」那条路上是静默的。
+function doCopy(text, okMsg) {
+  copyText(text).then(
+    () => toast(okMsg || '已复制', 'ok'),
+    (e) => toast('复制失败：' + ((e && e.message) || e), 'err'));
+}
+
 // ---------------- 访问认证 ----------------
 // 这是**进程自己的**登录（保护「谁能打开这个界面」），和 Emby 登录是两回事：
 // 后端 guard 中间件会拦住所有未登录的 /api/ 请求，所以没登录时这个页面
@@ -494,6 +548,8 @@ async function loadPersons(start) {
     q: $('#psQ').value.trim(), start: ps.start, limit: ps.limit,
     parent_id: $('#psLib').value,
     missing_image: onlyMissing ? 'true' : 'false',
+    // 类型过滤交给服务端（Emby 的 PersonTypes）：本地过滤会让 total 和页码对不上。
+    types: $('#psType').value,
   });
   try {
     const d = await api('/api/persons?' + params.toString());
@@ -501,12 +557,12 @@ async function loadPersons(start) {
     ps.total = d.total || 0;
     if (!ps.items.length) {
       $('#psList').innerHTML = '<div class="empty">' +
-        (onlyMissing ? '「' + esc(libName) + '」里没有缺头像的演员' : '没有符合条件的演员') + '</div>';
+        (onlyMissing ? '「' + esc(libName) + '」里没有缺头像的人物' : '没有符合条件的人物') + '</div>';
     } else {
       $('#psList').innerHTML = ps.items.map(renderPersonCard).join('');
     }
     renderPager('#psPager', ps, loadPersons,
-      onlyMissing ? ('本页 ' + ps.items.length + ' 位无头像 / ' + esc(libName) + ' 共 ' + num(ps.total) + ' 位演员') : null);
+      onlyMissing ? ('本页 ' + ps.items.length + ' 位无头像 / ' + esc(libName) + ' 共 ' + num(ps.total) + ' 位人物') : null);
   } catch (e) {
     $('#psList').innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
     $('#psPager').innerHTML = '';
@@ -1073,9 +1129,9 @@ async function fetchProfileInto() {
   }
 }
 
-// collectProfileTargets 按**当前列表筛选条件**（搜索词 / 媒体库 / 只看无头像）翻页取人选。
+// collectProfileTargets 按**当前列表筛选条件**（搜索词 / 媒体库 / 人物类型 / 只看无头像）翻页取人选。
 //
-// 为什么不在服务端按 limit 取：那样「当前条件」只认媒体库，搜索词和「只看无头像」
+// 为什么不在服务端按 limit 取：那样「当前条件」只认媒体库，搜索词、类型和「只看无头像」
 // 会静默失效 —— 用户以为在批量处理屏幕上看到的这批人，实际处理的是另一批。
 // 这里复用同一个 /api/persons 接口，筛选逻辑就不存在第二份实现。
 async function collectProfileTargets(limit) {
@@ -1088,6 +1144,7 @@ async function collectProfileTargets(limit) {
     const params = new URLSearchParams({
       q: q, start: start, limit: pageSize,
       parent_id: parentID, missing_image: missing ? 'true' : 'false',
+      types: $('#psType').value,
     });
     const d = await api('/api/persons?' + params.toString());
     const items = d.items || [];
@@ -1126,6 +1183,9 @@ async function batchProfile(mode) {
         items: items,
         sources: Array.from(S.prof.sel),
         use_alias_memo: $('#pfAlias').checked,
+        // 兜底：万一 items 为空、服务端改走「按条件拉列表」那条路，
+        // 类型筛选也要和界面上看到的一致（见 profileTargets 的三条路径）。
+        person_types: $('#psType').value,
       },
     });
     watchJob(r.job_id, title, () => { loadPersons(S.ps.start); loadProfileSources(true); });
@@ -1372,7 +1432,13 @@ function renderMagnets() {
 
   const panels = groups.map((g) => {
     const rows = (g.magnets || []).map((m) =>
-      '<div class="magrow"><div class="n">' + esc(m.name) + '<br><i>' + esc(m.link.slice(0, 110)) + '…</i></div>' +
+      '<div class="magrow"><div class="n">' + esc(m.name) +
+      // 放进 DOM 的必须是**完整**磁力地址，不能截断：
+      // 页面上的磁力工具（以及浏览器自己的磁力处理器）都是靠 href 识别的，
+      // 之前写成 m.link.slice(0,110) + '…' 的纯文本，等于把 URI 弄坏了 ——
+      // 既点不动，也认不出来。视觉上的省略交给 CSS 的 ellipsis。
+      '<br><a class="maglink" href="' + esc(m.link) + '" title="' + esc(m.link) + '">' +
+      esc(m.link) + '</a></div>' +
       '<span class="sz">' + esc(m.size || '') + '</span><span class="dt">' + esc(m.date || '') + '</span>' +
       '<button class="btn btn-sm" data-copy="' + esc(m.link) + '">复制</button></div>').join('');
     return '<div class="magpanel' + (g.number === S.jb.magTab ? ' on' : '') + '" data-num="' + esc(g.number) + '">' +
@@ -1388,13 +1454,12 @@ function renderMagnets() {
     $$('.magpanel', list).forEach((p) => p.classList.toggle('on', p.dataset.num === b.dataset.num));
   });
   $$('button[data-copy]', list).forEach((b) => b.onclick = () => {
-    navigator.clipboard.writeText(b.dataset.copy).then(() => toast('已复制磁力链接', 'ok'), () => toast('复制失败', 'err'));
+    doCopy(b.dataset.copy, '已复制磁力链接');
   });
 
   const copy = (links, label) => {
     if (!links.length) { toast('没有磁力链接', 'err'); return; }
-    navigator.clipboard.writeText(links.join('\n'))
-      .then(() => toast('已复制 ' + label + ' 共 ' + links.length + ' 条磁力链接', 'ok'), () => toast('复制失败', 'err'));
+    doCopy(links.join('\n'), '已复制 ' + label + ' 共 ' + links.length + ' 条磁力链接');
   };
   const one = $('#jbCopyOne');
   if (one) one.onclick = () => {
@@ -1901,6 +1966,7 @@ function bind() {
   $('#psQ').onkeydown = (e) => { if (e.key === 'Enter') loadPersons(0); };
   $('#psMissing').onchange = () => loadPersons(0);
   $('#psLib').onchange = () => loadPersons(0);
+  $('#psType').onchange = () => loadPersons(0);
   $('#psList').onclick = (e) => {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
@@ -1924,9 +1990,11 @@ function bind() {
           mode: 'missing', limit: Number($('#psLimit').value) || 100,
           source: $('#psSource').value, overwrite: $('#psOverwrite').checked,
           parent_id: $('#psLib').value,
+          // 界面上筛的是导演，任务里就不该把全库演员刮一遍
+          person_types: $('#psType').value,
         },
       });
-      watchJob(r.job_id, '批量刮削演员头像', () => loadPersons(S.ps.start));
+      watchJob(r.job_id, '批量刮削人物头像', () => loadPersons(S.ps.start));
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#gfReload').onclick = async () => {

@@ -466,7 +466,7 @@ func (a *App) personStats(ctx context.Context, e *Emby, maxScan int) map[string]
 	const pageSize = 500
 	total, withImg, missing, scanned := 0, 0, 0, 0
 	for {
-		pr, err := e.Persons(ctx, start, pageSize, "", "")
+		pr, err := e.Persons(ctx, start, pageSize, "", "", "")
 		if err != nil {
 			res["error"] = err.Error()
 			break
@@ -832,6 +832,50 @@ func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 
 // ---------- 演员 ----------
 
+// 人物类型过滤（Emby 的 `PersonTypes`）。
+//
+// 为什么默认要收窄：Emby 的人物库不是「演员表」，它把工作室、系列企划之类的条目
+// 也当成人存进来（本站 10561 条里 Actor 9497 + Director 1189，剩下约一千条既不是
+// 演员也不是导演，名字一堆片商名），全量列在「演员头像」页里一半是杂物。
+const (
+	personTypesDefault = "Actor,Director" // 界面默认：演员 + 导演
+	personTypesAll     = ""               // 不过滤
+)
+
+// personTypeNames 是 Emby 认可的人物类型；只放行这些，免得界面上随便塞字符串进查询。
+var personTypeNames = map[string]bool{
+	"Actor": true, "Director": true, "Writer": true,
+	"Producer": true, "GuestStar": true, "Composer": true,
+}
+
+// personTypesParam 归一化界面传来的 types 参数。
+//
+//	缺省 / 空串 → 默认（演员 + 导演）
+//	"all"       → 不过滤
+//	"Actor"     → 只要演员，其余同理，逗号分隔可以叠加
+//
+// 认不出来的值一律退回默认值 —— 这是「过滤器」不是「命令」，不该因为拼错就把
+// 上千条杂物倒出来。
+func personTypesParam(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return personTypesDefault
+	}
+	if strings.EqualFold(raw, "all") {
+		return personTypesAll
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); personTypeNames[p] {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return personTypesDefault
+	}
+	return strings.Join(out, ",")
+}
+
 func (a *App) handlePersons(w http.ResponseWriter, r *http.Request) {
 	cfg := a.store.Get()
 	e := NewEmby(cfg)
@@ -841,7 +885,8 @@ func (a *App) handlePersons(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 60
 	}
-	pr, err := e.Persons(r.Context(), start, limit, q.Get("q"), q.Get("parent_id"))
+	pr, err := e.Persons(r.Context(), start, limit, q.Get("q"), q.Get("parent_id"),
+		personTypesParam(q.Get("types")))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
@@ -905,12 +950,13 @@ func (a *App) handlePersonAvatar(w http.ResponseWriter, r *http.Request) {
 // handlePersonAvatarBatch 批量刮削演员头像。
 func (a *App) handlePersonAvatarBatch(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Mode      string   `json:"mode"` // missing | list
-		Names     []string `json:"names"`
-		Limit     int      `json:"limit"`
-		Source    string   `json:"source"`
-		Overwrite bool     `json:"overwrite"`
-		ParentID  string   `json:"parent_id"` // 限定媒体库，空串为全部
+		Mode        string   `json:"mode"` // missing | list
+		Names       []string `json:"names"`
+		Limit       int      `json:"limit"`
+		Source      string   `json:"source"`
+		Overwrite   bool     `json:"overwrite"`
+		ParentID    string   `json:"parent_id"`    // 限定媒体库，空串为全部
+		PersonTypes string   `json:"person_types"` // 限定人物类型，缺省为「演员 + 导演」
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -937,7 +983,7 @@ func (a *App) handlePersonAvatarBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		start := 0
 		for len(targets) < limit {
-			pr, err := e.Persons(ctx, start, 500, "", in.ParentID)
+			pr, err := e.Persons(ctx, start, 500, "", in.ParentID, personTypesParam(in.PersonTypes))
 			if err != nil {
 				writeErr(w, http.StatusBadGateway, err)
 				return

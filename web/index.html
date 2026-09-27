@@ -212,8 +212,16 @@
       <!-- ---- 演员 ---- -->
       <section class="view" id="view-persons">
         <div class="toolbar">
-          <input class="input grow" id="psQ" placeholder="搜索演员名…">
-          <select class="select" id="psLib" style="width:170px" title="只看某个媒体库里出现过的演员"><option value="">全部媒体库</option></select>
+          <input class="input grow" id="psQ" placeholder="搜索人物名…">
+          <select class="select" id="psLib" style="width:170px" title="只看某个媒体库里出现过的人物"><option value="">全部媒体库</option></select>
+          <!-- 类型过滤走 Emby 的 PersonTypes（服务端过滤，翻页总数才对得上）。
+               Emby 的「人物」库里连片商名都算人物，所以默认不是「全部」而是演员 + 导演。 -->
+          <select class="select" id="psType" style="width:150px" title="Emby 的人物类型：演员 / 导演；Emby 的人物库里连片商名都算人物，默认只列这两类">
+            <option value="Actor,Director">演员 + 导演</option>
+            <option value="Actor">仅演员</option>
+            <option value="Director">仅导演</option>
+            <option value="all">全部人物（含片商）</option>
+          </select>
           <label class="switch"><input type="checkbox" id="psMissing" checked> 只看无头像</label>
           <div class="sep"></div>
           <select class="select" id="psSource" style="width:150px">
