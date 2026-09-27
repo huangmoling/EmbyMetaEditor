@@ -90,7 +90,7 @@ def cookie_header(base, timeout=20):
         detail = e.read().decode("utf-8", "replace")[:200]
         raise SystemExit("访问认证登录失败（HTTP %d）：%s\n%s" % (e.code, detail, howto()))
     except urllib.error.URLError as e:
-        raise SystemExit("连不上 %s（%s）—— 先把 exe 起起来，见 README 的「验证脚本一览」。"
+        raise SystemExit("连不上 %s（%s）—— 先把 exe 起起来，见 README 的「验证脚本」一节。"
                          % (base, e.reason))
     m = re.search(r"embyme_session=([^;]+)", set_cookie)
     if not m:

@@ -19,7 +19,7 @@ CDP = "http://127.0.0.1:9333"
 APP = "http://127.0.0.1:8097/"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "screenshots")
 
-# 截图文件名直接对齐 README「界面截图」里引用的名字，这样重跑脚本就是**原地刷新**
+# 截图文件名直接对齐 README「界面」一节里引用的名字，这样重跑脚本就是**原地刷新**
 # README 那几张图，而不是在旁边多出一堆英文名的孤儿文件。
 SHOT_BEFORE = "07-番号补全-诊断按钮.png"
 SHOT_OK = "08-连通性诊断-正常.png"
