@@ -163,6 +163,16 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.4.0：磁力复制回退 + 磁力完整 <a> 链接 + 人物类型下拉。
+    # 同样都是先在产物里 grep 过的字面量。
+    for marker, what in [
+        ("copyText", "剪贴板回退入口 copyText（v1.4.0）"),
+        ("legacyCopy", "execCommand 复制回退（v1.4.0）"),
+        ("maglink", "磁力完整可点 <a> 链接（v1.4.0）"),
+        ("psType", "人物类型下拉（v1.4.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -194,6 +204,10 @@ def check_embedded_backend(blob):
         ("POST /api/img/info", "图片尺寸/体积探测路由（v1.3.0）"),
         ("字段最全：简介、出生日期", "资料源的界面说明文案（v1.3.0）"),
         ("读不到大小", "探测失败时的分档文案（v1.3.0）"),
+        # v1.4.0：人物类型参数归一化 + CSP 放开外部图片（磁力预览）+ 批量接口字段。
+        ("Actor,Director", "人物类型默认值（v1.4.0）"),
+        ("person_types", "批量接口的人物类型字段（v1.4.0）"),
+        ("img-src 'self' data: blob: http: https:", "CSP 放开 img-src 外部图片（v1.4.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 
