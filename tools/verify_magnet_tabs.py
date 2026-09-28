@@ -269,9 +269,18 @@ def main():
               bool(pv) and "服务端代取" in pv["text"], pv and pv["text"][:80])
         # 真浏览器里这三张图是不存在的（javbus 没有 ab_N.jpg），
         # 但请求确实发到了同源代理 —— 用「请求数」证明没被 CSP 直接干掉。
-        check("预览图请求确实打到了同源地址（不是外链）",
-              cdp.js("performance.getEntriesByType('resource')"
-                     ".filter(e => e.name.indexOf('/api/img') !== -1).length") >= 1)
+        #
+        # 要**轮询**而不是只查一次：performance 的 resource 条目是图片真的开始加载
+        # 之后才出现的，在刚起来的页面上这个时机比断言晚一拍 —— 查一次会偶发假失败
+        # （实测见过「37 通过 / 1 失败」，单跑又全绿）。
+        img_hits = 0
+        for _ in range(24):
+            img_hits = cdp.js("performance.getEntriesByType('resource')"
+                              ".filter(e => e.name.indexOf('/api/img') !== -1).length") or 0
+            if img_hits >= 1:
+                break
+            time.sleep(0.25)
+        check("预览图请求确实打到了同源地址（不是外链）", img_hits >= 1, img_hits)
 
         # 番号没有样例图时，抽屉要给出可读的原因，不能是空白
         cdp.js("window.fetch = function (u, o) {"

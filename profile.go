@@ -95,6 +95,23 @@ func (a *AliasStore) NamesFor(name string) []string {
 	return dedupeStrings(out)
 }
 
+// CanonicalKey 返回某人对应的别名组标识：同组的人拿到同一个字符串。
+//
+// 给「人物归并」用：它需要的是「这两个名字是不是被人工确认过是同一个人」，
+// 而不是具体有哪些别名，所以这里只吐一个可比较的键，没记录过就返回空串。
+func (a *AliasStore) CanonicalKey(name string) string {
+	k := normName(name)
+	if k == "" {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if i, ok := a.byName[k]; ok {
+		return a.Groups[i].CanonicalName
+	}
+	return ""
+}
+
 // Remember 把「本人名字 + 本次抓到的别名」记成一组，已存在的组则合并。
 // source 用来记「这批别名是哪来的」（如 已同步:AVデータバンク）。
 func (a *AliasStore) Remember(canonical string, names []string, source string) {

@@ -10,11 +10,14 @@
 「源码修了、镜像没重建」的断言 —— 静态检查（revision / 入口 / 非 root）在那种情况下全是绿的。
 `check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复、v1.2.0 的资料面板
 「媒体库作品」区块与「将覆盖原值」文案、v1.3.0 的选图尺寸小字与源分列、v1.4.0 的复制回退与
-人物类型下拉、v1.5.0 的搜索用名字，以及 v1.6.0 的预演抽屉 / 体检页 / 写入历史 / 诊断包四个面板；
+人物类型下拉、v1.5.0 的搜索用名字、v1.6.0 的预演抽屉 / 写入历史 / 诊断包三个面板，以及 v1.7.0 的
+人物归并页与磁力多源（外加一条**反向**断言：v1.7.0 删掉的体检页不该还在镜像里）；
 `check_embedded_backend` 查 gfriends CDN 模板、`GET /api/profile/works`、`/Library/VirtualFolders`、
-磁力体积正则、v1.6.0 的四条新路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`。
-**加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL）。
-断言里凡是「v1.4.0 做过、v1.6.0 又改回来」的地方，按**当前**形态写（CSP 那条就是例子）。
+磁力体积正则、v1.6.0 的路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`、v1.7.0 的
+人物查重/归并/磁力源三条路由与 javdb 解析特征串。
+**加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL；
+被编译器内联掉的函数名也一样 —— `mergeMagnets` 和 `sortMagnetsBySize` 就是这么消失的，
+所以优先挑字符串字面量）。断言里凡是「v1.4.0 做过、v1.6.0 又改回来」的地方，按**当前**形态写。
 
 用法： python tools/verify_docker_image.py [镜像名] [tag]
 默认： aag111/emby-meta-editor:latest
@@ -185,18 +188,38 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
-    # v1.6.0：预演抽屉、媒体库体检页、条目写入历史面板、诊断包入口。
-    # 这一版**四个前端面板**都是新增的，正好都是「源码改了、镜像没重建」的高危区。
+    # v1.6.0：预演抽屉、条目写入历史面板、诊断包入口。
     for marker, what in [
         ("showScrapePreview", "预演抽屉渲染（v1.6.0）"),
         ("没有写入任何东西", "预演抽屉的「没写任何东西」承诺（v1.6.0）"),
-        ("媒体库体检", "媒体库体检导航与页面（v1.6.0）"),
-        ("hchip", "体检汇总 chip（v1.6.0）"),
         ("条目写入历史", "条目写入历史面板（v1.6.0）"),
         ("诊断包", "诊断包下载入口（v1.6.0）"),
         ("已脱敏", "诊断包的脱敏文案（v1.6.0）"),
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
+    # v1.7.0：人物归并页 + 磁力多源（javdb）+ 媒体库体检下线。
+    #
+    # 「媒体库体检」这一条是**反向**断言：v1.7.0 把它删了。反向断言在这里特别值：
+    # 删功能时最典型的漏法就是「后端删了、前端还留着入口」或者「前端删了、
+    # 镜像里还是旧的那份」—— 后者会让用户在一个已经下线的页面上点出一个 404。
+    for marker, what in [
+        ("人物归并", "人物归并导航与页面（v1.7.0）"),
+        ("查找重复人物", "查重按钮（v1.7.0）"),
+        ("renderMergePlan", "归并预演结果渲染（v1.7.0）"),
+        ("并入的条目", "归并预演表格表头（v1.7.0）"),
+        ("mg-persons", "归并候选卡片（v1.7.0）"),
+        ("磁力搜索源", "磁力多源设置卡片（v1.7.0）"),
+        ("renderMagnetSources", "磁力源状态渲染（v1.7.0）"),
+        ("这条磁力来自哪个站", "磁力条目上的来源标签（v1.7.0）"),
+        ("javdb", "javdb 源（v1.7.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+    for marker, what in [
+        ("媒体库体检", "媒体库体检（v1.7.0 已下线）"),
+        ("hchip", "体检汇总 chip（v1.7.0 已下线）"),
+    ]:
+        check("内嵌前端已移除 %s" % what, marker.encode() not in blob, marker)
 
     want, detail = expected_version_strings(version, revision)
     if not want:
@@ -242,11 +265,10 @@ def check_embedded_backend(blob):
         ("search_name", "抓取/写入入参里的搜索名（v1.5.0）"),
         ("effectiveSearchName", "搜索名回退规则（v1.5.0）"),
         ("fetchActorProfileWith", "可注入资料源的抓取入口（v1.5.0）"),
-        # v1.6.0：预演 / 条目快照回滚 / 体检 / 诊断包四条后端链路。
+        # v1.6.0：预演 / 条目快照回滚 / 诊断包三条后端链路。
         # 断言的都是**源码里真实存在的字面量**（加之前先在产物里 grep 过一遍）。
         ("GET /api/items/history", "条目写入历史路由（v1.6.0）"),
         ("POST /api/items/rollback", "条目回滚路由（v1.6.0）"),
-        ("GET /api/health", "媒体库体检路由（v1.6.0）"),
         ("GET /api/diag/bundle", "诊断包路由（v1.6.0）"),
         ("recordItemWrite", "写入前留快照（v1.6.0）"),
         ("rollbackItemSync", "逐字段回滚条目（v1.6.0）"),
@@ -255,6 +277,23 @@ def check_embedded_backend(blob):
         ("planCN", "国产传媒的纯计算计划（预演与真写共用，v1.6.0）"),
         ("previewPatch", "差异表构造（v1.6.0）"),
         ("buildDiagZip", "诊断包打包（v1.6.0）"),
+        # v1.7.0：人物归并 + 磁力第二源。体检在这一版下线，所以它那条反向断言
+        # 放在 check_embedded_frontend 里（用户看得见入口，那里才是会 404 的地方）。
+        ("GET /api/persons/duplicates", "人物查重路由（v1.7.0）"),
+        ("POST /api/persons/merge", "人物归并路由（v1.7.0）"),
+        ("GET /api/magnets/sources", "磁力源清单路由（v1.7.0）"),
+        ("repointPeople", "改写作品的演职员引用（v1.7.0）"),
+        ("clusterDuplicates", "重复人物分簇（v1.7.0）"),
+        ("nameSimilarity", "名字相似度打分（v1.7.0）"),
+        ("magnet_sources", "磁力源开关字段（v1.7.0）"),
+        ("javdb_cookie", "javdb Cookie 字段（v1.7.0）"),
+        ("magnetSourceSummary", "各源结果小结（v1.7.0）"),
+        # ⚠️ 这里原本写的是函数名 `mergeMagnets`，实测在产物里**grep 不到** ——
+        # 它只有一个调用点，被编译器内联掉了，函数符号在二进制里不存在。
+        # 同理 `sortMagnetsBySize` 也查不到。Go 的 `-s -w` 只保符号表不保被内联的实体，
+        # 所以断言尽量挑**字符串字面量**（内联不了），而不是函数名。
+        ("操作過於頻繁", "javdb 限频识别（v1.7.0）"),
+        ("data-size", "javdb 体积取自 data-size 而非页面文本（v1.7.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 

@@ -119,6 +119,16 @@
         </div>
         <div class="row">
           <div class="field">
+            <label>javdb 地址</label>
+            <input class="input" id="lgJdb" placeholder="https://javdb.com">
+          </div>
+          <div class="field">
+            <label>javdb Cookie</label>
+            <input class="input" id="lgJdbCookie" placeholder="over18=1; cf_clearance=…">
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
             <label>HTTP 代理（可选）</label>
             <input class="input" id="lgProxy" placeholder="http://127.0.0.1:7890">
           </div>
@@ -154,8 +164,8 @@
       <button data-view="stats" class="on"><span class="ico">▦</span>概览统计</button>
       <button data-view="library"><span class="ico">▤</span>媒体库刮削</button>
       <button data-view="persons"><span class="ico">☺</span>演员头像</button>
+      <button data-view="merge"><span class="ico">⇄</span>人物归并</button>
       <button data-view="javbus"><span class="ico">✓</span>番号补全</button>
-      <button data-view="health"><span class="ico">✚</span>媒体库体检</button>
       <button data-view="cn"><span class="ico">◈</span>国产传媒</button>
       <button data-view="settings"><span class="ico">⚙</span>设置</button>
     </nav>
@@ -211,21 +221,18 @@
         <div class="pager" id="lbPager"></div>
       </section>
 
-      <!-- ---- 媒体库体检 ---- -->
-      <section class="view" id="view-health">
+      <!-- ---- 人物归并 ---- -->
+      <section class="view" id="view-merge">
         <div class="toolbar">
-          <select class="select" id="hLib" style="width:190px" title="选一个媒体库再扫描"></select>
-          <select class="select" id="hType" style="width:110px" title="检查哪一类条目">
-            <option value="Movie">电影</option>
-            <option value="Episode">剧集</option>
-          </select>
-          <input class="input" id="hLimit" type="number" value="500" min="50" max="2000" style="width:90px" title="最多检查多少条">
-          <button class="btn btn-primary" id="hScan">开始体检</button>
+          <input class="input" id="mgMinScore" type="number" value="86" min="50" max="100" style="width:88px" title="名字相似度阈值：低于它不算候选">
+          <input class="input" id="mgLimit" type="number" value="3000" min="200" max="20000" style="width:100px" title="最多扫描多少个人物">
+          <button class="btn btn-primary" id="mgScan">查找重复人物</button>
+          <label class="switch"><input type="checkbox" id="mgAlias" checked> 参考别名记忆</label>
           <div class="grow"></div>
-          <span class="hint" style="margin:0">只读扫描，不会写入任何东西</span>
+          <span class="hint" style="margin:0">查找只读；归并前必须过一遍预演</span>
         </div>
-        <div id="hSummary"></div>
-        <div id="hBody"><div class="empty">选一个媒体库，点「开始体检」</div></div>
+        <div id="mgSummary"></div>
+        <div id="mgBody"><div class="empty">点「查找重复人物」开始扫描</div></div>
       </section>
 
       <!-- ---- 演员 ---- -->
@@ -376,8 +383,10 @@
         </div>
 
         <div class="card">
-          <h3>javbus</h3>
-          <div class="field"><label>站点地址</label><input class="input" id="stJb"></div>
+          <h3>磁力搜索源</h3>
+          <div class="hint" style="margin-bottom:10px">抓磁力时会<b>同时并发</b>问下面这些站点，结果按磁力哈希去重、按体积从大到小合并。某一个源挂了或没有收录，其余源的结果照常返回。</div>
+          <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stSrcJb"> javbus</label>
+          <div class="field"><label>服务器地址 / 镜像</label><input class="input" id="stJb"></div>
           <div class="field">
             <label>Cookie</label>
             <input class="input" id="stJbCookie">
@@ -386,6 +395,14 @@
           <div class="row">
             <div class="field"><label>请求间隔（毫秒）</label><input class="input" id="stJbInterval" type="number" min="300"></div>
             <div class="field"><label>并发数</label><input class="input" id="stConc" type="number" min="1" max="32"></div>
+          </div>
+          <div style="height:1px;background:var(--border);margin:16px 0"></div>
+          <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stSrcJdb"> javdb</label>
+          <div class="field"><label>服务器地址 / 镜像</label><input class="input" id="stJdb" placeholder="https://javdb.com"></div>
+          <div class="field">
+            <label>Cookie</label>
+            <input class="input" id="stJdbCookie">
+            <div class="hint">javdb 有 Cloudflare 与 18 岁确认。默认匿名请求多数情况下够用；被拦时从浏览器复制完整 Cookie（<span class="mono">over18=1; cf_clearance=…</span>）填这里。留空表示不修改。</div>
           </div>
         </div>
 

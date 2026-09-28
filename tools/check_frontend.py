@@ -7,6 +7,11 @@
   4. 自己插进页面的 <img> 是否都走同源地址（外链会破图 + 泄露 Referer）
   5. 剪贴板是否统一走 copyText（非安全上下文没有 navigator.clipboard）
   6. 资料面板的「搜索用名字」是否真的进了请求体
+  7. 预演（dry-run）的按钮 → dry=true → dry_run 是否全线接通
+  8. 条目写入历史面板是否真的被拉取、回滚是否走二次确认
+  9. 人物归并是否「先预演、再点两次」才可能写
+ 10. 磁力多源（javbus / javdb）的源开关与地址是否真的进了请求体
+ 11. 诊断包入口是否明确承诺脱敏
 
 用法： python tools/check_frontend.py
 退出码 0 = 全过。
@@ -260,31 +265,79 @@ def main():
     else:
         print("PASS  条目写入历史面板接通，回滚走二次确认")
 
-    # --- 10. 媒体库体检页的库下拉必须被填上 ---
-    # #hLib 是动态填充的：ensureLibs() 里少写一行，下拉就永远是「请选择媒体库」，
-    # 而页面本身看着完全正常 —— 用户只会觉得「体检按钮没反应」。
-    health_problems = []
-    if 'id="hLib"' not in html or 'id="hScan"' not in html:
-        health_problems.append("index.html 缺少 #hLib / #hScan")
-    if "health" not in re.findall(r"data-view=\"(\w+)\"", html):
-        health_problems.append("导航里没有 data-view=\"health\"")
-    if "'health'" not in code_only and '"health"' not in code_only:
-        health_problems.append("VIEW_TITLES / switchView 里没有 health")
-    if not re.search(r"\$\('#hLib'\)\.innerHTML", code_only):
-        health_problems.append("#hLib 没有被填充（ensureLibs 里漏了）")
-    if not re.search(r"\$\('#hScan'\)\.onclick", code_only):
-        health_problems.append("#hScan 没有绑定扫描")
-    if "function renderHealth" not in code_only:
-        health_problems.append("app.js 缺少 renderHealth")
-    print(f"      体检页接线问题 {len(health_problems)} 处")
-    if health_problems:
-        for p in health_problems:
+    # --- 10. 人物归并：必须「先预演、再点两次」才可能写 ---
+    # 归并是不可逆的：它会把一批作品的演职员表改挂到另一个人名下，再删掉
+    # 多余的人物条目。Emby 没有版本历史，错了只能靠条目快照逐条还原 People，
+    # 而被删的那个人物条目不会自己回来。所以这里把「不会误触」当硬约束钉死：
+    # 归并按钮默认禁用 → 预演过才解锁 → 换「保留谁」立刻重新锁上。
+    mg = []
+    if 'data-view="merge"' not in html:
+        mg.append("导航里没有 data-view=\"merge\"")
+    for eid in ("mgScan", "mgMinScore", "mgBody", "mgSummary"):
+        if f'id="{eid}"' not in html:
+            mg.append(f"index.html 缺少 #{eid}")
+    if "'merge'" not in code_only and '"merge"' not in code_only:
+        mg.append("VIEW_TITLES / switchView 里没有 merge")
+    for fn in ("loadDuplicates", "renderDuplicates", "bindMergeCard", "renderMergePlan"):
+        if f"function {fn}" not in code_only:
+            mg.append(f"app.js 缺少 {fn}")
+    if not re.search(r"\$\('#mgScan'\)\.onclick", code_only):
+        mg.append("#mgScan 没有绑定查重")
+    if "api('/api/persons/duplicates" not in code_only:
+        mg.append("查重没走 /api/persons/duplicates")
+    if "api('/api/persons/merge" not in code_only:
+        mg.append("归并没走 /api/persons/merge")
+    # 预演那一次必须显式发 dry_run:true，否则「预演」按钮就是一个写入按钮
+    if not re.search(r"dry_run:\s*true", code_only):
+        mg.append("归并的预演没带 dry_run: true —— 点「预演」会直接改 Emby")
+    # 归并按钮初始必须是禁用的
+    if 'data-act="merge" disabled' not in code_only:
+        mg.append("归并按钮不是默认禁用 —— 没看预演就能直接写")
+    # 换「保留谁」之后必须重新禁用 + 清掉已武装状态
+    if not re.search(r"btnM\.disabled = true", code_only):
+        mg.append("换「保留谁」后没有重新禁用归并按钮（会拿着 A 的预演去点 B 的归并）")
+    if "btnM.dataset.armed" not in code_only:
+        mg.append("归并没有走「点两次」确认")
+    if "window.confirm" in code_only:
+        mg.append("用了 window.confirm()（无头浏览器里会卡死，改成「点两次」）")
+    print(f"      人物归并接线问题 {len(mg)} 处")
+    if mg:
+        for p in mg:
             print("FAIL  " + p)
         bad += 1
     else:
-        print("PASS  体检页：导航 / 库下拉 / 扫描按钮 / 渲染 全线接通")
+        print("PASS  人物归并：查重只读、归并强制预演 + 点两次")
 
-    # --- 11. 诊断包入口必须写着「已脱敏」---
+    # --- 11. 磁力多源：源开关与地址必须真的进请求体 ---
+    # 「界面能改、请求里没带」是这个项目最典型的一类静默失效（§7 也是它）：
+    # 设置页加了开关、读回来也回显正常，但保存时没塞进 body，于是永远用默认值。
+    # 这里静态钉死 magnet_sources 必须在保存请求里出现。
+    msrc = []
+    for eid in ("stSrcJb", "stSrcJdb", "stJdb", "stJdbCookie"):
+        if f'id="{eid}"' not in html:
+            msrc.append(f"index.html 缺少 #{eid}")
+    if "magnet_sources" not in code_only:
+        msrc.append("app.js 里没有 magnet_sources —— 源开关改了也存不下来（静默失效）")
+    if "javdb_url" not in code_only:
+        msrc.append("app.js 里没有 javdb_url —— javdb 地址改了也存不下来")
+    if "javdb_cookie" not in code_only:
+        msrc.append("app.js 里没有 javdb_cookie")
+    if "function renderMagnetSources" not in code_only:
+        msrc.append("app.js 缺少 renderMagnetSources（源状态没处显示）")
+    if "/api/magnets/sources" not in code_only:
+        msrc.append("诊断没走 /api/magnets/sources")
+    # 磁力列表要显示每条的来源，否则合并之后分不清哪条是哪个站给的
+    if "m.source" not in code_only:
+        msrc.append("磁力行没有显示来源（合并后分不清哪条来自哪个站）")
+    print(f"      磁力多源接线问题 {len(msrc)} 处")
+    if msrc:
+        for p in msrc:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  磁力多源：源开关/地址进请求体，列表标出来源")
+
+    # --- 12. 诊断包入口必须写着「已脱敏」---
     # 这个包是**要被贴到公开 issue 里**的。界面上如果只说「下载诊断包」，
     # 用户不知道里面有配置，就不敢点；反过来说，如果哪天脱敏被去掉而文案没改，
     # 用户会以为它是安全的。所以「入口存在」和「文案承诺脱敏」一起守。

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // 磁力列表按体积倒序：一组覆盖各单位的换算表。
 //
@@ -64,11 +67,11 @@ func TestSortMagnetsBySizeDesc(t *testing.T) {
 	}
 }
 
-// 用**线上真实形态**的夹具跑一遍「解析 → 组装」，确认排序真的接上了。
+// 用**线上真实形态**的夹具跑一遍「解析 → 合并 → 组装」，确认排序真的接上了。
 //
 // 这条是防「排序没接上」的：如果只测 sortMagnetsBySize 本身，
 // 把它从组装路径里删掉测试照样全绿（典型的空过）。
-func TestMagnetResultFromSortsRealFixture(t *testing.T) {
+func TestMagnetResultMergedSortsRealFixture(t *testing.T) {
 	mags := parseMagnets([]byte(magnetAjaxBareFixture))
 	if len(mags) != 2 {
 		t.Fatalf("夹具应解析出 2 条磁力，实际 %d", len(mags))
@@ -79,8 +82,9 @@ func TestMagnetResultFromSortsRealFixture(t *testing.T) {
 		t.Fatalf("解析应保持文档顺序，实际 %q / %q", mags[0].Size, mags[1].Size)
 	}
 
-	out := magnetResultFrom("SSNI-989", "https://www.javbus.com/SSNI-989", "SSNI-989",
-		&JBMovie{Number: "SSNI-989", Title: "标题", Magnets: mags})
+	merged := mergeMagnets(mags)
+	out := magnetResultMerged("SSNI-989", "https://www.javbus.com/SSNI-989", "SSNI-989", merged,
+		[]MagnetSourceStatus{{Key: magnetSourceJavBus, Name: "javbus", OK: true, Count: 2}})
 	if out.Error != "" {
 		t.Fatalf("不该报错：%s", out.Error)
 	}
@@ -88,21 +92,40 @@ func TestMagnetResultFromSortsRealFixture(t *testing.T) {
 		t.Fatalf("应带出 2 条磁力，实际 %d", len(out.Magnets))
 	}
 	if out.Magnets[0].Size != "2.57GB" || out.Magnets[1].Size != "1.83GB" {
-		t.Errorf("组装后应按体积倒序，实际 %q / %q", out.Magnets[0].Size, out.Magnets[1].Size)
+		t.Errorf("合并后应按体积倒序，实际 %q / %q", out.Magnets[0].Size, out.Magnets[1].Size)
+	}
+	if out.Note == "" {
+		t.Error("有源成功时应有来源小结，界面靠它显示「javbus 12 条」")
 	}
 	// 不该改动调用方手里那份解析结果
 	if mags[0].Size != "1.83GB" {
-		t.Errorf("排序不应就地改动入参，实际 %q", mags[0].Size)
+		t.Errorf("合并/排序不应就地改动入参，实际 %q", mags[0].Size)
 	}
 }
 
 // 没有磁力时要有明确的说明文案，而不是一个空列表让界面显示「没有磁力链接」之外的东西。
-func TestMagnetResultFromEmpty(t *testing.T) {
-	out := magnetResultFrom("ABC-001", "", "", &JBMovie{Number: "ABC-001"})
-	if out.Error != "该作品暂无磁力链接" {
-		t.Errorf("空磁力应给出提示，实际 %q", out.Error)
+// 三种「空」要分得开：没启用源 / 源都正常但没收录 / 源全挂了。
+func TestMagnetResultMergedEmpty(t *testing.T) {
+	none := magnetResultMerged("ABC-001", "", "", nil, nil)
+	if !strings.Contains(none.Error, "没有启用") {
+		t.Errorf("一个源都没启用时应说清是配置问题，实际 %q", none.Error)
 	}
-	if len(out.Magnets) != 0 {
-		t.Errorf("不应有磁力条目，实际 %d", len(out.Magnets))
+
+	noHit := magnetResultMerged("ABC-001", "", "", nil, []MagnetSourceStatus{
+		{Key: magnetSourceJavBus, Name: "javbus", OK: true, Count: 0},
+		{Key: magnetSourceJavDB, Name: "javdb", OK: true, Count: 0},
+	})
+	if !strings.Contains(noHit.Error, "都没有收录") {
+		t.Errorf("源正常但没收录时不应说成失败，实际 %q", noHit.Error)
+	}
+
+	allBad := magnetResultMerged("ABC-001", "", "", nil, []MagnetSourceStatus{
+		{Key: magnetSourceJavBus, Name: "javbus", Error: "连接超时"},
+	})
+	if !strings.Contains(allBad.Error, "连接超时") {
+		t.Errorf("源全挂时应把原因带出来，实际 %q", allBad.Error)
+	}
+	if len(noHit.Magnets) != 0 {
+		t.Errorf("不应有磁力条目，实际 %d", len(noHit.Magnets))
 	}
 }

@@ -607,6 +607,39 @@ func (e *Emby) DeleteImage(ctx context.Context, itemID, imgType string, index in
 	return err
 }
 
+// GetImage 取条目某张图的原始字节。
+//
+// 不给 maxHeight/quality：这里是为了「原样搬到另一个条目上」，
+// 让服务器重新压一遍只会掉画质（人物头像本来就小）。
+func (e *Emby) GetImage(ctx context.Context, itemID, imgType string) ([]byte, string, error) {
+	data, _, err := e.do(ctx, http.MethodGet, "/Items/"+itemID+"/Images/"+imgType, nil, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) == 0 {
+		return nil, "", fmt.Errorf("图片内容为空")
+	}
+	return data, http.DetectContentType(data), nil
+}
+
+// CopyImage 把 fromID 的某张图复制到 toID（用于人物归并时转移头像）。
+func (e *Emby) CopyImage(ctx context.Context, fromID, toID, imgType string) error {
+	data, ctype, err := e.GetImage(ctx, fromID, imgType)
+	if err != nil {
+		return err
+	}
+	return e.UploadImage(ctx, toID, imgType, 0, data, ctype)
+}
+
+// DeleteItem 删除一个条目（人物归并里用来清掉多余的人物条目）。
+//
+// Emby 的 DELETE 是**幂等**的：不存在的 ID 也回 204 而不是 404，
+// 所以不能靠返回值判断「到底删掉了没有」——「删掉了」以调用前能读到为准。
+func (e *Emby) DeleteItem(ctx context.Context, itemID string) error {
+	_, _, err := e.do(ctx, http.MethodDelete, "/Items/"+itemID, nil, nil, nil)
+	return err
+}
+
 // Refresh 触发条目元数据刷新。
 func (e *Emby) Refresh(ctx context.Context, itemID string, recursive bool) error {
 	q := url.Values{}

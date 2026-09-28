@@ -894,39 +894,59 @@ func (a *App) ScanActorNumbers(ctx context.Context, starInput, parentID string, 
 }
 
 // MagnetResult 是某个番号的磁力抓取结果。
+//
+// Sources 是各源的状态明细：某个站没收录、被墙、被限频都要能看到，
+// 否则「结果少了几条」在界面上完全无从判断是站点没收录还是我们抓挂了。
 type MagnetResult struct {
-	Number  string     `json:"number"`
-	URL     string     `json:"url"`
-	Title   string     `json:"title"`
-	Magnets []JBMagnet `json:"magnets"`
-	Error   string     `json:"error,omitempty"`
+	Number  string               `json:"number"`
+	URL     string               `json:"url"`
+	Title   string               `json:"title"`
+	Magnets []JBMagnet           `json:"magnets"`
+	Sources []MagnetSourceStatus `json:"sources,omitempty"`
+	Note    string               `json:"note,omitempty"`
+	Error   string               `json:"error,omitempty"`
 }
 
-// magnetResultFrom 把一次作品详情抓取的结果整理成给前端的样子。
+// magnetResultMerged 把多源抓取的结果整理成给前端的样子。
 //
-// 单独抽出来是为了能被单测覆盖：真正决定列表顺序的那句 sortMagnetsBySize
-// 原来埋在 FetchMagnetsFor 里面，而那个函数必须联网（javbus 限速、要真实页面），
-// 单测碰不到 —— 于是「排序没接上」这种错只能靠人眼在界面上发现。
-// 现在只要给一个解析好的 JBMovie，不联网也能验证顺序。
-func magnetResultFrom(number, pageURL, fallbackTitle string, mv *JBMovie) MagnetResult {
-	out := MagnetResult{Number: number, URL: pageURL, Title: fallbackTitle}
-	if mv == nil {
-		out.Error = "没有拿到作品详情"
+// 空结果的三种情形要分开说，否则用户在界面上看到的都是「没抓到」：
+// 没启用任何源 / 各源都正常但确实没收录 / 所有源都失败了（后面跟着原因）。
+func magnetResultMerged(number, pageURL, fallbackTitle string, mags []JBMagnet,
+	statuses []MagnetSourceStatus) MagnetResult {
+	out := MagnetResult{
+		Number:  number,
+		URL:     pageURL,
+		Title:   firstNonEmpty(fallbackTitle, number),
+		Magnets: mags,
+		Sources: statuses,
+		Note:    magnetSourceSummary(statuses),
+	}
+	if len(mags) > 0 {
 		return out
 	}
-	// 复制一份再排：排序是展示策略，不该改动调用方手里那份解析结果。
-	out.Magnets = append([]JBMagnet(nil), mv.Magnets...)
-	sortMagnetsBySize(out.Magnets)
-	if mv.Title != "" {
-		out.Title = mv.Title
+	okAny := false
+	for _, s := range statuses {
+		if s.OK {
+			okAny = true
+		}
 	}
-	if len(out.Magnets) == 0 {
-		out.Error = "该作品暂无磁力链接"
+	switch {
+	case len(statuses) == 0:
+		out.Note = ""
+		out.Error = "没有启用任何磁力源（设置 → 磁力搜索源）"
+	case okAny:
+		out.Error = "各磁力源都没有收录这个番号"
+	default:
+		out.Error = "所有磁力源都失败了：" + magnetSourceSummary(statuses)
 	}
 	return out
 }
 
 // FetchMagnetsFor 并发抓取一批番号的磁力列表。
+//
+// 两层并发：番号之间受 concurrency 限制，同一个番号内部对各个源再并发一次。
+// 同一个番号内部并发是安全的 —— 各源限速器彼此独立；番号之间不能开大，
+// 因为每个源都有站点级限速，开大了换来的只有 403。
 func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurrency int, job *Job) []MagnetResult {
 	cfg := a.store.Get()
 	if concurrency <= 0 {
@@ -935,11 +955,24 @@ func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurre
 	if concurrency <= 0 {
 		concurrency = 4
 	}
-	// javbus 需要限速，这里限制并发为 2 以避免被封
+	// javbus / javdb 都有站点级限速，2 是实测能稳定跑完的窗口。
 	if concurrency > 2 {
 		concurrency = 2
 	}
+	fetchers := newMagnetFetchers(cfg)
 	results := make([]MagnetResult, len(targets))
+	if len(fetchers) == 0 {
+		for i, t := range targets {
+			results[i] = MagnetResult{Number: t.Number, URL: t.URL, Title: t.Title,
+				Error: "没有启用任何磁力源（设置 → 磁力搜索源）"}
+			if job != nil {
+				job.mu.Lock()
+				job.Done++
+				job.mu.Unlock()
+			}
+		}
+		return results
+	}
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	for i, t := range targets {
@@ -948,16 +981,8 @@ func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurre
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			jb := NewJavBus(cfg)
-			out := MagnetResult{Number: t.Number, URL: t.URL, Title: t.Title}
-			mv, err := jb.MovieDetail(ctx, firstNonEmpty(t.URL, t.Number))
-			if err != nil {
-				out.Error = err.Error()
-			} else {
-				// 按体积从大到小：一个番号常有十几条磁力，页面顺序是按发布时间
-				// 或随机给的，用户想找的几乎总是「最大的那个」。
-				out = magnetResultFrom(t.Number, t.URL, t.Title, mv)
-			}
+			mags, title, statuses := fetchOneMagnetTarget(ctx, fetchers, firstNonEmpty(t.Number, t.URL))
+			out := magnetResultMerged(t.Number, t.URL, firstNonEmpty(title, t.Title), mags, statuses)
 			results[i] = out
 			if job != nil {
 				job.mu.Lock()
@@ -966,7 +991,7 @@ func (a *App) FetchMagnetsFor(ctx context.Context, targets []ScanMovie, concurre
 				if out.Error != "" {
 					job.addLog("warn", fmt.Sprintf("%s：%s", t.Number, out.Error))
 				} else {
-					job.addLog("ok", fmt.Sprintf("%s：%d 条磁力", t.Number, len(out.Magnets)))
+					job.addLog("ok", fmt.Sprintf("%s：%d 条磁力（%s）", t.Number, len(out.Magnets), out.Note))
 				}
 			}
 		}(i, t)

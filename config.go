@@ -32,6 +32,19 @@ type Config struct {
 	JavBusURL    string `json:"javbus_url"`
 	JavBusCookie string `json:"javbus_cookie"`
 
+	// ---- javdb（第二个磁力源）----
+	// javdb 也走 Cloudflare，匿名请求多数情况下够用；被拦时把浏览器里的
+	// 完整 Cookie（含 over18=1 与 cf_clearance）填进 JavDBCookie。
+	JavDBURL    string `json:"javdb_url"`
+	JavDBCookie string `json:"javdb_cookie"`
+
+	// MagnetSources 是参与磁力抓取的源，键见 magnetSourceKeys。
+	//
+	// nil（配置里没有这个键）＝ 用默认的全部源；空数组 ＝ 一个都不用。
+	// 区分 nil 与 [] 是**有意**的：老配置文件里根本没有这个键，必须落到默认值，
+	// 而不是「一个源都不开」那种等于把功能关掉的状态。反序列化刚好能区分这两者。
+	MagnetSources []string `json:"magnet_sources"`
+
 	// ---- 国产传媒专项刮削 ----
 	// 键为站点标识（xchina / madouqu / madou / 7mmtv），值为站点根地址。
 	// 留空则用 defaultCNSites() 里的默认值，方便换镜像域名。
@@ -100,6 +113,8 @@ func DefaultConfig() Config {
 		GfriendsCDN:     "https://cdn.jsdelivr.net/gh/gfriends/gfriends@master/",
 		JavBusURL:       "https://www.javbus.com",
 		JavBusCookie:    "age=verified; dv=1; existmag=mag",
+		JavDBURL:        "https://javdb.com",
+		MagnetSources:   []string{magnetSourceJavBus, magnetSourceJavDB},
 		AutoRefresh:     true,
 		Concurrency:     4,
 		JavBusInterval:  1500,
@@ -126,6 +141,13 @@ func (c *Config) normalize() {
 	}
 	if strings.TrimSpace(c.JavBusCookie) == "" {
 		c.JavBusCookie = d.JavBusCookie
+	}
+	if strings.TrimSpace(c.JavDBURL) == "" {
+		c.JavDBURL = d.JavDBURL
+	}
+	// nil（老配置里没这个键）才落默认值；显式的空数组表示「一个源都不用」。
+	if c.MagnetSources == nil {
+		c.MagnetSources = append([]string(nil), d.MagnetSources...)
 	}
 	if c.CNSites == nil {
 		c.CNSites = map[string]string{}
@@ -155,6 +177,7 @@ func (c *Config) normalize() {
 	c.EmbyURL = strings.TrimRight(strings.TrimSpace(c.EmbyURL), "/")
 	c.MetaTubeURL = strings.TrimRight(strings.TrimSpace(c.MetaTubeURL), "/")
 	c.JavBusURL = strings.TrimRight(strings.TrimSpace(c.JavBusURL), "/")
+	c.JavDBURL = strings.TrimRight(strings.TrimSpace(c.JavDBURL), "/")
 	if !strings.HasSuffix(c.GfriendsCDN, "/") {
 		c.GfriendsCDN += "/"
 	}
@@ -243,6 +266,7 @@ type secretFlags struct {
 	EmbyToken     bool `json:"emby_token"`
 	MetaTubeToken bool `json:"metatube_token"`
 	JavBusCookie  bool `json:"javbus_cookie"`
+	JavDBCookie   bool `json:"javdb_cookie"`
 	OpenAIAPIKey  bool `json:"openai_api_key"`
 }
 
@@ -267,6 +291,7 @@ func (s *Store) Public() publicConfig {
 			EmbyToken:     c.Token != "",
 			MetaTubeToken: c.MetaTubeToken != "",
 			JavBusCookie:  c.JavBusCookie != "",
+			JavDBCookie:   c.JavDBCookie != "",
 			OpenAIAPIKey:  c.OpenAI.APIKey != "",
 		},
 		Auth: authPublic{Username: c.Auth.Username, Generated: c.Auth.Generated},
@@ -277,6 +302,7 @@ func (s *Store) Public() publicConfig {
 	c.Token = ""
 	c.MetaTubeToken = ""
 	c.JavBusCookie = ""
+	c.JavDBCookie = ""
 	c.OpenAI.APIKey = ""
 	// 密码哈希虽然是派生的，也没必要出门 —— 不下发就少一次离线爆破的机会。
 	c.Auth.PasswordHash = ""

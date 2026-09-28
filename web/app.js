@@ -311,7 +311,7 @@ function watchJob(jobId, title, onDone) {
 }
 
 // ---------------- 视图切换 ----------------
-const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', health: '媒体库体检', cn: '国产传媒', settings: '设置' };
+const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', merge: '人物归并', javbus: '番号补全', cn: '国产传媒', settings: '设置' };
 
 function switchView(v) {
   S.view = v;
@@ -321,7 +321,6 @@ function switchView(v) {
   if (v === 'stats') loadStats();
   if (v === 'library') { ensureLibs(); loadItems(0); }
   if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); loadProfileSources(); }
-  if (v === 'health') ensureLibs();
   if (v === 'cn') { ensureLibs(); cnSyncSelUI(); }
   if (v === 'settings') { fillSettings(); loadItemHistory(); }
 }
@@ -374,6 +373,7 @@ function renderComponents(d) {
     ['gfriends 索引', gf.loaded ? num(gf.names) + ' 位演员 / ' + num(gf.total) + ' 张图' : '未加载',
       gf.loaded ? 'green' : 'amber', gf.last_error ? esc(gf.last_error) : (gf.loaded_at ? '更新于 ' + gf.loaded_at.replace('T', ' ').slice(0, 19) : '')],
     ['javbus', esc((S.cfg && S.cfg.javbus_url) || '未配置'), 'blue', 'Cookie 已配置'],
+    ['javdb', esc((S.cfg && S.cfg.javdb_url) || '未配置'), 'blue', '磁力源 2'],
   ];
   $('#stComp').innerHTML = '<table class="tbl"><tbody>' + rows.map((r) =>
     '<tr><td style="width:130px;color:var(--muted)">' + r[0] + '</td><td>' + r[1] + '</td>' +
@@ -389,94 +389,189 @@ async function ensureLibs() {
     $('#lbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#jbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#psLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
-    // 体检页也不给「全部」：整库扫一遍在几万条的库上又慢又没用，
-    // 用户真正想问的是「我某个库里哪些条目还没收拾过」。
-    $('#hLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
     // 国产传媒页不给「全部」这个选项：这个功能只在某个具体库里成立，
     // 留个「全部」等于留个坑。
     $('#cnLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
   } catch (e) { /* 未登录时忽略 */ }
 }
 
-// ---------------- 媒体库体检 ----------------
+// ---------------- 人物归并 ----------------
 
-// 只读扫描一个库，把「还没被收拾过」的条目按问题类型分组列出来。
+// 查重本身是只读的：只把「可能是同一个人」的分组列出来。
 //
-// 刻意不做「一键自动修复」：扫描本身不发任何写请求，修不修、怎么修由用户
-// 点进具体条目决定。一个自动修复按钮配上一个不可逆的写接口，出事只是时间问题。
-async function loadHealth() {
-  const lib = $('#hLib').value;
-  if (!lib) { toast('先选一个媒体库', 'err'); return; }
-  const btn = $('#hScan');
+// 为什么不做「一键全部归并」：Emby 的人物条目是跨作品共享的引用，合并意味着
+// 把一批作品改挂到另一个人名下、再删掉多余的那个。错并一次影响面是几十上百部片子，
+// 而且没有「还原到哪几部片子原本挂在谁名下」的一键回滚。所以这里只做三件事：
+// 打分找候选 → 强制预演 → 点两次才写。
+async function loadDuplicates() {
+  const btn = $('#mgScan');
   const old = btn.textContent;
   btn.disabled = true;
-  btn.textContent = '体检中…';
-  $('#hSummary').innerHTML = '';
-  $('#hBody').innerHTML = '<div class="empty"><span class="spin"></span> 正在扫描…</div>';
+  btn.textContent = '扫描中…';
+  $('#mgSummary').innerHTML = '';
+  $('#mgBody').innerHTML = '<div class="empty"><span class="spin"></span> 正在扫描人物库…</div>';
   try {
     const params = new URLSearchParams({
-      parent: lib,
-      type: $('#hType').value,
-      limit: Number($('#hLimit').value) || 500,
+      min_score: Number($('#mgMinScore').value) || 86,
+      limit: Number($('#mgLimit').value) || 3000,
+      alias: $('#mgAlias').checked ? 'true' : 'false',
     });
-    const d = await api('/api/health?' + params.toString());
-    renderHealth(d);
+    const d = await api('/api/persons/duplicates?' + params.toString());
+    renderDuplicates(d);
   } catch (e) {
-    $('#hBody').innerHTML = '<div class="empty">扫描失败：' + esc(e.message) + '</div>';
+    $('#mgBody').innerHTML = '<div class="empty">扫描失败：' + esc(e.message) + '</div>';
   } finally {
     btn.disabled = false;
     btn.textContent = old;
   }
 }
 
-function renderHealth(d) {
+function renderDuplicates(d) {
   d = d || {};
   const groups = d.groups || [];
-  const bad = groups.filter((g) => g.count > 0);
-  const good = groups.filter((g) => !g.count);
-  const chip = (k, v, cls) => '<span class="hchip ' + cls + '"><b>' + v + '</b>' + esc(k) + '</span>';
-  $('#hSummary').innerHTML = '<div class="card" style="box-shadow:none">' +
-    '<div class="hchips">' +
-    chip('检查条目', num(d.scanned) + (d.truncated ? ' / 共 ' + num(d.total) : ''), d.truncated ? 'warn' : '') +
-    chip('有问题', num(d.problem), d.problem ? 'warn' : 'ok') +
-    chip('干净', num(d.clean), 'ok') +
-    '</div>' +
-    (d.truncated
-      ? '<div class="cnhint" style="margin-top:10px">库里共 ' + num(d.total) + ' 条，本次只检查了 ' +
-        num(d.scanned) + ' 条（受「最多检查」限制，调大这个值可以扫更多）。</div>'
-      : '') +
-    (good.length
-      ? '<div class="cnhint" style="margin-top:10px">这几项全部通过：' +
-        good.map((g) => '✓ ' + esc(g.label)).join('　') + '</div>'
-      : '') +
-    '</div>';
+  const stat = (k, v) => '<div><span style="color:var(--muted);font-size:12px">' + k + '</span> <b>' + v + '</b></div>';
+  $('#mgSummary').innerHTML =
+    '<div class="card" style="box-shadow:none">' +
+    '<div class="row" style="gap:22px;align-items:baseline">' +
+    stat('扫描人物', num(d.scanned) + (d.truncated ? ' <span class="cnhint">/ 共 ' + num(d.total) + '</span>' : '')) +
+    stat('可疑分组', num(groups.length)) +
+    stat('涉及人物', num(d.persons)) +
+    '<div class="grow"></div>' +
+    (d.note ? '<span class="cnhint">' + esc(d.note) + '</span>' : '') +
+    '</div></div>';
 
-  if (!bad.length) {
-    $('#hBody').innerHTML = '<div class="card" style="box-shadow:none">' +
-      '<div class="empty">检查到的 ' + num(d.scanned) + ' 条里没有发现问题</div></div>';
+  if (!groups.length) {
+    $('#mgBody').innerHTML = '<div class="card" style="box-shadow:none">' +
+      '<div class="empty">没有找到可疑的重复人物（相似度阈值 ' + num(d.min_score) + '）</div></div>';
     return;
   }
-  $('#hBody').innerHTML = bad.map((g) => {
-    const rows = (g.items || []).map((it) =>
-      '<button class="hrow" data-id="' + esc(it.id) + '">' +
-      '<span class="hrow-n">' + esc(it.name || it.id) + '</span>' +
-      '<span class="grow"></span>' +
-      (it.number ? '<span class="tag mono">' + esc(it.number) + '</span>'
-                 : '<span class="cnhint">无番号</span>') +
-      (it.year ? '<span class="cnhint mono">' + num(it.year) + '</span>' : '') +
-      '</button>').join('');
-    return '<div class="card" style="box-shadow:none">' +
-      '<h3>' + esc(g.label) +
-      '<span class="tag' + (g.level === 'err' ? ' bad' : '') + '" style="margin-left:8px">' +
-      num(g.count) + ' 条</span></h3>' +
-      '<div class="cnhint" style="margin-bottom:8px">' + esc(g.hint) + '</div>' +
-      '<div class="hlist">' + rows + '</div>' +
-      (g.more ? '<div class="cnhint" style="margin-top:8px">还有 ' + num(g.more) + ' 条未列出</div>' : '') +
+
+  $('#mgBody').innerHTML = groups.map((g, i) => {
+    const persons = (g.persons || []).map((p, j) => {
+      const img = p.image_tag
+        ? '<img src="' + esc(embyImg(p.id, p.image_tag, 96)) + '" alt="">'
+        : '<div class="mg-noimg">无头像</div>';
+      return '<label class="mg-p">' +
+        '<input type="radio" name="mgkeep' + i + '" value="' + esc(p.id) + '"' + (j === 0 ? ' checked' : '') + '>' +
+        img +
+        '<div class="mg-pn"><b>' + esc(p.name) + '</b>' +
+        '<div class="cnhint">' + num(p.works) + ' 部作品</div>' +
+        '<div class="cnhint mono">' + esc(p.id) + '</div></div>' +
+        '</label>';
+    }).join('');
+    return '<div class="card mg-card" data-gid="' + i + '">' +
+      '<h3>' + esc(g.key) +
+      '<span class="tag" style="margin-left:8px">' + num((g.persons || []).length) + ' 个候选</span></h3>' +
+      '<div class="cnhint" style="margin-bottom:10px">' + esc(g.reason || '') + '</div>' +
+      '<div class="mg-persons">' + persons + '</div>' +
+      '<div class="row" style="align-items:center;gap:10px;margin-top:12px">' +
+      '<span class="cnhint">选中的是<b>保留</b>的那一个，其余会被并入它</span>' +
+      '<div class="grow"></div>' +
+      '<button class="btn btn-sm" data-act="preview">预演</button>' +
+      '<button class="btn btn-sm btn-primary" data-act="merge" disabled>归并</button>' +
+      '</div>' +
+      '<div class="mg-out"></div>' +
       '</div>';
   }).join('');
-  // 点一条就打开它的详情抽屉（能看能改），顺手也能从那里直接刮削。
-  $$('#hBody button.hrow').forEach((b) => { b.onclick = () => openItemDetail(b.dataset.id); });
+
+  $$('#mgBody .mg-card').forEach((card) => bindMergeCard(card));
 }
+
+function mergeCardSel(card) {
+  const gid = card.dataset.gid;
+  const keep = $('input[name=mgkeep' + gid + ']:checked', card);
+  const keepID = keep ? keep.value : '';
+  const drop = $$('input[name=mgkeep' + gid + ']', card)
+    .filter((el) => el.value !== keepID).map((el) => el.value);
+  return { keepID, drop };
+}
+
+function bindMergeCard(card) {
+  const btnP = $('button[data-act=preview]', card);
+  const btnM = $('button[data-act=merge]', card);
+  const out = $('.mg-out', card);
+  // 换「保留哪个」之后，上一次的预演结论就作废了：归并按钮必须重新预演才解锁。
+  // 否则用户会拿着一份「保留 A」的预演结果去点「保留 B」的归并。
+  $$('input[type=radio]', card).forEach((r) => {
+    r.onchange = () => {
+      btnM.disabled = true;
+      btnM.dataset.armed = '';
+      btnM.textContent = '归并';
+      out.innerHTML = '';
+    };
+  });
+  btnP.onclick = async () => {
+    const { keepID, drop } = mergeCardSel(card);
+    if (!keepID || !drop.length) { toast('至少要有两个候选才能归并', 'err'); return; }
+    btnP.disabled = true;
+    out.innerHTML = '<div class="empty"><span class="spin"></span> 正在预演…</div>';
+    try {
+      const r = await api('/api/persons/merge', {
+        method: 'POST',
+        body: { keep_id: keepID, drop_ids: drop, dry_run: true },
+      });
+      out.innerHTML = renderMergePlan(r, true);
+      btnM.disabled = false;
+    } catch (e) {
+      out.innerHTML = '<div class="alert">预演失败：' + esc(e.message) + '</div>';
+    } finally {
+      btnP.disabled = false;
+    }
+  };
+  btnM.onclick = async () => {
+    const { keepID, drop } = mergeCardSel(card);
+    if (!keepID || !drop.length) { toast('至少要有两个候选才能归并', 'err'); return; }
+    // 点两次确认：只针对真正会写 Emby 的那一下（window.confirm 在无头浏览器里会卡死）。
+    if (btnM.dataset.armed !== '1') {
+      btnM.dataset.armed = '1';
+      btnM.textContent = '确认归并';
+      toast('再点一次就会真的改 Emby（写前会留快照）', 'info');
+      setTimeout(() => {
+        if (btnM.dataset.armed === '1') { btnM.dataset.armed = ''; btnM.textContent = '归并'; }
+      }, 5000);
+      return;
+    }
+    btnM.disabled = true;
+    btnM.dataset.armed = '';
+    btnM.textContent = '归并中…';
+    try {
+      const r = await api('/api/persons/merge', {
+        method: 'POST',
+        body: { keep_id: keepID, drop_ids: drop },
+      });
+      out.innerHTML = renderMergePlan(r, false);
+      toast('归并完成：改了 ' + num(r.total_items) + ' 部作品，删除 ' + num(r.deleted) + ' 个人物', 'ok');
+    } catch (e) {
+      out.innerHTML = '<div class="alert">归并失败：' + esc(e.message) + '</div>';
+    } finally {
+      btnM.disabled = false;
+      btnM.textContent = '归并';
+    }
+  };
+}
+
+function renderMergePlan(r, dry) {
+  r = r || {};
+  const rows = (r.plan || []).map((p) =>
+    '<tr><td>' + esc(p.drop_name) + '</td>' +
+    '<td><span class="tag mono">' + esc(p.drop_id) + '</span></td>' +
+    '<td class="num">' + num(p.items) + '</td>' +
+    '<td>' + num(p.moved) + ' 部作品改挂' + (p.image ? ' · 转移头像' : '') + '</td></tr>').join('');
+  const errs = (r.errors || []).length
+    ? '<div class="alert" style="margin-top:10px">' +
+      r.errors.map((e) => esc(e)).join('<br>') + '</div>'
+    : '';
+  const del = r.deleted
+    ? '<div class="cnhint" style="margin-top:8px">已删除 ' + num(r.deleted) + ' 个多余的人物条目。</div>'
+    : (dry ? '<div class="cnhint" style="margin-top:8px">预演：上面这些<b>还没有</b>写进 Emby。</div>' : '');
+  return '<div class="mg-plan" style="margin-top:12px">' +
+    '<div class="cnhint">' + (dry ? '预演结果 —— ' : '执行结果 —— ') +
+    '保留 <b>' + esc(r.keep_name || r.keep_id || '') + '</b>，涉及 ' + num(r.total_items) + ' 部作品。</div>' +
+    (rows ? '<div class="scroll-x"><table class="tbl"><thead><tr><th>并入的条目</th><th>ID</th>' +
+      '<th class="num">作品</th><th>动作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '') +
+    del + errs + '</div>';
+}
+
 
 async function loadItems(start) {
   const lb = S.lb;
@@ -1410,10 +1505,15 @@ async function jbProbe() {
   const old = btn.textContent;
   btn.textContent = '诊断中…';
   $('#jbSummary').innerHTML = '';
-  $('#jbBody').innerHTML = '<div class="card"><h3>诊断中</h3><div class="empty">正在连接 javbus，最多等 45 秒…</div></div>';
+  $('#jbBody').innerHTML = '<div class="card"><h3>诊断中</h3><div class="empty">正在探测各个磁力源，最多等 45 秒…</div></div>';
   try {
-    const p = await api('/api/javbus/probe' + (q ? '?q=' + encodeURIComponent(q) : ''));
-    renderProbe(p);
+    // 一起探测：抓不到磁力时「javbus 通但 javdb 被限频」和「两个都通但没收录」
+    // 需要完全不同的处理，分成两次点反而容易只看一半就下结论。
+    const [p, src] = await Promise.all([
+      api('/api/javbus/probe' + (q ? '?q=' + encodeURIComponent(q) : '')),
+      api('/api/magnets/sources?probe=1').catch(() => null),
+    ]);
+    renderProbe(p, src ? src.sources : null);
   } catch (e) {
     $('#jbBody').innerHTML = '<div class="card"><h3>诊断请求失败</h3><div class="empty">' + esc(e.message) + '</div></div>';
   } finally {
@@ -1422,7 +1522,30 @@ async function jbProbe() {
   }
 }
 
-function renderProbe(p) {
+// 磁力源状态表。抓不到磁力时第一个该看的就是这里：分清「站点被拦 / 被限频 /
+// 根本没收录」和「我们解析挂了」—— 这三种在界面上原本长得一模一样。
+function renderMagnetSources(sources) {
+  const list = sources || [];
+  if (!list.length) return '';
+  const rows = list.map((s) => {
+    const st = s.status || {};
+    const lvl = !s.enabled ? '' : (st.ok ? 'green' : 'red');
+    const state = !s.enabled ? '未启用' : (st.ok ? '正常' : '异常');
+    const note = !s.enabled ? '未勾选或地址为空（设置 → 磁力搜索源）'
+      : (st.error || (st.elapsed_ms ? '首页 ' + st.elapsed_ms + ' ms' : ''));
+    return '<tr><td><b>' + esc(s.name) + '</b></td>' +
+      '<td class="mono" style="font-size:12px">' + esc(s.url || '未配置') + '</td>' +
+      '<td>' + (s.has_cookie ? '已配置' : '<span class="cnhint">未配置</span>') + '</td>' +
+      '<td><span class="tag tag-' + lvl + '">' + state + '</span></td>' +
+      '<td style="font-size:12px;color:var(--text-2)">' + esc(note) + '</td></tr>';
+  }).join('');
+  return '<h3 style="margin-top:18px">磁力源</h3>' +
+    '<div class="scroll-x"><table class="tbl"><thead><tr><th>源</th><th>地址</th><th>Cookie</th>' +
+    '<th>状态</th><th>说明</th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+    '<div class="cnhint" style="margin-top:8px">抓磁力时会同时问所有启用的源，结果按磁力哈希去重、按体积从大到小合并。</div>';
+}
+
+function renderProbe(p, sources) {
   const lvl = p.ok ? 'green' : (p.blocked ? 'amber' : 'red');
   const rows = [
     ['目标地址', p.url || '未配置'],
@@ -1464,6 +1587,7 @@ function renderProbe(p) {
     html += '<div class="hint" style="margin-top:12px">在输入框里填一个演员名再点诊断，可以顺便测演员搜索接口是否可用。</div>';
   }
 
+  html += renderMagnetSources(sources);
   html += '</div>';
   $('#jbBody').innerHTML = html;
 }
@@ -1576,12 +1700,16 @@ function renderMagnets() {
       // 既点不动，也认不出来。视觉上的省略交给 CSS 的 ellipsis。
       '<br><a class="maglink" href="' + esc(m.link) + '" title="' + esc(m.link) + '">' +
       esc(m.link) + '</a></div>' +
+      (m.source ? '<span class="src" title="这条磁力来自哪个站">' + esc(m.source) + '</span>' : '') +
       '<span class="sz">' + esc(m.size || '') + '</span><span class="dt">' + esc(m.date || '') + '</span>' +
       '<button class="btn btn-sm" data-copy="' + esc(m.link) + '">复制</button></div>').join('');
     return '<div class="magpanel' + (g.number === S.jb.magTab ? ' on' : '') + '" data-num="' + esc(g.number) + '">' +
       '<div class="maghead maghead-act">' + esc(g.title || g.number) +
       '<span class="grow"></span>' +
       '<button class="btn btn-sm" data-preview="' + esc(g.number) + '">预览样例图</button></div>' +
+      // 各源状态：合并之后光看链接分不出哪条是哪个站给的，
+      // 而且「这次结果比上次少」也要能立刻看出是哪一家没给。
+      (g.note ? '<div class="cnhint" style="margin:6px 0 2px">来源：' + esc(g.note) + '</div>' : '') +
       (rows || '<div class="magempty">' + esc(g.error || '没有磁力链接') + '</div>') + '</div>';
   }).join('');
 
@@ -2049,6 +2177,12 @@ function fillSettings() {
   set('#stJb', c.javbus_url);
   markSecret('#stJbCookie', sec.javbus_cookie);
   set('#stJbInterval', c.javbus_interval_ms); set('#stConc', c.concurrency);
+  set('#stJdb', c.javdb_url);
+  markSecret('#stJdbCookie', sec.javdb_cookie);
+  // magnet_sources 为空数组 = 一个源都不启用；缺字段（老配置）后端会补成默认。
+  const srcs = Array.isArray(c.magnet_sources) ? c.magnet_sources : ['javbus', 'javdb'];
+  $('#stSrcJb').checked = srcs.indexOf('javbus') >= 0;
+  $('#stSrcJdb').checked = srcs.indexOf('javdb') >= 0;
   const cn = c.cn_sites || {};
   set('#stCnXchina', cn.xchina); set('#stCnMadouqu', cn.madouqu);
   set('#stCnMadou', cn.madou); set('#stCn7mmtv', cn['7mmtv']);
@@ -2086,6 +2220,14 @@ async function saveSettings() {
     javbus_cookie: $('#stJbCookie').value.trim(),
     javbus_interval_ms: Number($('#stJbInterval').value) || 1500,
     concurrency: Number($('#stConc').value) || 4,
+    javdb_url: $('#stJdb').value.trim(),
+    javdb_cookie: $('#stJdbCookie').value.trim(),
+    // 总是发这个数组（哪怕是空的）——「一个源都不启用」是一个明确的选择，
+    // 不能靠「省略字段」表达，省略会被当成「没配置过」而被后端补回默认值。
+    magnet_sources: [
+      $('#stSrcJb').checked ? 'javbus' : '',
+      $('#stSrcJdb').checked ? 'javdb' : '',
+    ].filter(Boolean),
     cn_sites: {
       xchina: $('#stCnXchina').value.trim(),
       madouqu: $('#stCnMadouqu').value.trim(),
@@ -2151,6 +2293,8 @@ async function loadConfig() {
   $('#lgGfCdn').value = c.gfriends_cdn || '';
   $('#lgJb').value = c.javbus_url || '';
   markSecret('#lgJbCookie', sec.javbus_cookie);
+  $('#lgJdb').value = c.javdb_url || '';
+  markSecret('#lgJdbCookie', sec.javdb_cookie);
   $('#lgProxy').value = c.proxy || '';
   $('#lgConc').value = c.concurrency || 4;
   $('#lgInsecure').checked = !!c.insecure_tls;
@@ -2205,6 +2349,8 @@ async function doLogin() {
         gfriends_cdn: $('#lgGfCdn').value.trim(),
         javbus_url: $('#lgJb').value.trim(),
         javbus_cookie: $('#lgJbCookie').value.trim(),
+        javdb_url: $('#lgJdb').value.trim(),
+        javdb_cookie: $('#lgJdbCookie').value.trim(),
         proxy: $('#lgProxy').value.trim(),
         concurrency: Number($('#lgConc').value) || 4,
         insecure_tls: $('#lgInsecure').checked,
@@ -2252,7 +2398,7 @@ function bind() {
   $('#sbLogout').onclick = doAuthLogout;
   $('#stAuthSave').onclick = saveAuth;
   $('#stHistReload').onclick = loadItemHistory;
-  $('#hScan').onclick = loadHealth;
+  $('#mgScan').onclick = loadDuplicates;
   // 诊断包是个普通下载链接（<a download href="/api/diag/bundle">），浏览器自己
   // 处理文件落盘。这里只补一句「在打包」的反馈 —— 大日志要压几秒，
   // 什么都不显示的话用户会连点好几次。

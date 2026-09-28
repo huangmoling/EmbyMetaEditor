@@ -129,8 +129,9 @@ func (a *App) route() *http.ServeMux {
 	// 用 Kind 区分），所以「刮错了想撤销」有地方可退。
 	mux.HandleFunc("GET /api/items/history", a.handleItemsHistory)
 	mux.HandleFunc("POST /api/items/rollback", a.handleItemsRollback)
-	// 媒体库体检：只读扫描，按问题类型分组。扫描不发任何写请求。
-	mux.HandleFunc("GET /api/health", a.handleHealth)
+	// 人物归并：先出只读的重复候选，再按「预演 → 快照 → 写入」合并。
+	mux.HandleFunc("GET /api/persons/duplicates", a.handlePersonDuplicates)
+	mux.HandleFunc("POST /api/persons/merge", a.handlePersonMerge)
 	// 诊断包：把配置（脱敏）、写入历史、任务日志、缓存清单打成一个 zip。
 	// 用户排障时贴这个就够了，不必手工去翻 cache/ 和 config.json。
 	mux.HandleFunc("GET /api/diag/bundle", a.handleDiagBundle)
@@ -165,6 +166,9 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("POST /api/javbus/magnets", a.handleJavbusMagnets)
 	mux.HandleFunc("GET /api/javbus/probe", a.handleJavbusProbe)
 	mux.HandleFunc("GET /api/javbus/samples", a.handleJavbusSamples)
+	// 磁力源清单 + 连通性（probe=1）。抓不到磁力时先看这个，能分清
+	// 「站点被拦 / 限频 / 没收录」和「我们解析挂了」。
+	mux.HandleFunc("GET /api/magnets/sources", a.handleMagnetSources)
 
 	// ---- 国产传媒专项刮削 ----
 	mux.HandleFunc("GET /api/cn/sites", a.handleCNSites)
@@ -229,6 +233,15 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		c.JavBusURL = in.JavBusURL
 		if in.JavBusCookie != "" {
 			c.JavBusCookie = in.JavBusCookie
+		}
+		c.JavDBURL = in.JavDBURL
+		if in.JavDBCookie != "" {
+			c.JavDBCookie = in.JavDBCookie
+		}
+		// MagnetSources：只有请求里**出现过**这个键才覆盖。
+		// 缺键（登录页的高级配置就不带它）＝ 这次没打算动它，必须原样保留。
+		if in.MagnetSources != nil {
+			c.MagnetSources = append([]string(nil), in.MagnetSources...)
 		}
 		if in.CNSites != nil {
 			if c.CNSites == nil {

@@ -1,0 +1,10 @@
+# ===== 夹具必须逐字节保持原样 =====
+# testdata/ 下的文件是从真实响应里**逐字节**切下来的（见 tools/fetch_*.py 与 README）。
+# 本机 core.autocrlf=true 时，checkout 会把 LF 换成 CRLF —— HTML 解析通常看不出来，
+# 但「夹具一个字节都没改」这句话就不成立了，而整个夹具机制的立足点正是这句话。
+testdata/** -text
+
+# ===== 二进制产物 =====
+*.exe binary
+*.ico binary
+*.png binary

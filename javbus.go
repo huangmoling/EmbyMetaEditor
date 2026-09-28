@@ -72,11 +72,16 @@ type JBStar struct {
 }
 
 // JBMagnet 是一条磁力链接。
+//
+// Source 记它来自哪个源（javbus / javdb）。前端会把它显示出来 ——
+// 合并之后光看链接分不出哪条是哪个站给的，而「同一个种子两个站都有」
+// 和「这个站独有」对用户的意义完全不同。
 type JBMagnet struct {
-	Link string `json:"link"`
-	Name string `json:"name"`
-	Size string `json:"size"`
-	Date string `json:"date"`
+	Link   string `json:"link"`
+	Name   string `json:"name"`
+	Size   string `json:"size"`
+	Date   string `json:"date"`
+	Source string `json:"source,omitempty"`
 }
 
 // JBMovie 是 javbus 上的一部作品。
