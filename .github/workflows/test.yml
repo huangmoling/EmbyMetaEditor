@@ -1,0 +1,134 @@
+name: 测试与构建
+
+# 为什么要有这个：仓库里有两百多个单测，但在此之前**只有发版的 docker 流程**，
+# 单测全靠本地手动跑 —— 也就是说「推上去的代码测试是红的」这件事没人会发现。
+# 这里在每次 push / PR 上把该跑的跑一遍。
+#
+# 注意：本机没有容器运行时，镜像由 docker.yml 构建；这个流程不碰镜像。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------- 单测 + 静态检查 ----------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: gofmt（格式必须干净）
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "这些文件没格式化，本地跑 gofmt -w："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        # 不带缓存（-count=1）：缓存命中的「全绿」在 CI 上没有意义。
+        # 只测本地 mock，不碰真实 Emby / 外网站点，所以不需要任何 secret。
+        run: go test -count=1 -timeout 10m ./...
+
+      - name: 前端静态检查
+        # 元素 id、接口路径、CSP img 模板、剪贴板回退、以及几处「界面改了但请求没带」
+        # 的静默失效守卫。这些在编译期发现不了，只能静态扫。
+        run: python3 tools/check_frontend.py
+
+      - name: README 数字是否过期
+        # 版本号 / exe 体积 / md5 全是复制粘贴进 README 的，最容易互相矛盾。
+        # md5 看起来最精确，所以最容易被当成可信来源 —— 而它一重建就变。
+        # 这里只做**检查**（不跑测试，快）；不一致就红，提醒发版前跑一次同步脚本。
+        run: python3 tools/sync_readme.py --check
+
+  # ---------- Windows exe 能否构建 ----------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 构建 exe
+        # 参数与 README「构建」一节完全一致：去掉路径信息与 VCS 戳，保证可复现。
+        shell: bash
+        run: |
+          go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
+
+      - name: 产物自检
+        shell: bash
+        run: |
+          set -e
+          test -f EmbyMetaEditor.exe
+          size=$(stat -c%s EmbyMetaEditor.exe)
+          echo "构建产物 $size 字节"
+          # 内嵌前端 + 全部依赖，正常在 9MB 上下；明显偏小说明 //go:embed web 没生效，
+          # 那样打出来的 exe 双击是个没有界面的空壳。
+          if [ "$size" -lt 4000000 ]; then
+            echo "::error::exe 只有 $size 字节，内嵌前端可能没生效"
+            exit 1
+          fi
+          # 内嵌的前端字面量必须在二进制里（源码改了没重建时这里最能说明问题）
+          # -a：exe 是二进制，不加这个 grep 只会回一句 "Binary file matches"
+          # 这几个字面量都是 v1.7.0 新增界面才有的：人物归并页、查重按钮、
+          # 磁力搜索源设置卡。它们对不上就说明内嵌的是旧前端。
+          for lit in "人物归并" "查找重复人物" "磁力搜索源" "预演"; do
+            if ! grep -aq "$lit" EmbyMetaEditor.exe; then
+              echo "::error::产物里找不到内嵌前端字面量「$lit」—— //go:embed web 没打进去？"
+              exit 1
+            fi
+          done
+          # 反向断言：v1.7.0 下线了媒体库体检。删功能最典型的漏法是
+          # 「后端删了、前端入口还在」—— 用户会点进一个必然 404 的页面。
+          for lit in "媒体库体检" "hchip"; do
+            if grep -aq "$lit" EmbyMetaEditor.exe; then
+              echo "::error::产物里还有已下线的「$lit」—— 前端没重建，或者删除只做了一半"
+              exit 1
+            fi
+          done
+
+      - name: 与仓库里的产物比对（仅提示）
+        shell: bash
+        continue-on-error: true
+        run: |
+          # 仓库里有意跟踪了一个 EmbyMetaEditor.exe（见 README）。它和 CI 构建的
+          # 产物 md5 不一定相同（Go 工具链补丁版本不同也会导致差异），所以这里
+          # 只做提示：数据里的差异说明「源码改过之后忘了重建 exe」，发版前要留意。
+          echo "仓库里的： $(md5sum EmbyMetaEditor.exe | cut -d' ' -f1)"
+          git show HEAD:EmbyMetaEditor.exe > /tmp/committed.exe 2>/dev/null || exit 0
+          echo "已提交的： $(md5sum /tmp/committed.exe | cut -d' ' -f1)"
+          if cmp -s EmbyMetaEditor.exe /tmp/committed.exe; then
+            echo "两者一致。"
+          else
+            echo "::notice::CI 构建产物与仓库里的 exe 不一致（可能只是工具链差异；但若是前端改动，记得本地重建后一起提交）"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EmbyMetaEditor-windows-amd64
+          path: EmbyMetaEditor.exe
+          retention-days: 14
