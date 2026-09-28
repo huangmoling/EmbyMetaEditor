@@ -496,11 +496,13 @@ git tag v1.8.0 && git push origin v1.8.0
 | job | 步骤 |
 |---|---|
 | `test` | `gofmt -l .`（有输出即失败）、`go vet ./...`、`go build`、`go test -count=1 -timeout 10m`、`check_frontend.py`、`sync_readme.py --check` |
-| `build-windows` | 交叉编译 Windows exe → 体积上限检查 → `grep -aq` 二进制里有没有「人物归并」「查找重复人物」「磁力搜索源」「预演」这几个字面量，并**反向**断言已下线的「媒体库体检」「hchip」真的没了 → 与仓库里那个**有意跟踪**的 exe 比对 → 传构建产物 |
+| `build-windows` | 在 `windows-latest` 上构建 exe → **体积下限**检查（小于 4 MB 说明 `//go:embed web` 没生效，双击是个没有界面的空壳）→ `grep -aq` 二进制里有没有「人物归并」「查找重复人物」「磁力搜索源」「预演」这几个字面量，并**反向**断言已下线的「媒体库体检」「hchip」真的没了 → 与仓库里那个**有意跟踪**的 exe 比对（仅提示，`continue-on-error`）→ 传构建产物（保留 14 天） |
 
 最后两步是这个 job 存在的理由：**源码改对了不等于 exe 改对了**。前端是 `go:embed` 进去的，`grep` 是唯一能证明「用户拿到的那个 exe 里真有新界面」的手段；字节比对则是提醒「改了 Go 源码要顺手重建仓库里的 exe」，否则下载链上的文件会和源码对不上。
 
 `sync_readme.py --check` 守的是另一类事故：README 里的版本号 / 体积 / md5 / 单测条数都是手抄的，md5 尤其容易过期，而它看起来最可信。
+
+> 改动 `.github/workflows/*` 的提交需要令牌带 `workflow` scope（GitHub 对 CI 配置单独设的门槛，与仓库权限无关）。已有 gh 登录时一条命令就地追加，现有 scope 会保留：`gh auth refresh -h github.com -s workflow`。
 
 ---
 
