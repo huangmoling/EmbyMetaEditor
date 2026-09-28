@@ -2,10 +2,12 @@ package main
 
 // 离线演员资料库的回归测试。
 //
-// 这个源的数据来自「另一个工具的加密资料库」→ 由 tools/sqlcipher_dump.py
-// 导出成 CSV。所以夹具就是一份 CSV（表头照抄真实导出），不联网、不碰那个 .db。
+// 这个源的数据来自「另一个工具的加密资料库」→ 由 tools/sqlcipher_dump.py 导出成
+// CSV → 放在 data/actresses_export.csv → 用 //go:embed 编译进程序。所以这里不碰
+// 文件系统、不碰那个 .db：夹具是**内存里的 CSV 字节**，真实数据只做「有没有内嵌进来、
+// 解析得出来吗」这类整体校验。
 //
-// 夹具**必须走真实的列名与表头**，而不是直接构造 offlineEntry：
+// 夹具**必须走真实的列名与 41 列表头**，而不是直接构造 offlineEntry：
 // 这条链路上最容易出错的地方就是「列名对不上」（真实的坑：文件带 UTF-8 BOM，
 // 第一列会变成 "\ufeffid"，于是所有字段都读成空，而文件看起来完全正常），
 // 那种错在直接构造结构体的测试里永远暴露不出来。
@@ -16,13 +18,10 @@ import (
 	"encoding/csv"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 // offlineCSVHeader 是真实导出文件的 41 列表头，顺序也照抄。
@@ -39,35 +38,29 @@ var offlineCSVHeader = []string{
 	"data_conflicts_json", "created_at", "updated_at",
 }
 
-// writeOfflineCSV 按真实导出文件的形态写一份 CSV（含 UTF-8 BOM）。
-func writeOfflineCSV(t *testing.T, path string, rows []map[string]string) {
-	t.Helper()
+// offlineCSVBytes 按真实导出文件的形态拼一份 CSV 字节（默认带 UTF-8 BOM）。
+func offlineCSVBytes(rows []map[string]string) []byte {
 	var buf bytes.Buffer
 	buf.Write([]byte{0xEF, 0xBB, 0xBF}) // 真实导出文件带 BOM
 	w := csv.NewWriter(&buf)
-	if err := w.Write(offlineCSVHeader); err != nil {
-		t.Fatalf("写表头: %v", err)
-	}
-	for i, row := range rows {
+	_ = w.Write(offlineCSVHeader)
+	for _, row := range rows {
 		rec := make([]string, len(offlineCSVHeader))
 		for j, c := range offlineCSVHeader {
 			rec[j] = row[c]
 		}
-		if err := w.Write(rec); err != nil {
-			t.Fatalf("写第 %d 行: %v", i+1, err)
-		}
+		_ = w.Write(rec)
 	}
 	w.Flush()
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("写夹具: %v", err)
-	}
+	return buf.Bytes()
 }
 
+// bytesFor 是「写夹具」的统一入口：一组记录 → 一个可直接喂给源的字节切片。
+func bytesFor(rows ...map[string]string) []byte { return offlineCSVBytes(rows) }
+
 func TestOfflineLibraryFetch(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
-	writeOfflineCSV(t, p, []map[string]string{
-		{
+	s := newOfflineLibraryFromBytes(bytesFor(
+		map[string]string{
 			"id": "10183", "name_original": "坂井なな", "name_ja": "坂井なな",
 			"name_romanized": "Nana Sakai", "kana": "さかいなな",
 			"birthdate": "1991/04/19", "birthplace": "東京都", "blood_type": "A",
@@ -77,9 +70,8 @@ func TestOfflineLibraryFetch(t *testing.T) {
 			"biography_zh_cn": "简介正文", "official_site": "https://example.invalid/nana",
 			"aliases_json": `["本多翼、白瀬真希","本多翼"]`,
 		},
-		{"id": "10184", "name_original": "空条目", "name_ja": "空条目"},
-	})
-	s := newOfflineLibrarySource(p)
+		map[string]string{"id": "10184", "name_original": "空条目", "name_ja": "空条目"},
+	))
 	ctx := context.Background()
 
 	// 本名命中：分数 100
@@ -160,18 +152,67 @@ func TestOfflineLibraryFetch(t *testing.T) {
 	}
 }
 
+// TestOfflineLibraryParsesBuiltinData 内嵌数据必须真的解析得出来。
+//
+// 「数据编译进程序」这类设计最典型的坏法不是崩溃，而是**界面一切正常、只是永远
+// 查不到人**：//go:embed 指向的文件被 gitignore 掉了、换行被 checkout 改掉了、
+// 换了机器忘了带上 data/ —— 全都表现为「解析出来 0 条」或者「查谁都查不到」。
+// 所以这里既看条数，也真的拿数据里第一条去查一次。
+func TestOfflineLibraryParsesBuiltinData(t *testing.T) {
+	if len(builtinOfflineCSV) == 0 {
+		t.Fatal("内嵌数据是空的 —— //go:embed data/actresses_export.csv 没生效（文件没入库？）")
+	}
+	s := newOfflineLibrary()
+	n, errMsg := s.Stats()
+	if errMsg != "" {
+		t.Fatalf("内嵌数据解析失败：%s", errMsg)
+	}
+	// 不写死 27780：重新导出之后条数会变，那是正常的。但**数量级**掉了就说明
+	// 内嵌的那份不是完整的导出，必须有人看一眼。
+	if n < 27000 {
+		t.Errorf("内嵌数据的条目数偏少：%d（重新导出了？还是入库的是一份残缺文件？）", n)
+	}
+	// 索引键数必然多于记录数：一个人有本名/日文名/罗马音/假名/别名好几个写法。
+	if s.KeyCount() <= n {
+		t.Errorf("索引键数应当多于记录数：keys=%d names=%d", s.KeyCount(), n)
+	}
+
+	entries, err := parseOfflineCSV(builtinOfflineCSV)
+	if err != nil {
+		t.Fatalf("parseOfflineCSV: %v", err)
+	}
+	// 挑第一条**除了名字之外还有内容**的记录去查（空壳记录按设计就是查不到的）。
+	var probe *offlineEntry
+	for i := range entries {
+		if entries[i].hasContent() {
+			probe = &entries[i]
+			break
+		}
+	}
+	if probe == nil {
+		t.Fatal("整个库里没有一条带内容的记录，数据不像是对的那份")
+	}
+	f, err := s.Fetch(context.Background(), nil, probe.name(), nil)
+	if err != nil {
+		t.Fatalf("Fetch(%q): %v", probe.name(), err)
+	}
+	if f == nil {
+		t.Fatalf("内嵌数据里存在的写法 %q 应当查得到", probe.name())
+	}
+	if f.MatchedName == "" {
+		t.Error("命中要带出本名")
+	}
+}
+
 // TestOfflineLibraryReportsAmbiguousName 一个写法对应多条记录时必须说出来。
 //
 // 实测这份库里 `name_original` 有 15% 的键同时属于两条以上记录。悄悄挑一条的
 // 后果是把别人的出生日期写进用户的 Emby，而界面上看起来毫无异常。
 func TestOfflineLibraryReportsAmbiguousName(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
-	writeOfflineCSV(t, p, []map[string]string{
-		{"id": "10188", "name_original": "AIKA", "name_ja": "AIKA", "birthdate": "1990-08-25", "height_cm": "163"},
-		{"id": "23848", "name_original": "AIKA", "name_ja": "AIKA", "birthdate": "1975-11-02", "height_cm": "155"},
-	})
-	s := newOfflineLibrarySource(p)
+	s := newOfflineLibraryFromBytes(bytesFor(
+		map[string]string{"id": "10188", "name_original": "AIKA", "name_ja": "AIKA", "birthdate": "1990-08-25", "height_cm": "163"},
+		map[string]string{"id": "23848", "name_original": "AIKA", "name_ja": "AIKA", "birthdate": "1975-11-02", "height_cm": "155"},
+	))
 
 	f, err := s.Fetch(context.Background(), nil, "AIKA", nil)
 	if err != nil {
@@ -190,78 +231,56 @@ func TestOfflineLibraryReportsAmbiguousName(t *testing.T) {
 	if f.BirthDate != "1990-08-25" {
 		t.Errorf("多条同写法时取先出现的那条，实际 %q", f.BirthDate)
 	}
-
-	// 不重名的写法不该平白多一条告警
-	writeOfflineCSV(t, p, []map[string]string{
-		{"id": "1", "name_original": "独一无二", "name_ja": "独一无二", "birthdate": "1990-08-25"},
-	})
-	time.Sleep(20 * time.Millisecond)
-	f3, err := s.Fetch(context.Background(), nil, "独一无二", nil)
-	if err != nil || f3 == nil {
-		t.Fatalf("Fetch: %v %+v", err, f3)
-	}
-	if f3.Note != "" {
-		t.Errorf("不重名的写法不该有 Note，实际：%q", f3.Note)
-	}
 }
 
-// TestOfflineLibraryMissingFileReportsWhy 读不到的时候必须**报错**而不是静默未命中。
+// TestOfflineLibraryBadDataReportsWhy 认不出的数据必须**报错**，不能静默当成「库里没这个人」。
 //
-// 静默未命中的后果：用户开了开关、看着一切正常，只是这个人「碰巧没资料」——
-// 一百个人都这样也看不出是路径写错了。
-func TestOfflineLibraryMissingFileReportsWhy(t *testing.T) {
-	s := newOfflineLibrarySource(filepath.Join(t.TempDir(), "nope.csv"))
-	_, err := s.Fetch(context.Background(), nil, "谁", nil)
-	if err == nil {
-		t.Fatal("导出文件不存在时必须报错，不能静默当成未命中")
+// 静默未命中的后果：一切看着正常，只是这个人「碰巧没资料」—— 一百个人都这样也看不出
+// 是数据坏在哪。另外这句话里的出处（sqlcipher_dump / data/ 那份 CSV）必须留着：
+// 内嵌数据解析失败只可能是**构建产物**有问题，指向「怎么生成这份数据」才有意义。
+func TestOfflineLibraryBadDataReportsWhy(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  []byte
+		want string // 错误里必须出现的关键词
+	}{
+		{"拿错了别的 CSV", []byte("a,b,c\n1,2,3\n"), "name_original"},
+		{"只有表头没有数据行", offlineCSVBytes(nil), "一个有效条目都没有"},
+		{"完全是空的", nil, "读表头失败"},
 	}
-	if !strings.Contains(err.Error(), "sqlcipher_dump") {
-		t.Errorf("错误信息要告诉用户这个文件是怎么生成的，实际：%v", err)
-	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newOfflineLibraryFromBytes(c.raw)
+			_, err := s.Fetch(context.Background(), nil, "谁", nil)
+			if err == nil {
+				t.Fatal("数据认不出来时必须报错，不能静默当成未命中")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("错误信息里应当说明问题（期望含 %q），实际：%v", c.want, err)
+			}
+			if !strings.Contains(err.Error(), "sqlcipher_dump") {
+				t.Errorf("错误信息要指出这份数据是怎么生成的，实际：%v", err)
+			}
 
-	// 同一句话还得能从 Stats() 拿到 —— 那条路径给的是**设置页**那行状态。
-	// 第一版这里各写各的：Stats() 只回「读不到导出文件：<系统错误>」，
-	// 于是最该看到的「先用脚本导出」只在抽屉的告警里出现，
-	// 用户在设置页盯着一个「读不到」完全无从下手。
-	_, errMsg := s.Stats()
-	if !strings.Contains(errMsg, "sqlcipher_dump") {
-		t.Errorf("设置页状态行也要带上「怎么生成这个文件」，实际：%q", errMsg)
-	}
-	if errMsg != err.Error() {
-		t.Errorf("两处文案必须一致：Stats()=%q / Fetch()=%q", errMsg, err.Error())
+			// 同一句话还得能从 Stats() 拿到 —— 诊断路径（以及单测自己）靠它确认
+			// 「内嵌的这份数据到底能不能用」。第一版这里各写各的，于是最该看到的那句
+			// 只在抓取告警里出现，另一个出口只回光秃秃的系统错误。
+			_, errMsg := s.Stats()
+			if !strings.Contains(errMsg, "sqlcipher_dump") {
+				t.Errorf("Stats() 也要带上「数据是怎么来的」，实际：%q", errMsg)
+			}
+			if errMsg != err.Error() {
+				t.Errorf("两处文案必须一致：Stats()=%q / Fetch()=%q", errMsg, err.Error())
+			}
+		})
 	}
 }
 
-// TestOfflineLibraryRejectsWrongFile 拿错了文件要明确说「这不是那种文件」。
-//
-// 用户手上很容易有个同名的 CSV（比如从别处导的），静默当成「库里没这个人」
-// 会让人一直以为库是空的。所以这里要的是**报错**，而且报错里要有下一步。
-func TestOfflineLibraryRejectsWrongFile(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "other.csv")
-	if err := os.WriteFile(p, []byte("a,b,c\n1,2,3\n"), 0o644); err != nil {
-		t.Fatalf("写文件: %v", err)
-	}
-	s := newOfflineLibrarySource(p)
-
-	_, err := s.Fetch(context.Background(), nil, "谁", nil)
-	if err == nil {
-		t.Fatal("不是资料库导出的 CSV 时必须报错")
-	}
-	if !strings.Contains(err.Error(), "name_original") {
-		t.Errorf("错误信息要指出缺的是哪一列，实际：%v", err)
-	}
-	if !strings.Contains(err.Error(), "sqlcipher_dump") {
-		t.Errorf("错误信息要带上「怎么生成这个文件」，实际：%v", err)
-	}
-}
-
-// TestOfflineLibraryAcceptsFileWithoutBOM 没有 BOM 的导出文件也得能读。
+// TestOfflineLibraryAcceptsDataWithoutBOM 没有 BOM 的导出文件也得能读。
 //
 // BOM 的坑是「有 BOM 时列名对不上」，所以两种都要覆盖：只测带 BOM 的话，
 // 哪天为了修 BOM 把剥离逻辑写成无条件截 3 字节，就会静默吃掉真实数据的头 3 字节。
-func TestOfflineLibraryAcceptsFileWithoutBOM(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "plain.csv")
+func TestOfflineLibraryAcceptsDataWithoutBOM(t *testing.T) {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	if err := w.Write(offlineCSVHeader); err != nil {
@@ -282,65 +301,23 @@ func TestOfflineLibraryAcceptsFileWithoutBOM(t *testing.T) {
 		t.Fatalf("写行: %v", err)
 	}
 	w.Flush()
-	if err := os.WriteFile(p, buf.Bytes(), 0o644); err != nil {
-		t.Fatalf("写夹具: %v", err)
-	}
 
-	s := newOfflineLibrarySource(p)
+	s := newOfflineLibraryFromBytes(buf.Bytes())
 	f, err := s.Fetch(context.Background(), nil, "无BOM", nil)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	if f == nil || f.MatchedName != "无BOM" {
-		t.Errorf("无 BOM 的文件也要能读，实际 %+v", f)
-	}
-}
-
-// TestOfflineLibraryReloadsWhenFileChanges 重新导出之后要能生效。
-//
-// 索引是懒加载的，按 mtime + size 失效 —— 读一次就再也不看的话，
-// 用户重新导出一份新库会毫无反应，而且这种「不生效」极难自查。
-func TestOfflineLibraryReloadsWhenFileChanges(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
-	writeOfflineCSV(t, p, []map[string]string{{"id": "1", "name_original": "甲", "name_ja": "甲", "biography_zh_cn": "一"}})
-	s := newOfflineLibrarySource(p)
-	ctx := context.Background()
-
-	if f, _ := s.Fetch(ctx, nil, "甲", nil); f == nil {
-		t.Fatal("先要能查到甲")
-	}
-	if f, _ := s.Fetch(ctx, nil, "乙", nil); f != nil {
-		t.Fatal("这时候还查不到乙")
-	}
-
-	time.Sleep(20 * time.Millisecond) // 保证 mtime 真的变了
-	writeOfflineCSV(t, p, []map[string]string{
-		{"id": "1", "name_original": "甲", "name_ja": "甲", "biography_zh_cn": "一"},
-		{"id": "2", "name_original": "乙", "name_ja": "乙", "biography_zh_cn": "二"},
-	})
-
-	f, err := s.Fetch(ctx, nil, "乙", nil)
-	if err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if f == nil {
-		t.Error("重新导出之后应该能查到新增的条目（索引要按 mtime/size 失效）")
+		t.Errorf("无 BOM 的数据也要能读，实际 %+v", f)
 	}
 }
 
 // TestOfflineLibraryIsFirstPriorityForProfiles 钉住需求里的「第一优先级」。
+//
+// v1.10.0 起这个源**不可关、不可缺席**：数据编译进程序，没有配置项，
+// 所以它在清单里的位置是个常量，而不是「开关打开时才成立」。
 func TestOfflineLibraryIsFirstPriorityForProfiles(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
-	writeOfflineCSV(t, p, []map[string]string{{"id": "1", "name_original": "甲", "name_ja": "甲", "biography_zh_cn": "离线简介"}})
 	a := testApp(t, "", "")
-	if err := a.store.Update(func(c *Config) {
-		c.OfflineDBEnabled = true
-		c.OfflineDBPath = p
-	}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
 
 	srcs := a.profileSourceList()
 	if len(srcs) == 0 {
@@ -351,25 +328,11 @@ func TestOfflineLibraryIsFirstPriorityForProfiles(t *testing.T) {
 		for _, s := range srcs {
 			keys = append(keys, s.Key())
 		}
-		t.Fatalf("启用离线库后它必须排在最前面（mergeFacts 是先到先得），实际顺序 %v", keys)
+		t.Fatalf("离线库必须排在最前面（mergeFacts 是先到先得），实际顺序 %v", keys)
 	}
-
-	// 关掉：不该再出现在清单里
-	if err := a.store.Update(func(c *Config) { c.OfflineDBEnabled = false }); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	for _, s := range a.profileSourceList() {
-		if s.Key() == offlineLibSourceKey {
-			t.Error("关掉之后离线库不该还留在资料源清单里")
-		}
-	}
-
-	// 只填路径、没开开关也一样不启用（两个条件缺一不可）
-	if err := a.store.Update(func(c *Config) { c.OfflineDBPath = p }); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if a.offlineLib() != nil {
-		t.Error("开关没打开时不该启用离线库")
+	// 它不能因为「配置里没提到它」就消失 —— 这正是「内嵌」与「可配置」的分界。
+	if lib := a.offlineLib(); lib == nil || lib.Key() != offlineLibSourceKey {
+		t.Errorf("离线库必须永远可用，实际 %+v", lib)
 	}
 }
 
@@ -380,23 +343,15 @@ func TestOfflineLibraryIsFirstPriorityForProfiles(t *testing.T) {
 //
 // 反证同样重要：**关掉别名记忆就该查不到**，否则这个测试证明不了是别名记忆起的作用。
 func TestOfflineLibrarySharesAliasMemory(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
+	m := newMockEmby(t)
+	a := newProfileTestApp(t, m)
 	// 库里只有旧艺名「本多翼」，没有 Emby 里的那个名字。
-	writeOfflineCSV(t, p, []map[string]string{{
+	a.offlineSrc = newOfflineLibraryFromBytes(bytesFor(map[string]string{
 		"id": "10183", "name_original": "本多翼", "name_ja": "本多翼",
 		"birthdate": "1990-11-12", "height_cm": "165",
 		"aliases_json": `["白瀬真希"]`,
-	}})
+	}))
 
-	m := newMockEmby(t)
-	a := newProfileTestApp(t, m)
-	if err := a.store.Update(func(c *Config) {
-		c.OfflineDBEnabled = true
-		c.OfflineDBPath = p
-	}); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
 	ctx := context.Background()
 	// 只走离线源：另外三个源要联网，单测里不碰。
 	only := FetchOptions{Sources: []string{offlineLibSourceKey}}
@@ -460,14 +415,11 @@ func TestActorFactsHasNoImageField(t *testing.T) {
 
 // TestOfflineLibraryDoesNotMapProfileImage 导出文件里的头像 URL 必须**不**被映射进来。
 func TestOfflineLibraryDoesNotMapProfileImage(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "lib.csv")
-	writeOfflineCSV(t, p, []map[string]string{{
+	s := newOfflineLibraryFromBytes(bytesFor(map[string]string{
 		"id": "1", "name_original": "甲", "name_ja": "甲",
 		"profile_image_url": "https://laoshi.ink/assets/img/celebrities/jav/甲.jpg",
 		"biography_zh_cn":   "有简介",
-	}})
-	s := newOfflineLibrarySource(p)
+	}))
 	f, err := s.Fetch(context.Background(), nil, "甲", nil)
 	if err != nil || f == nil {
 		t.Fatalf("Fetch: %v %+v", err, f)
@@ -491,8 +443,6 @@ func TestSaveConfigKeepsAbsentKeys(t *testing.T) {
 	if err := a.store.Update(func(c *Config) {
 		c.AutoRefresh = true
 		c.OverwriteImages = true
-		c.OfflineDBEnabled = true
-		c.OfflineDBPath = `F:\x\actresses_export.csv`
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -507,7 +457,7 @@ func TestSaveConfigKeepsAbsentKeys(t *testing.T) {
 		}
 	}
 
-	// 模拟登录页的高级配置：只带一部分键，**完全不含**这三个开关
+	// 模拟登录页的高级配置：只带一部分键，**完全不含**这两个开关
 	post(`{"emby_url":"http://e:8096","proxy":"","insecure_tls":true}`)
 	c := a.store.Get()
 	if !c.AutoRefresh {
@@ -516,18 +466,10 @@ func TestSaveConfigKeepsAbsentKeys(t *testing.T) {
 	if !c.OverwriteImages {
 		t.Error("overwrite_images 没在这个请求里出现，不该被关掉")
 	}
-	if !c.OfflineDBEnabled || c.OfflineDBPath == "" {
-		t.Errorf("离线库配置没在这个请求里出现，不该被清掉：enabled=%v path=%q",
-			c.OfflineDBEnabled, c.OfflineDBPath)
-	}
 
 	// 反过来：显式提交 false 必须真的关掉 —— 否则「缺键不覆盖」就成了「永远关不掉」
-	post(`{"offline_db_enabled":false}`)
-	if a.store.Get().OfflineDBEnabled {
-		t.Error("显式提交 offline_db_enabled:false 应该真的关掉")
-	}
-	// 关掉之后路径要留着：下次打开还认得那个文件
-	if a.store.Get().OfflineDBPath == "" {
-		t.Error("关掉开关不该顺手把路径清掉")
+	post(`{"auto_refresh":false}`)
+	if a.store.Get().AutoRefresh {
+		t.Error("显式提交 auto_refresh:false 应该真的关掉")
 	}
 }

@@ -37,8 +37,9 @@ type App struct {
 	// （和 fetchActorProfileWith 把协作者提成参数是同一个套路。）
 	profileSrcs []ProfileSource
 
-	// 离线资料库源实例。缓存它是因为源内部有「按 mtime 失效的索引」，
-	// 每次新建等于每次都把整个导出文件重读一遍。
+	// 离线资料库源实例。数据是 //go:embed 编译进程序的，所以它**永远存在** ——
+	// 这里只做「进程内只有一个实例」的懒创建：源内部持有解析好的 2.7 万条索引，
+	// 每次新建等于每次抓取都重新解析一遍。
 	offlineMu  sync.Mutex
 	offlineSrc *offlineLibrarySource
 
@@ -141,9 +142,6 @@ func (a *App) route() *http.ServeMux {
 	// 用 Kind 区分），所以「刮错了想撤销」有地方可退。
 	mux.HandleFunc("GET /api/items/history", a.handleItemsHistory)
 	mux.HandleFunc("POST /api/items/rollback", a.handleItemsRollback)
-	// 人物归并：先出只读的重复候选，再按「预演 → 快照 → 写入」合并。
-	mux.HandleFunc("GET /api/persons/duplicates", a.handlePersonDuplicates)
-	mux.HandleFunc("POST /api/persons/merge", a.handlePersonMerge)
 	// 诊断包：把配置（脱敏）、写入历史、任务日志、缓存清单打成一个 zip。
 	// 用户排障时贴这个就够了，不必手工去翻 cache/ 和 config.json。
 	mux.HandleFunc("GET /api/diag/bundle", a.handleDiagBundle)
@@ -296,15 +294,8 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if present["overwrite_images"] {
 			c.OverwriteImages = in.OverwriteImages
 		}
-		// 离线资料库：开关与路径都按「出现过才覆盖」。
-		// 关掉它 = 提交 offline_db_enabled:false（路径留着，下次开还认得），
-		// 或者把 offline_db_path 清空。
-		if present["offline_db_enabled"] {
-			c.OfflineDBEnabled = in.OfflineDBEnabled
-		}
-		if present["offline_db_path"] {
-			c.OfflineDBPath = strings.TrimSpace(in.OfflineDBPath)
-		}
+		// 离线资料库没有配置项：数据用 //go:embed 编译进程序，
+		// 永远启用、不需要路径，所以这里不再有 offline_db_* 的覆盖分支。
 		if in.Concurrency > 0 {
 			c.Concurrency = in.Concurrency
 		}

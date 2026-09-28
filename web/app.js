@@ -311,7 +311,7 @@ function watchJob(jobId, title, onDone) {
 }
 
 // ---------------- 视图切换 ----------------
-const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', merge: '人物归并', javbus: '番号补全', cn: '国产传媒', settings: '设置' };
+const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', cn: '国产传媒', settings: '设置' };
 
 function switchView(v) {
   S.view = v;
@@ -394,184 +394,6 @@ async function ensureLibs() {
     $('#cnLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
   } catch (e) { /* 未登录时忽略 */ }
 }
-
-// ---------------- 人物归并 ----------------
-
-// 查重本身是只读的：只把「可能是同一个人」的分组列出来。
-//
-// 为什么不做「一键全部归并」：Emby 的人物条目是跨作品共享的引用，合并意味着
-// 把一批作品改挂到另一个人名下、再删掉多余的那个。错并一次影响面是几十上百部片子，
-// 而且没有「还原到哪几部片子原本挂在谁名下」的一键回滚。所以这里只做三件事：
-// 打分找候选 → 强制预演 → 点两次才写。
-async function loadDuplicates() {
-  const btn = $('#mgScan');
-  const old = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '扫描中…';
-  $('#mgSummary').innerHTML = '';
-  $('#mgBody').innerHTML = '<div class="empty"><span class="spin"></span> 正在扫描人物库…</div>';
-  try {
-    const params = new URLSearchParams({
-      min_score: Number($('#mgMinScore').value) || 86,
-      limit: Number($('#mgLimit').value) || 3000,
-      alias: $('#mgAlias').checked ? 'true' : 'false',
-    });
-    const d = await api('/api/persons/duplicates?' + params.toString());
-    renderDuplicates(d);
-  } catch (e) {
-    $('#mgBody').innerHTML = '<div class="empty">扫描失败：' + esc(e.message) + '</div>';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = old;
-  }
-}
-
-function renderDuplicates(d) {
-  d = d || {};
-  const groups = d.groups || [];
-  const stat = (k, v) => '<div><span style="color:var(--muted);font-size:12px">' + k + '</span> <b>' + v + '</b></div>';
-  $('#mgSummary').innerHTML =
-    '<div class="card" style="box-shadow:none">' +
-    '<div class="row" style="gap:22px;align-items:baseline">' +
-    stat('扫描人物', num(d.scanned) + (d.truncated ? ' <span class="cnhint">/ 共 ' + num(d.total) + '</span>' : '')) +
-    stat('可疑分组', num(groups.length)) +
-    stat('涉及人物', num(d.persons)) +
-    '<div class="grow"></div>' +
-    (d.note ? '<span class="cnhint">' + esc(d.note) + '</span>' : '') +
-    '</div></div>';
-
-  if (!groups.length) {
-    $('#mgBody').innerHTML = '<div class="card" style="box-shadow:none">' +
-      '<div class="empty">没有找到可疑的重复人物（相似度阈值 ' + num(d.min_score) + '）</div></div>';
-    return;
-  }
-
-  $('#mgBody').innerHTML = groups.map((g, i) => {
-    const persons = (g.persons || []).map((p, j) => {
-      const img = p.image_tag
-        ? '<img src="' + esc(embyImg(p.id, p.image_tag, 96)) + '" alt="">'
-        : '<div class="mg-noimg">无头像</div>';
-      return '<label class="mg-p">' +
-        '<input type="radio" name="mgkeep' + i + '" value="' + esc(p.id) + '"' + (j === 0 ? ' checked' : '') + '>' +
-        img +
-        '<div class="mg-pn"><b>' + esc(p.name) + '</b>' +
-        '<div class="cnhint">' + num(p.works) + ' 部作品</div>' +
-        '<div class="cnhint mono">' + esc(p.id) + '</div></div>' +
-        '</label>';
-    }).join('');
-    return '<div class="card mg-card" data-gid="' + i + '">' +
-      '<h3>' + esc(g.key) +
-      '<span class="tag" style="margin-left:8px">' + num((g.persons || []).length) + ' 个候选</span></h3>' +
-      '<div class="cnhint" style="margin-bottom:10px">' + esc(g.reason || '') + '</div>' +
-      '<div class="mg-persons">' + persons + '</div>' +
-      '<div class="row" style="align-items:center;gap:10px;margin-top:12px">' +
-      '<span class="cnhint">选中的是<b>保留</b>的那一个，其余会被并入它</span>' +
-      '<div class="grow"></div>' +
-      '<button class="btn btn-sm" data-act="preview">预演</button>' +
-      '<button class="btn btn-sm btn-primary" data-act="merge" disabled>归并</button>' +
-      '</div>' +
-      '<div class="mg-out"></div>' +
-      '</div>';
-  }).join('');
-
-  $$('#mgBody .mg-card').forEach((card) => bindMergeCard(card));
-}
-
-function mergeCardSel(card) {
-  const gid = card.dataset.gid;
-  const keep = $('input[name=mgkeep' + gid + ']:checked', card);
-  const keepID = keep ? keep.value : '';
-  const drop = $$('input[name=mgkeep' + gid + ']', card)
-    .filter((el) => el.value !== keepID).map((el) => el.value);
-  return { keepID, drop };
-}
-
-function bindMergeCard(card) {
-  const btnP = $('button[data-act=preview]', card);
-  const btnM = $('button[data-act=merge]', card);
-  const out = $('.mg-out', card);
-  // 换「保留哪个」之后，上一次的预演结论就作废了：归并按钮必须重新预演才解锁。
-  // 否则用户会拿着一份「保留 A」的预演结果去点「保留 B」的归并。
-  $$('input[type=radio]', card).forEach((r) => {
-    r.onchange = () => {
-      btnM.disabled = true;
-      btnM.dataset.armed = '';
-      btnM.textContent = '归并';
-      out.innerHTML = '';
-    };
-  });
-  btnP.onclick = async () => {
-    const { keepID, drop } = mergeCardSel(card);
-    if (!keepID || !drop.length) { toast('至少要有两个候选才能归并', 'err'); return; }
-    btnP.disabled = true;
-    out.innerHTML = '<div class="empty"><span class="spin"></span> 正在预演…</div>';
-    try {
-      const r = await api('/api/persons/merge', {
-        method: 'POST',
-        body: { keep_id: keepID, drop_ids: drop, dry_run: true },
-      });
-      out.innerHTML = renderMergePlan(r, true);
-      btnM.disabled = false;
-    } catch (e) {
-      out.innerHTML = '<div class="alert">预演失败：' + esc(e.message) + '</div>';
-    } finally {
-      btnP.disabled = false;
-    }
-  };
-  btnM.onclick = async () => {
-    const { keepID, drop } = mergeCardSel(card);
-    if (!keepID || !drop.length) { toast('至少要有两个候选才能归并', 'err'); return; }
-    // 点两次确认：只针对真正会写 Emby 的那一下（window.confirm 在无头浏览器里会卡死）。
-    if (btnM.dataset.armed !== '1') {
-      btnM.dataset.armed = '1';
-      btnM.textContent = '确认归并';
-      toast('再点一次就会真的改 Emby（写前会留快照）', 'info');
-      setTimeout(() => {
-        if (btnM.dataset.armed === '1') { btnM.dataset.armed = ''; btnM.textContent = '归并'; }
-      }, 5000);
-      return;
-    }
-    btnM.disabled = true;
-    btnM.dataset.armed = '';
-    btnM.textContent = '归并中…';
-    try {
-      const r = await api('/api/persons/merge', {
-        method: 'POST',
-        body: { keep_id: keepID, drop_ids: drop },
-      });
-      out.innerHTML = renderMergePlan(r, false);
-      toast('归并完成：改了 ' + num(r.total_items) + ' 部作品，删除 ' + num(r.deleted) + ' 个人物', 'ok');
-    } catch (e) {
-      out.innerHTML = '<div class="alert">归并失败：' + esc(e.message) + '</div>';
-    } finally {
-      btnM.disabled = false;
-      btnM.textContent = '归并';
-    }
-  };
-}
-
-function renderMergePlan(r, dry) {
-  r = r || {};
-  const rows = (r.plan || []).map((p) =>
-    '<tr><td>' + esc(p.drop_name) + '</td>' +
-    '<td><span class="tag mono">' + esc(p.drop_id) + '</span></td>' +
-    '<td class="num">' + num(p.items) + '</td>' +
-    '<td>' + num(p.moved) + ' 部作品改挂' + (p.image ? ' · 转移头像' : '') + '</td></tr>').join('');
-  const errs = (r.errors || []).length
-    ? '<div class="alert" style="margin-top:10px">' +
-      r.errors.map((e) => esc(e)).join('<br>') + '</div>'
-    : '';
-  const del = r.deleted
-    ? '<div class="cnhint" style="margin-top:8px">已删除 ' + num(r.deleted) + ' 个多余的人物条目。</div>'
-    : (dry ? '<div class="cnhint" style="margin-top:8px">预演：上面这些<b>还没有</b>写进 Emby。</div>' : '');
-  return '<div class="mg-plan" style="margin-top:12px">' +
-    '<div class="cnhint">' + (dry ? '预演结果 —— ' : '执行结果 —— ') +
-    '保留 <b>' + esc(r.keep_name || r.keep_id || '') + '</b>，涉及 ' + num(r.total_items) + ' 部作品。</div>' +
-    (rows ? '<div class="scroll-x"><table class="tbl"><thead><tr><th>并入的条目</th><th>ID</th>' +
-      '<th class="num">作品</th><th>动作</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '') +
-    del + errs + '</div>';
-}
-
 
 async function loadItems(start) {
   const lb = S.lb;
@@ -2187,31 +2009,6 @@ async function rollbackItemWrite(id, btn) {
 }
 
 // ---------------- 设置 ----------------
-// refreshOfflineStat 把离线资料库「读到了几条 / 为什么读不到」显示在设置卡片里。
-//
-// 这个库是从另一个工具的**加密**资料库导出成 CSV 来的，失败原因往往很具体
-//（路径写错、还没导出、导出的是半截文件、拿错了别的 CSV）。原样摆出来，
-// 比只留一个开关有用得多 —— 开关打开了却什么都不生效，是最难自查的一种状态。
-async function refreshOfflineStat() {
-  const box = $('#stOffStat');
-  if (!box) return;
-  const on = $('#stOffOn');
-  if (!on || !on.checked) { box.textContent = '未启用。'; return; }
-  box.textContent = '正在读取…';
-  try {
-    const d = await api('/api/profile/sources');
-    const o = d.offline_db || {};
-    if (!o.enabled) { box.textContent = '未启用。'; return; }
-    // 服务端那句 error 本身已经是一句完整的话（「读不懂资料库导出文件 <路径>：<原因>
-    // （先用 tools/sqlcipher_dump.py --csv … 导出）」），别再套一层「读不到：」——
-    // 套上去就成了「读不到：读不到导出文件…」，而且会把服务端那句提示挤到看不出来。
-    box.innerHTML = o.error
-      ? esc(o.error)
-      : esc('已载入 ' + num(o.entries || 0) + ' 条演员资料，排在所有在线源前面。');
-  } catch (e) {
-    box.textContent = '读取状态失败：' + e.message;
-  }
-}
 
 function fillSettings() {
   const c = S.cfg || {};
@@ -2227,9 +2024,6 @@ function fillSettings() {
   set('#stJbInterval', c.javbus_interval_ms); set('#stConc', c.concurrency);
   set('#stJdb', c.javdb_url);
   markSecret('#stJdbCookie', sec.javdb_cookie);
-  $('#stOffOn').checked = !!c.offline_db_enabled;
-  set('#stOffPath', c.offline_db_path);
-  refreshOfflineStat();
   // magnet_sources 为空数组 = 一个源都不启用；缺字段（老配置）后端会补成默认。
   const srcs = Array.isArray(c.magnet_sources) ? c.magnet_sources : ['javbus', 'javdb'];
   $('#stSrcJb').checked = srcs.indexOf('javbus') >= 0;
@@ -2273,10 +2067,6 @@ async function saveSettings() {
     concurrency: Number($('#stConc').value) || 4,
     javdb_url: $('#stJdb').value.trim(),
     javdb_cookie: $('#stJdbCookie').value.trim(),
-    // 离线资料库。开关发的是明确的 true/false，路径也总是发 ——
-    // 后端按「请求里出现过这个键才覆盖」处理，两个都发才能既开得起来也关得掉。
-    offline_db_enabled: $('#stOffOn').checked,
-    offline_db_path: $('#stOffPath').value.trim(),
     // 总是发这个数组（哪怕是空的）——「一个源都不启用」是一个明确的选择，
     // 不能靠「省略字段」表达，省略会被当成「没配置过」而被后端补回默认值。
     magnet_sources: [
@@ -2306,9 +2096,10 @@ async function saveSettings() {
     // 保存之后要把**设置页自己**按落盘后的配置重画一遍。
     //
     // loadConfig() 只回填登录页那几个字段，设置页是切到「设置」时才画的；不给它重画，
-    // 保存完这一页显示的还是保存前的样子 —— 离线资料库那行状态尤其明显：刚勾上「启用」、
-    // 填了路径、点了保存，底下仍写着「未启用。」，看着就像没保存成功。
-    // 这里是「界面说的」与「实际生效的」对不上，正是最难自查的那种状态。
+    // 保存完这一页显示的还是保存前的样子 —— 最明显的是那几个「留空 = 不修改」的密钥框：
+    // 填了新 Key 点保存，框里还留着刚输入的明文，看着像没保存成功，实际是**已经落盘、
+    // 而且这份明文根本不该再留在 DOM 里**。这里是「界面说的」与「实际生效的」对不上，
+    // 正是最难自查的那种状态。
     fillSettings();
     toast('设置已保存', 'ok');
   } catch (e) { toast(e.message, 'err'); }
@@ -2460,7 +2251,6 @@ function bind() {
   $('#sbLogout').onclick = doAuthLogout;
   $('#stAuthSave').onclick = saveAuth;
   $('#stHistReload').onclick = loadItemHistory;
-  $('#mgScan').onclick = loadDuplicates;
   // 诊断包是个普通下载链接（<a download href="/api/diag/bundle">），浏览器自己
   // 处理文件落盘。这里只补一句「在打包」的反馈 —— 大日志要压几秒，
   // 什么都不显示的话用户会连点好几次。

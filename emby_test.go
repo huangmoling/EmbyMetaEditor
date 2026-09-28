@@ -47,12 +47,7 @@ type mockEmby struct {
 	// 让整个请求失败」这条降级承诺。
 	failLibFolders bool
 	refresh        int
-	// deletedItems 记录 DELETE /Items/{id} 删过谁（人物归并靠它清掉多余条目）。
-	deletedItems []string
-	// imageGets 记录 GET /Items/{id}/Images/{type} 取过哪张图（人物归并要靠它
-	// 把 drop 的头像搬到 keep 上）。
-	imageGets []string
-	srv       *httptest.Server
+	srv            *httptest.Server
 }
 
 // mockTinyPNG 是一张真的 1x1 PNG。图片上传/转移的路径上会做魔术字节校验，
@@ -262,22 +257,8 @@ func newMockEmby(t *testing.T) *mockEmby {
 		writeJSON(w, 200, map[string]any{})
 	})
 	mux.HandleFunc("GET /Items/{id}/Images/{type}", func(w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		m.imageGets = append(m.imageGets, r.PathValue("id")+"/"+r.PathValue("type"))
-		m.mu.Unlock()
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(mockTinyPNG)
-	})
-	// DELETE /Items/{id}：人物归并用它清掉多余的人物条目。
-	// 真实 Emby 的 DELETE 是**幂等**的 —— 不存在的 ID 也回 204 而不是 404，
-	// mock 必须照抄，否则「删没删掉」这件事在测试里会被误判成成功。
-	mux.HandleFunc("DELETE /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		m.mu.Lock()
-		delete(m.items, id)
-		m.deletedItems = append(m.deletedItems, id)
-		m.mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /Items/{id}/Images/{type}", func(w http.ResponseWriter, r *http.Request) {
 		m.recordUpload(r.PathValue("id"), r.PathValue("type"), "-1", w, r)

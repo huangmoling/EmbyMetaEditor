@@ -46,17 +46,13 @@ type Config struct {
 	MagnetSources []string `json:"magnet_sources"`
 
 	// ---- 离线演员资料库 ----
-	// 一个**本地只读**的资料源。原始资料库（那个 .db）是 SQLCipher 加密的、归
-	// 另一个工具所有，我们既不解析它也不动它；由 tools/sqlcipher_dump.py 以只读
-	// 方式导出成 CSV，我们的工具**只读那份 CSV**（路径见 OfflineDBPath）。
+	// 曾经是一个「本地只读 + 用户填路径」的资料源（开关 `offline_db_enabled`、
+	// 路径 `offline_db_path`）。现在它**内嵌进程序**了：`data/actresses_export.csv`
+	// 由 //go:embed 打进 exe 与镜像（见 offlinelib.go），因此这两个配置项已删除。
 	//
-	// 启用后它排在所有在线资料源**前面**：它已经确认过的字段先落，在线源只补
-	// 它没有的。它**不参与头像** —— 头像继续走各自独立的头像源顺序，离线库
-	// 连图片字段都没有，这是设计上的保证而不是靠约定（见 offlinelib.go）。
-	//
-	// 路径为空或文件不存在时这个源直接不出现，不会让抓取报错。
-	OfflineDBEnabled bool   `json:"offline_db_enabled"`
-	OfflineDBPath    string `json:"offline_db_path"`
+	// 语义没变，仍然是最前面那个资料源：它已经确认过的字段先落，在线源只补它没有的。
+	// 它**不参与头像** —— 头像继续走各自独立的头像源顺序，离线库连图片字段都没有，
+	// 这是设计上的保证而不是靠约定（见 offlinelib.go）。
 
 	// ---- 国产传媒专项刮削 ----
 	// 键为站点标识（xchina / madouqu / madou / 7mmtv），值为站点根地址。
@@ -191,7 +187,6 @@ func (c *Config) normalize() {
 	c.MetaTubeURL = strings.TrimRight(strings.TrimSpace(c.MetaTubeURL), "/")
 	c.JavBusURL = strings.TrimRight(strings.TrimSpace(c.JavBusURL), "/")
 	c.JavDBURL = strings.TrimRight(strings.TrimSpace(c.JavDBURL), "/")
-	c.OfflineDBPath = strings.TrimSpace(c.OfflineDBPath)
 	if !strings.HasSuffix(c.GfriendsCDN, "/") {
 		c.GfriendsCDN += "/"
 	}

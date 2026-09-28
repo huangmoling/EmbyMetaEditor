@@ -9,9 +9,10 @@
   6. 资料面板的「搜索用名字」是否真的进了请求体
   7. 预演（dry-run）的按钮 → dry=true → dry_run 是否全线接通
   8. 条目写入历史面板是否真的被拉取、回滚是否走二次确认
-  9. 人物归并是否「先预演、再点两次」才可能写
+  9. 人物归并是否已**整页下线**（反向断言：界面与请求里都不该再有它）
  10. 磁力多源（javbus / javdb）的源开关与地址是否真的进了请求体
  11. 诊断包入口是否明确承诺脱敏
+ 12. 离线资料库是否已内嵌（反向断言：设置页不该再有开关/路径）
 
 用法： python tools/check_frontend.py
 退出码 0 = 全过。
@@ -265,48 +266,37 @@ def main():
     else:
         print("PASS  条目写入历史面板接通，回滚走二次确认")
 
-    # --- 10. 人物归并：必须「先预演、再点两次」才可能写 ---
-    # 归并是不可逆的：它会把一批作品的演职员表改挂到另一个人名下，再删掉
-    # 多余的人物条目。Emby 没有版本历史，错了只能靠条目快照逐条还原 People，
-    # 而被删的那个人物条目不会自己回来。所以这里把「不会误触」当硬约束钉死：
-    # 归并按钮默认禁用 → 预演过才解锁 → 换「保留谁」立刻重新锁上。
+    # --- 10. 人物归并：v1.10.0 整页下线，这里**反向**确认它真的没回来 ---
+    # 为什么把一个「已删功能」也钉成硬约束：归并会批量改写别人作品的演职员表，
+    # 还会删掉人物条目。而实测 Emby **不允许**通过 API 删 Person —— DELETE /Items/{id}
+    # 对人物条目一律 403（删影片才是 204），唯一能删掉它的是第三方插件那个叫
+    # 「清除所有人员数据」的全库任务，代价不可接受。于是整块移除。
+    # 半拉回来的形态有两种（界面没了、接口还在 / 反过来），破坏力一样大，所以
+    # 导航、页面、JS 三处一起断言。
     mg = []
-    if 'data-view="merge"' not in html:
-        mg.append("导航里没有 data-view=\"merge\"")
-    for eid in ("mgScan", "mgMinScore", "mgBody", "mgSummary"):
-        if f'id="{eid}"' not in html:
-            mg.append(f"index.html 缺少 #{eid}")
-    if "'merge'" not in code_only and '"merge"' not in code_only:
-        mg.append("VIEW_TITLES / switchView 里没有 merge")
+    for needle, what in (
+        ('data-view="merge"', "导航入口"),
+        ('id="view-merge"', "归并页面"),
+        ("人物归并", "导航/页面文案"),
+    ):
+        if needle in html:
+            mg.append(f"index.html 里还留着人物归并的{what}（{needle}）")
+    for eid in ("mgScan", "mgMinScore", "mgLimit", "mgAlias", "mgBody", "mgSummary"):
+        if f'id="{eid}"' in html:
+            mg.append(f"index.html 里还留着人物归并的控件 #{eid}")
     for fn in ("loadDuplicates", "renderDuplicates", "bindMergeCard", "renderMergePlan"):
-        if f"function {fn}" not in code_only:
-            mg.append(f"app.js 缺少 {fn}")
-    if not re.search(r"\$\('#mgScan'\)\.onclick", code_only):
-        mg.append("#mgScan 没有绑定查重")
-    if "api('/api/persons/duplicates" not in code_only:
-        mg.append("查重没走 /api/persons/duplicates")
-    if "api('/api/persons/merge" not in code_only:
-        mg.append("归并没走 /api/persons/merge")
-    # 预演那一次必须显式发 dry_run:true，否则「预演」按钮就是一个写入按钮
-    if not re.search(r"dry_run:\s*true", code_only):
-        mg.append("归并的预演没带 dry_run: true —— 点「预演」会直接改 Emby")
-    # 归并按钮初始必须是禁用的
-    if 'data-act="merge" disabled' not in code_only:
-        mg.append("归并按钮不是默认禁用 —— 没看预演就能直接写")
-    # 换「保留谁」之后必须重新禁用 + 清掉已武装状态
-    if not re.search(r"btnM\.disabled = true", code_only):
-        mg.append("换「保留谁」后没有重新禁用归并按钮（会拿着 A 的预演去点 B 的归并）")
-    if "btnM.dataset.armed" not in code_only:
-        mg.append("归并没有走「点两次」确认")
-    if "window.confirm" in code_only:
-        mg.append("用了 window.confirm()（无头浏览器里会卡死，改成「点两次」）")
-    print(f"      人物归并接线问题 {len(mg)} 处")
+        if f"function {fn}" in code_only:
+            mg.append(f"app.js 里还留着 {fn}()")
+    for needle in ("/api/persons/merge", "/api/persons/duplicates", "#mgScan", "mgkeep"):
+        if needle in code_only:
+            mg.append(f"app.js 里还留着人物归并的引用（{needle}）")
+    print(f"      人物归并残留 {len(mg)} 处")
     if mg:
         for p in mg:
             print("FAIL  " + p)
         bad += 1
     else:
-        print("PASS  人物归并：查重只读、归并强制预演 + 点两次")
+        print("PASS  人物归并：已整页下线，界面与请求里都没有残留")
 
     # --- 11. 磁力多源：源开关与地址必须真的进请求体 ---
     # 「界面能改、请求里没带」是这个项目最典型的一类静默失效（§7 也是它）：
@@ -392,70 +382,43 @@ def main():
     else:
         print("PASS  别名落盘：抓取成功即落盘并把组数同步回界面")
 
-    # --- 14. 离线资料库接线（设置页的开关与路径必须真的进请求体） ---
-    # 需求是「离线资料库只读、启用后是演员资料第一优先级、不默认用它的头像」。
-    # 后端与单测盯着「只读」和「排最前」那两条；界面这层要守的仍是 §7 那个老坑：
-    # 设置页加了输入框、用户勾了也填了，但 saveSettings 没把它塞进 body ——
-    # 界面回一句「设置已保存」，下次打开却是关的。光看界面复现不出来，只能静态钉死。
+    # --- 14. 离线资料库：v1.10.0 起内嵌进程序，设置页**不该**再有那张卡片 ---
+    # 需求：「离线数据库集成到项目 / Docker，设置界面不用显示」。
+    # 所以这里是**反向**断言：卡片、开关、路径框、状态行、配置键都不该还在。
+    # 留着开关等于告诉用户「这个功能可以关」，而它现在不可关、也不需要路径 ——
+    # 「界面能改、实际不生效」正是这个项目最忌讳的那种状态。
     off_problems = []
+    for needle, what in (
+        ('id="stOffOn"', "启用开关"),
+        ('id="stOffPath"', "CSV 路径框"),
+        ('id="stOffStat"', "状态行"),
+        ("离线演员资料库", "卡片标题"),
+        ("offline_db_enabled", "配置键"),
+        ("offline_db_path", "配置键"),
+    ):
+        if needle in html:
+            off_problems.append(f"index.html 里还留着离线资料库的{what}（{needle}）")
+    for needle in ("stOffOn", "stOffPath", "offline_db_enabled", "offline_db_path",
+                   "refreshOfflineStat"):
+        if needle in code_only:
+            off_problems.append(f"app.js 里还留着离线资料库的残留（{needle}）")
+    # 但「保存后重画设置页」这条不能跟着一起丢：它当初是被离线库那行状态暴露出来的，
+    # 现在守的是另一件事 —— 填了新密钥点保存，密钥框还留着刚输入的明文
+    #（看着像没保存成功，实际是已经落盘、而那份明文根本不该再留在 DOM 里）。
     saver = re.search(r"async function saveSettings\(\)[\s\S]*?(?=\nasync function |\nfunction |\Z)",
                       code_only)
     saver_body = saver.group(0) if saver else ""
     if not saver_body:
-        off_problems.append("app.js 里找不到 saveSettings —— 无法确认离线库配置会不会被提交")
-    else:
-        if "offline_db_enabled" not in saver_body:
-            off_problems.append("saveSettings 没提交 offline_db_enabled —— 开关保存不了")
-        if "offline_db_path" not in saver_body:
-            off_problems.append("saveSettings 没提交 offline_db_path —— 路径保存不了")
-        if "$('#stOffOn')" not in saver_body:
-            off_problems.append("saveSettings 读的不是 #stOffOn —— 提交的值和用户看到的开关无关")
-        if "$('#stOffPath')" not in saver_body:
-            off_problems.append("saveSettings 读的不是 #stOffPath —— 提交的路径和用户填的无关")
-        # 保存后必须**重画设置页**：loadConfig() 只回填登录页那几个字段，设置页是切到
-        # 「设置」时才画的。不重画的话，刚勾上「启用」+ 填了路径 + 点了保存，底下那行状态
-        # 还是「未启用。」—— 用户的第一反应是「没保存成功」，然后再点一次。
-        # （这条是 2026-09-28 由 tools/verify_offline_lib.py 抓出来的真缺陷。）
-        if "fillSettings(" not in saver_body:
-            off_problems.append("saveSettings 保存后没重画设置页 —— 开关/状态行会停在保存前的样子")
-    filler = re.search(r"(?:async )?function fillSettings\([\s\S]*?(?=\nasync function |\nfunction |\Z)",
-                       code_only)
-    fill_body = filler.group(0) if filler else ""
-    if not fill_body:
-        off_problems.append("app.js 里找不到 fillSettings —— 打开设置页回填不了")
-    else:
-        if "$('#stOffOn').checked" not in fill_body:
-            off_problems.append("fillSettings 没回填 #stOffOn —— 打开设置页开关永远是关的")
-        if "stOffPath" not in fill_body:
-            off_problems.append("fillSettings 没回填 #stOffPath —— 路径显示不出来")
-        if "refreshOfflineStat(" not in fill_body:
-            off_problems.append("fillSettings 没刷新状态行 —— 用户看不到读到几条、读不到是为什么")
-    for need in ('id="stOffOn"', 'id="stOffPath"', 'id="stOffStat"'):
-        if need not in html:
-            off_problems.append("index.html 缺少 " + need)
-    # 这个库是加密的、别人的、只读的，而且**不参与头像**（ActorFacts 里根本没有图片字段）。
-    # 卡片上必须把这两点说清楚：否则用户不敢开（怕我们改了他的 .db），
-    # 或者开了之后以为头像会从这里换掉。
-    off_card = re.search(r"<h3>\s*离线演员资料库\s*</h3>[\s\S]{0,1600}?</div>\s*</div>", html or "")
-    off_txt = off_card.group(0) if off_card else ""
-    if not off_txt:
-        off_problems.append("设置页找不到「离线演员资料库」卡片")
-    else:
-        if "只读" not in off_txt or "写入" not in off_txt:
-            off_problems.append("卡片没说清「只读、不写回原库」")
-        if "头像" not in off_txt:
-            off_problems.append("卡片没说清「不提供头像，头像走独立顺序」")
-        # 「这个 CSV 是哪来的」必须写在卡片上：路径框是空的，用户不知道要先跑导出脚本，
-        # 就会去填一个随手找到的 CSV，然后对着「读不懂这个文件」发愣。
-        if "sqlcipher_dump" not in off_txt or "CSV" not in off_txt:
-            off_problems.append("卡片没说清「这个文件得先用 tools/sqlcipher_dump.py 导出成 CSV」")
-    print(f"      离线资料库接线问题 {len(off_problems)} 处")
+        off_problems.append("app.js 里找不到 saveSettings —— 无法确认保存后会不会重画")
+    elif "fillSettings(" not in saver_body:
+        off_problems.append("saveSettings 保存后没重画设置页 —— 密钥框会停在保存前的样子")
+    print(f"      离线资料库残留问题 {len(off_problems)} 处")
     if off_problems:
         for p in off_problems:
             print("FAIL  " + p)
         bad += 1
     else:
-        print("PASS  离线资料库：开关/路径进请求体、能回填，文案讲清只读与头像")
+        print("PASS  离线资料库：已内嵌，设置页不再有开关/路径，保存后仍会重画")
 
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0

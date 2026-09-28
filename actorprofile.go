@@ -113,7 +113,7 @@ var actorSourceNotes = map[string]string{
 	"Wikipedia":  "日文维基：整段简介（通常最完整），兼出生日期、出生地与读音别名",
 	// 它不是在线源，是把本地那份加密资料库导出成 JSON 之后读出来的东西。
 	// 启用后它排在**最前面**（第一优先级），且不提供头像。
-	"OfflineDB": "本地只读的离线资料库（由 tools/sqlcipher_dump.py 从加密资料库导出成 CSV）：排在最前面，已确认过的字段先落，不提供头像",
+	"OfflineDB": "内嵌进程序的离线资料库（由 tools/sqlcipher_dump.py 从加密库导出的 CSV）：排在最前面，已确认过的字段先落，不提供头像",
 }
 
 // actorSourceNote 取某个源的界面说明；没登记就返回空串（界面会少一行，不会报错）。

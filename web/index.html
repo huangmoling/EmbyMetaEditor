@@ -164,7 +164,6 @@
       <button data-view="stats" class="on"><span class="ico">▦</span>概览统计</button>
       <button data-view="library"><span class="ico">▤</span>媒体库刮削</button>
       <button data-view="persons"><span class="ico">☺</span>演员头像</button>
-      <button data-view="merge"><span class="ico">⇄</span>人物归并</button>
       <button data-view="javbus"><span class="ico">✓</span>番号补全</button>
       <button data-view="cn"><span class="ico">◈</span>国产传媒</button>
       <button data-view="settings"><span class="ico">⚙</span>设置</button>
@@ -219,20 +218,6 @@
         </div>
         <div class="grid" id="lbGrid"><div class="empty">尚未加载</div></div>
         <div class="pager" id="lbPager"></div>
-      </section>
-
-      <!-- ---- 人物归并 ---- -->
-      <section class="view" id="view-merge">
-        <div class="toolbar">
-          <input class="input" id="mgMinScore" type="number" value="86" min="50" max="100" style="width:88px" title="名字相似度阈值：低于它不算候选">
-          <input class="input" id="mgLimit" type="number" value="3000" min="200" max="20000" style="width:100px" title="最多扫描多少个人物">
-          <button class="btn btn-primary" id="mgScan">查找重复人物</button>
-          <label class="switch"><input type="checkbox" id="mgAlias" checked> 参考别名记忆</label>
-          <div class="grow"></div>
-          <span class="hint" style="margin:0">查找只读；归并前必须过一遍预演</span>
-        </div>
-        <div id="mgSummary"></div>
-        <div id="mgBody"><div class="empty">点「查找重复人物」开始扫描</div></div>
       </section>
 
       <!-- ---- 演员 ---- -->
@@ -403,22 +388,6 @@
             <label>Cookie</label>
             <input class="input" id="stJdbCookie">
             <div class="hint">javdb 有 Cloudflare 与 18 岁确认。默认匿名请求多数情况下够用；被拦时从浏览器复制完整 Cookie（<span class="mono">over18=1; cf_clearance=…</span>）填这里。留空表示不修改。</div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>离线演员资料库</h3>
-          <div class="hint" style="margin-bottom:10px">
-            本地<b>只读</b>的资料源。原始资料库（<span class="mono">.db</span>）是加密的、归另一个工具所有，
-            我们既不解析也不写入它 —— 先用 <span class="mono">tools/sqlcipher_dump.py --csv</span> 把它导出成 CSV，
-            再把路径填在这里。启用后它排在所有在线资料源<b>最前面</b>（已确认过的字段先落，在线源只补它没有的）；
-            它<b>不提供头像</b>，头像仍走上面 gfriends 那条独立顺序。库里同一个写法对应多条记录时会给出提醒。
-          </div>
-          <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stOffOn"> 启用离线资料库</label>
-          <div class="field">
-            <label>导出文件路径（CSV）</label>
-            <input class="input" id="stOffPath" placeholder="F:\桌面\emby\演员数据库\actresses_export.csv" spellcheck="false">
-            <div class="hint" id="stOffStat">未启用。</div>
           </div>
         </div>
 

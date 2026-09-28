@@ -8,6 +8,10 @@ config.json
 # gfriends 索引约 10 MB，容器首次启动会自己重新下载到 /data/cache
 cache/
 
+# ⚠️ 这里**不能**排除 data/ —— 那份演员资料库是通过 //go:embed 打进二进制的
+# （见 offlinelib.go），排掉它镜像照样构建成功，只是容器里永远查不到演员资料。
+# 同理 .gitattributes 给 data/** 加了 -text，别让构建上下文里的换行被改掉。
+
 # ===== 工具内部数据 =====
 .workbuddy/
 .workbuddy-ai/

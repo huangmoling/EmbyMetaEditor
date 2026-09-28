@@ -86,25 +86,36 @@ jobs:
           test -f EmbyMetaEditor.exe
           size=$(stat -c%s EmbyMetaEditor.exe)
           echo "构建产物 $size 字节"
-          # 内嵌前端 + 全部依赖，正常在 9MB 上下；明显偏小说明 //go:embed web 没生效，
-          # 那样打出来的 exe 双击是个没有界面的空壳。
-          if [ "$size" -lt 4000000 ]; then
-            echo "::error::exe 只有 $size 字节，内嵌前端可能没生效"
+          # v1.10.0 起 exe 里除了内嵌前端，还内嵌了整个演员资料库
+          # （data/actresses_export.csv，约 9.5 MB，见 offlinelib.go 的 //go:embed），
+          # 所以正常在 19 MB 上下。**低于 15 MB 就说明那份数据没进去** ——
+          # 最可能的两个原因是 data/ 被 gitignore 了、或者 .dockerignore 把它排除了。
+          # 同一个阈值也顺手守着「//go:embed web 没生效」（那样只有几 MB）。
+          if [ "$size" -lt 15000000 ]; then
+            echo "::error::exe 只有 $size 字节，内嵌的前端或演员资料库可能没生效"
             exit 1
           fi
-          # 内嵌的前端字面量必须在二进制里（源码改了没重建时这里最能说明问题）
+          # 内嵌的字面量必须在二进制里（源码改了没重建时这里最能说明问题）
           # -a：exe 是二进制，不加这个 grep 只会回一句 "Binary file matches"
-          # 这几个字面量都是 v1.7.0 新增界面才有的：人物归并页、查重按钮、
-          # 磁力搜索源设置卡。它们对不上就说明内嵌的是旧前端。
-          for lit in "人物归并" "查找重复人物" "磁力搜索源" "预演"; do
+          for lit in "磁力搜索源" "预演" "离线资料库"; do
             if ! grep -aq "$lit" EmbyMetaEditor.exe; then
               echo "::error::产物里找不到内嵌前端字面量「$lit」—— //go:embed web 没打进去？"
               exit 1
             fi
           done
-          # 反向断言：v1.7.0 下线了媒体库体检。删功能最典型的漏法是
+          # 这一条证明**数据本身**在产物里：CSV 的表头是连续的一行，
+          # 只在 data/actresses_export.csv 里出现过。所以匹配到它就等于
+          # 「那份 CSV 真的被 embed 进来了」，而不是只有读它的代码。
+          if ! grep -aq "id,name_original,name_ja,name_zh_cn" EmbyMetaEditor.exe; then
+            echo "::error::产物里找不到演员资料库的 CSV 表头 —— //go:embed data/ 没生效？"
+            exit 1
+          fi
+          # 反向断言：下线了的功能不该还留在产物里。删功能最典型的漏法是
           # 「后端删了、前端入口还在」—— 用户会点进一个必然 404 的页面。
-          for lit in "媒体库体检" "hchip"; do
+          # v1.7.0 下线了「媒体库体检」；v1.10.0 下线了「人物归并」整套
+          # （Emby 不允许通过 API 删 Person，条只有第三方插件的全库任务能删）
+          # 与设置页那张「离线演员资料库」卡片（数据已内嵌，不再需要配置）。
+          for lit in "媒体库体检" "hchip" "人物归并" "查找重复人物" "离线演员资料库" "stOffOn"; do
             if grep -aq "$lit" EmbyMetaEditor.exe; then
               echo "::error::产物里还有已下线的「$lit」—— 前端没重建，或者删除只做了一半"
               exit 1

@@ -95,23 +95,6 @@ func (a *AliasStore) NamesFor(name string) []string {
 	return dedupeStrings(out)
 }
 
-// CanonicalKey 返回某人对应的别名组标识：同组的人拿到同一个字符串。
-//
-// 给「人物归并」用：它需要的是「这两个名字是不是被人工确认过是同一个人」，
-// 而不是具体有哪些别名，所以这里只吐一个可比较的键，没记录过就返回空串。
-func (a *AliasStore) CanonicalKey(name string) string {
-	k := normName(name)
-	if k == "" {
-		return ""
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if i, ok := a.byName[k]; ok {
-		return a.Groups[i].CanonicalName
-	}
-	return ""
-}
-
 // Remember 把「本人名字 + 本次抓到的别名」记成一组，已存在的组则合并。
 // source 用来记「这批别名是哪来的」（如 已同步:AVデータバンク）。
 func (a *AliasStore) Remember(canonical string, names []string, source string) {
@@ -448,7 +431,7 @@ func effectiveSearchName(name, searchName string) string {
 // fetchActorProfileWith 能塞假源还不够，那只是纯函数；「抓完之后落盘别名」
 // 这条接线在入口那一层，不测就又是「helper 测得很足、调用点没接上」。
 //
-// 启用了离线资料库时它排在**最前面**：mergeFacts 是先到先得，所以等价于
+// 内嵌的离线资料库**永远排在最前面**：mergeFacts 是先到先得，所以等价于
 // 「离线库已确认过的字段先落，在线源只补它没有的」。这也就是需求里的
 // 「仅作为演员资料的第一优先级」。**头像不受影响** —— 头像走各自的头像源，
 // 和这张资料源清单根本不是一个列表（而且 ActorFacts 里没有图片字段）。
@@ -456,11 +439,7 @@ func (a *App) profileSourceList() []ProfileSource {
 	if len(a.profileSrcs) > 0 {
 		return a.profileSrcs
 	}
-	srcs := actorSources()
-	if lib := a.offlineLib(); lib != nil {
-		srcs = append([]ProfileSource{lib}, srcs...)
-	}
-	return srcs
+	return append([]ProfileSource{a.offlineLib()}, actorSources()...)
 }
 
 func (a *App) fetchActorProfile(ctx context.Context, personID, name, searchName string, opts FetchOptions) (*ActorProfile, error) {

@@ -44,19 +44,11 @@ func (a *App) handleProfileSources(w http.ResponseWriter, r *http.Request) {
 	for _, s := range a.profileSourceList() {
 		out = append(out, srcView{Key: s.Key(), Label: s.Label(), Note: actorSourceNote(s.Key())})
 	}
-	// 离线资料库的状态单独回一份：它排在最前面（第一优先级），但只有启用了才存在。
-	// 把「载入了多少条」或「为什么读不到」直接摆到界面上，省得用户对着一个不生效的
-	// 开关猜 —— 这个库是加密导出的，读不到的原因值得原样显示。
-	offline := map[string]any{"enabled": false}
-	if lib := a.offlineLib(); lib != nil {
-		entries, errMsg := lib.Stats()
-		offline = map[string]any{
-			"enabled": true, "path": lib.Path(), "entries": entries, "error": errMsg,
-		}
-	}
+	// 这里**没有**「离线资料库状态」要回传：那份数据是 //go:embed 编译进程序的，
+	// 它永远在清单第一位，不需要用户配置，也就没有「载入了没有 / 为什么读不到」可显示。
+	// （第一版是个可开关、要填路径的外部文件，所以曾经要单独回一份状态。）
 	writeOK(w, map[string]any{
 		"sources":       out,
-		"offline_db":    offline,
 		"alias_groups":  a.aliases.Count(),
 		"history_count": len(a.sync.List(0)),
 		// 批量（不带 keys）的默认策略。单卡面板上逐字段勾选时**以勾选为准**，

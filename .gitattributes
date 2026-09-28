@@ -4,6 +4,12 @@
 # 但「夹具一个字节都没改」这句话就不成立了，而整个夹具机制的立足点正是这句话。
 testdata/** -text
 
+# ===== 内嵌数据：必须逐字节保持原样 =====
+# data/ 那份 CSV 由 //go:embed 原样打进二进制，开头带 UTF-8 BOM，offlinelib.go 按
+# 字节剥 BOM、按列名取值。本机 core.autocrlf=true 时 checkout 会把换行改掉 ——
+# 那样「本地跑得好好的、CI 构建出来的产物读不出数据」就会变成一桩悬案。
+data/** -text
+
 # ===== 二进制产物 =====
 *.exe binary
 *.ico binary

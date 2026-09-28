@@ -641,27 +641,6 @@ table.pf-tbl td.pf-v { padding-top: 8px; padding-bottom: 8px; }
 .pk-item img:hover { border-color: var(--accent); }
 .pk-meta { font-size: 10.5px; color: var(--muted); text-align: center; line-height: 1.45; }
 
-/* ---------- 人物归并 ----------
-   一条候选就是一个可点的 label（整块都能点，单选按钮本身太小）。
-   `:has(input:checked)` 给「保留哪一个」一个明确的视觉反馈 —— 这个选择
-   决定了另外几个人会被并入谁，点错方向的代价不可逆。 */
-.mg-persons { display: flex; flex-wrap: wrap; gap: 10px; }
-.mg-p {
-  display: flex; align-items: center; gap: 10px; min-width: 250px; flex: 1 1 250px;
-  padding: 8px 12px; border: 1px solid var(--border);
-  border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer;
-}
-.mg-p:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-.mg-p img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; background: var(--border); }
-.mg-noimg {
-  width: 48px; height: 48px; border-radius: 6px; flex: none;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; color: var(--muted);
-  background: var(--surface); border: 1px dashed var(--border-strong);
-}
-.mg-pn { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.mg-plan .tbl { margin-top: 8px; }
-
 /* ---------- 磁力来源标签 ----------
    合并多个源之后光看链接分不出哪条是哪个站给的，而「两个站都有」
    和「这一家独有」对用户的意义完全不同。 */

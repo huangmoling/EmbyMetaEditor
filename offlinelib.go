@@ -1,54 +1,65 @@
 package main
 
-// 离线演员资料库：一个 **本地只读** 的资料源。
+// 离线演员资料库：一个**随程序分发**的只读资料源。
 //
 // 五件事先说清楚，因为它们决定了这个文件为什么长这样：
 //
-//  1. **数据从哪来。** 原始资料库（`20260924资料库.db`）是 SQLCipher 4 加密的，
-//     归另一个工具所有。本项目**既不解析那个 .db、也不写它一个字节**：
-//     数据由 `tools/sqlcipher_dump.py` 以只读方式导出成 CSV（脚本对 .db 全程
-//     `SQLITE_OPEN_READONLY`），这里读的是那份 CSV。
-//     直接读 CSV 而不是先转成中间格式，是为了**少一层「导出了但忘了再转一次」的陈旧态**：
-//     用户重新导出一次就立刻生效（靠 mtime/size 判定）。
+//  1. **数据怎么进来的。** 原始资料库（`20260924资料库.db`）是 SQLCipher 4 加密的，
+//     归另一个工具所有。本项目**既不解析那个 .db、也不写它一个字节**：数据由
+//     `tools/sqlcipher_dump.py` 以只读方式导出成 CSV（脚本对 .db 全程
+//     `SQLITE_OPEN_READONLY`），那份 CSV 放在 `data/actresses_export.csv`，
+//     再用 `//go:embed` 直接**打进二进制** —— Windows exe 与 Docker 镜像里各自
+//     自带一份，不需要用户填路径，也不依赖任何外部文件。
+//     代价要写在明处：内嵌 = 数据随产物**公开分发**（Release 上的 exe、Docker Hub
+//     上的镜像人人都能下载并从里面提取出来）。这是有意的选择，边界见 README。
 //
-//  2. **为什么不可能提供头像。** ActorFacts 里根本没有图片字段，也就是说这个源
+//  2. **只读，而且只读到底。** 我们不写那份 CSV、不写那个 .db、不写回上游任何东西。
+//     运行期它只被解析进内存，索引只建一次（数据是编译进来的，运行期不可能变）。
+//
+//  3. **为什么不可能提供头像。** ActorFacts 里根本没有图片字段，也就是说这个源
 //     在**类型上**就无法参与头像。头像继续走各自独立的头像源顺序
 //     （gfriends 那一条链），这里不是靠「约定不用」而是靠「没法用」。
 //     导出文件里那列 `profile_image_url` 因此**有意不入库**。
 //
-//  3. **同一个写法指向多条记录是常态，不是异常。** 实测这份库里
+//  4. **同一个写法指向多条记录是常态，不是异常。** 实测这份库里
 //     `name_original` 有 15% 的键、`kana` 有 18% 的键同时属于两条以上记录
 //     （重名的不同演员，或者同一人的新旧两条记录）。所以索引不假装唯一：
 //     一个键只认一条（按可靠度分两轮取先到者），但同时**记下还指向谁**，
 //     抓取时把这件事作为告警说出来 —— 悄悄挑一条会让人把别人的生日写进自己的 Emby。
 //
-//  4. **哪些列有意不映射。** `tags_json`（是「日本艺人/30代/美魔女」这类派生分类，
+//  5. **哪些列有意不映射。** `tags_json`（是「日本艺人/30代/美魔女」这类派生分类，
 //     不是源站题材标签，并进简介只会把简介变脏，而简介是整字段写入、脏了就没法只用干净那半）、
 //     `social_links_json` / `awards_json` / `timeline_json` / `public_roles_json` /
 //     `data_conflicts_json`（结构复杂，没有对应的 Emby 字段）、
 //     `shoe_cm` / `body_type` / `nationality` / `occupation` / `career_status` /
 //     `favorite_count`（同上）。
-//
-//  5. **懒加载 + 按 mtime 失效。** 导出文件近 10 MB，启动时不该读；但也不能读一次
-//     就再也不看 —— 用户重新导出一份要能生效，所以每次都 stat 一下 mtime/size，
-//     变了才重读。索引常驻，抓取是纯内存查表。
 
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// builtinOfflineCSV 是编译进程序的那份演员资料库导出（约 9.5 MB，27780 条）。
+//
+// 用 //go:embed 而不是运行时读文件：这样 exe 与容器镜像各自是完整的，
+// 用户不需要额外准备数据、也不会出现「程序在跑但库没配」的半吊子状态。
+// 源文件与 .gitattributes 里的 `-text` 规则配套 —— 换行被 checkout 改掉的话，
+// 下面剥 BOM、按列名取值就会全线失配。
+//
+//go:embed data/actresses_export.csv
+var builtinOfflineCSV []byte
 
 // offlineLibSourceKey 是这个源的稳定 key。
 const offlineLibSourceKey = "OfflineDB"
@@ -61,12 +72,12 @@ const offlineLibSourceKey = "OfflineDB"
 // 注意这是「按哪个写法搜到的」，不是「这个人是谁」的判定 —— **身份阈值一个都没放宽**。
 const offlineLibAliasScore = 95
 
-// offlineCSVHint 是「读不到 / 认不出」时统一给的那句下一步。
+// offlineCSVHint 是「读不懂」时统一给的那句出处说明。
 //
-// 两个出口（设置页那行状态、抽屉里的告警）必须逐字用同一句：第一版是各写各的，
-// 设置页只显示光秃秃的「读不到：<系统错误>」，而最管用的「这文件得先导出来」
-// 恰好只在用户看不到的地方出现。
-const offlineCSVHint = "先用 tools/sqlcipher_dump.py --csv <输出.csv> 从资料库导出"
+// 数据现在是**编译进程序**的，所以这句话不再指向「用户该去做什么配置」，而是指向
+// 「这份数据是怎么来的」：源文件就在 data/actresses_export.csv，由 tools/sqlcipher_dump.py
+// 从加密资料库导出。两个出口（抓取告警、诊断输出）必须逐字用同一句。
+const offlineCSVHint = "数据来自 tools/sqlcipher_dump.py 从加密资料库导出的 CSV（源文件 data/actresses_export.csv，已内嵌进程序）"
 
 // offlineEntry 是一条演员资料。
 //
@@ -163,35 +174,43 @@ type offlineSlot struct {
 }
 
 // offlineLibrarySource 实现 ProfileSource。
-type offlineLibrarySource struct {
-	path string
-
-	mu     sync.Mutex
-	index  map[string]*offlineSlot // normName -> 那一格
-	names  int                     // 记录数（不是键数）
-	keys   int                     // 索引键数（界面/诊断用）
-	mtime  time.Time
-	size   int64
-	errMsg string // 最近一次加载失败的原因，供界面显示
-}
-
-func newOfflineLibrarySource(path string) *offlineLibrarySource {
-	return &offlineLibrarySource{path: path}
-}
-
-// offlineLib 返回配置里那个离线资料库源；没启用或没填路径时返回 nil。
 //
-// 实例缓存在 App 上，不是每次新建：源内部有「按 mtime 失效的索引」，
-// 每次新建等于每次抓取都把整个导出文件重读一遍。路径变了就换一个实例。
+// raw 是数据来源的字节：正常是 //go:embed 进来的内嵌 CSV，单测里换上夹具。
+// 索引**只解析一次**：数据是编译进程序的，运行期不可能变，所以这里没有
+// 「文件被重新导出过、需要按 mtime 重读」那套逻辑。
+type offlineLibrarySource struct {
+	raw []byte
+
+	mu      sync.Mutex
+	loaded  bool
+	index   map[string]*offlineSlot // normName -> 那一格
+	names   int                     // 记录数（不是键数）
+	keys    int                     // 索引键数（诊断/单测用）
+	errMsg  string                  // 解析失败的原因，原样显示给用户
+	loadErr error
+}
+
+// newOfflineLibrary 返回读**内嵌数据**的离线资料库源。
+func newOfflineLibrary() *offlineLibrarySource {
+	return &offlineLibrarySource{raw: builtinOfflineCSV}
+}
+
+// newOfflineLibraryFromBytes 用给定的 CSV 字节建一个源。单测夹具走这里 ——
+// 让「解析 / 建索引 / 命中 / 重名告警」这些逻辑能在不依赖内嵌数据的前提下被验到。
+func newOfflineLibraryFromBytes(raw []byte) *offlineLibrarySource {
+	return &offlineLibrarySource{raw: raw}
+}
+
+// offlineLib 返回内嵌的离线资料库源。
+//
+// 它**永远存在**：数据是构建进程序的，没有开关、没有路径、没有「没配置」这种状态。
+// 实例缓存在 App 上 —— 源内部持有解析好的索引（2.7 万条），每次新建等于每次抓取
+// 都把整份数据重新解析一遍。
 func (a *App) offlineLib() *offlineLibrarySource {
-	cfg := a.store.Get()
-	if !cfg.OfflineDBEnabled || strings.TrimSpace(cfg.OfflineDBPath) == "" {
-		return nil
-	}
 	a.offlineMu.Lock()
 	defer a.offlineMu.Unlock()
-	if a.offlineSrc == nil || a.offlineSrc.Path() != cfg.OfflineDBPath {
-		a.offlineSrc = newOfflineLibrarySource(cfg.OfflineDBPath)
+	if a.offlineSrc == nil {
+		a.offlineSrc = newOfflineLibrary()
 	}
 	return a.offlineSrc
 }
@@ -199,13 +218,11 @@ func (a *App) offlineLib() *offlineLibrarySource {
 func (s *offlineLibrarySource) Key() string   { return offlineLibSourceKey }
 func (s *offlineLibrarySource) Label() string { return "离线资料库" }
 
-// Path 返回导出文件路径（界面显示用）。
-func (s *offlineLibrarySource) Path() string { return s.path }
-
-// Stats 返回「已载入多少条记录 / 最近一次失败原因」。
+// Stats 返回「已载入多少条记录 / 解析失败的原因」。
 //
-// 它会**顺带触发一次加载**：设置页想知道「这个文件到底读得出来吗」，
-// 不实际读一次是答不出来的。加载失败不 panic，只把原因放进 errMsg 显示出来。
+// 生产路径上只有诊断与单测会用到它（设置页那张卡片已经去掉了，这个源不再需要用户
+// 配置）；留着它是为了能一眼确认**内嵌的那份数据到底解析出来没有** —— 这正是
+// 「数据编译进程序」这类设计最容易悄悄坏掉的地方：界面一切正常，只是永远查不到人。
 func (s *offlineLibrarySource) Stats() (int, string) {
 	_ = s.ensureLoaded()
 	s.mu.Lock()
@@ -215,62 +232,35 @@ func (s *offlineLibrarySource) Stats() (int, string) {
 
 // KeyCount 返回索引里的键数。只在诊断/单测里用得上。
 func (s *offlineLibrarySource) KeyCount() int {
+	_ = s.ensureLoaded()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.keys
 }
 
-// ensureLoaded 按 mtime + size 决定要不要重新读文件。
+// ensureLoaded 解析内嵌数据并建索引，**只做一次**。
+//
+// 失败不 panic：把原因记进 errMsg / loadErr，让抓取时的告警能说清是怎么坏的。
+// 内嵌数据解析失败只可能是构建产物出了问题，所以那句话要指向「源文件 + 导出脚本」，
+// 而不是让用户去改什么设置 —— 这里根本没有设置可改。
 func (s *offlineLibrarySource) ensureLoaded() error {
-	fi, err := os.Stat(s.path)
-	if err != nil {
-		return s.loadErr("读不到资料库导出文件 %s：%v（%s）", s.path, err, offlineCSVHint)
-	}
-
 	s.mu.Lock()
-	upToDate := s.index != nil && fi.ModTime().Equal(s.mtime) && fi.Size() == s.size
-	errMsg := s.errMsg
-	s.mu.Unlock()
-	if upToDate {
-		if errMsg != "" {
-			return errors.New(errMsg)
-		}
-		return nil
+	defer s.mu.Unlock()
+	if s.loaded {
+		return s.loadErr
 	}
+	s.loaded = true
 
-	raw, err := os.ReadFile(s.path)
+	entries, err := parseOfflineCSV(s.raw)
 	if err != nil {
-		return s.loadErr("读不到资料库导出文件 %s：%v", s.path, err)
+		s.errMsg = fmt.Sprintf("内嵌的离线资料库数据读不出来：%v。这份数据是**编译进程序**的，不是外部文件 —— 出现这个说明产物本身有问题", err)
+		s.loadErr = errors.New(s.errMsg)
+		return s.loadErr
 	}
-	entries, err := parseOfflineCSV(raw)
-	if err != nil {
-		return s.loadErr("读不懂资料库导出文件 %s：%v", s.path, err)
-	}
-	idx := buildOfflineIndex(entries)
-
-	s.mu.Lock()
-	s.index = idx
+	s.index = buildOfflineIndex(entries)
 	s.names = len(entries)
-	s.keys = len(idx)
-	s.mtime = fi.ModTime()
-	s.size = fi.Size()
-	s.errMsg = ""
-	s.mu.Unlock()
+	s.keys = len(s.index)
 	return nil
-}
-
-// loadErr 把「读不出来」的原因写成**同一句话**：既记进 errMsg（设置页那行状态要显示），
-// 也作为 error 返回给调用方（抓取失败时进 Warnings）。
-func (s *offlineLibrarySource) loadErr(format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
-	s.setErr(msg)
-	return errors.New(msg)
-}
-
-func (s *offlineLibrarySource) setErr(msg string) {
-	s.mu.Lock()
-	s.errMsg = msg
-	s.mu.Unlock()
 }
 
 // buildOfflineIndex 建「写法 -> 记录」的索引。

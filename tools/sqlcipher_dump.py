@@ -5,8 +5,10 @@
 ----
 `20260924资料库.db` 是 SQLCipher 4 加密的 SQLite 库，归另一个工具所有。
 本项目**既不解析也不写入它一个字节** —— 这个脚本是唯一的桥：
-它以 `SQLITE_OPEN_READONLY` 打开那个 .db，导出成 CSV，之后由 `offlinelib.go`
-把那份 CSV 当只读资料源读。导出是**用户手动跑的一步**，不是程序运行时行为。
+它以 `SQLITE_OPEN_READONLY` 打开那个 .db，导出成 CSV；那份 CSV 放在
+`data/actresses_export.csv`，由 `offlinelib.go` 用 `//go:embed` **编译进 exe 与镜像**，
+在程序里当只读资料源读。导出是**一次性、手动的一步**（不是程序运行时行为），
+重新导出之后必须重新构建才生效。
 
 为什么自己用 ctypes 调 DLL
 --------------------------
@@ -17,12 +19,15 @@ ctypes 调它自带的 DLL 最省事，而且顺带保证了「读到什么就�
 用法
 ----
     # 口令从参数来（推荐），或从环境变量 EMBYME_OFFLINE_KEY 来
-    python tools/sqlcipher_dump.py --db "<资料库>.db" --key "<口令>" --csv actresses_export.csv
+    python tools/sqlcipher_dump.py --db "<资料库>.db" --key "<口令>" --csv data/actresses_export.csv
 
     python tools/sqlcipher_dump.py --db "<资料库>.db" --key "<口令>"   # 只看加密参数/表结构/记录数
     python tools/sqlcipher_dump.py --db "<资料库>.db" --key "<口令>" --sql "SELECT id,name_ja FROM actresses LIMIT 5"
 
-    EMBYME_OFFLINE_KEY="<口令>" python tools/sqlcipher_dump.py --db "<资料库>.db" --csv out.csv
+    EMBYME_OFFLINE_KEY="<口令>" python tools/sqlcipher_dump.py --db "<资料库>.db" --csv data/actresses_export.csv
+
+⚠️ 内嵌 = 公开分发：导出到 `data/` 的那份 CSV 会进仓库，并随 Release 的 exe 与
+Docker Hub 的镜像一起对外分发（见 README 的「内嵌的离线资料库」一节）。
 
 关于口令
 --------
