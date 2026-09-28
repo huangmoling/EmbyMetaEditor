@@ -25,6 +25,9 @@ type ScrapeOptions struct {
 	MovieID         string `json:"movie_id"`
 	OverwriteImages bool   `json:"overwrite_images"`
 	Refresh         bool   `json:"refresh"`
+	// DryRun 只搜索与解析，算出「会改成什么」就返回，**一个字节都不写**。
+	// 界面上的「预演」按钮走这条路径（见 preview.go 顶部那段说明）。
+	DryRun bool `json:"dry_run"`
 }
 
 // ScrapeResult 描述一次刮削的结果。
@@ -39,6 +42,17 @@ type ScrapeResult struct {
 	Images   []string `json:"images"`
 	Skipped  bool     `json:"skipped"`
 	Message  string   `json:"message"`
+	// DryRun 为 true 表示这是预演结果：Fields / Changes / WillImages 描述的是
+	// 「假如写入会做什么」，实际什么都没写。
+	DryRun bool `json:"dry_run,omitempty"`
+	// Changes 逐字段的「现值 → 新值」，已经过 Same 标记（两边一样=白写）。
+	Changes []FieldChange `json:"changes,omitempty"`
+	// WillImages 是预演时会尝试写入的图片槽位（Primary / Thumb / Backdrop）。
+	// 图片能不能真的传上去要下载后才知道，所以标题写「会尝试」。
+	WillImages []string `json:"will_images,omitempty"`
+	// SnapshotID 是写入前那份快照的记录 ID（可用 /api/items/rollback 撤销）。
+	// 预演不写，所以预演结果里是空的。
+	SnapshotID string `json:"snapshot_id,omitempty"`
 }
 
 // ScrapeMovie 对单个条目执行一次 MetaTube 刮削（元数据 + 图片）。
@@ -110,32 +124,49 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 		patch["Name"] = ensureNumberPrefix(n, res.Number)
 	}
 
+	// 预演：patch 已经算完（和真写用的是同一个 buildItemPatch + 同一段翻译/补番号），
+	// 到这里就停 —— 不写元数据、不下图、不刷新。
+	if opts.DryRun {
+		res.DryRun = true
+		res.Fields = sortedKeys(patch)
+		res.Changes = previewPatch(item, patch)
+		res.WillImages = imageSlotsToWrite(item, opts.OverwriteImages, thumbSource(mv))
+		will := changedFields(res.Changes)
+		res.Message = fmt.Sprintf("试运行：会改动 %d 个字段", len(will))
+		if len(res.WillImages) > 0 {
+			res.Message += "、" + itoa(len(res.WillImages)) + " 个图片槽位"
+		}
+		res.Message += "，未写入"
+		if len(will) == 0 {
+			res.Message = "试运行：没有字段需要改动（写了等于没写），未写入"
+		}
+		return res, nil
+	}
+
+	// 写之前留快照：Emby 的 POST 是整对象替换，没有版本历史，旧值写下去就没了。
+	res.SnapshotID = a.recordItemWrite(item, patch, "MetaTube 刮削")
 	if err := e.UpdateItem(ctx, itemID, patch); err != nil {
 		return nil, fmt.Errorf("写入元数据失败：%w", err)
 	}
 	res.Fields = sortedKeys(patch)
 
-	// 图片：海报 + 缩略图 + 剧照
-	hasPrimary := imageTagExists(item, "Primary")
-	hasBackdrop := imageTagExists(item, "Backdrop")
-	if opts.OverwriteImages || !hasPrimary {
-		data, ct, err := mt.FetchImage(ctx, "primary", provider, movieID, mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
-		if err != nil {
-			res.Message = "海报下载失败：" + err.Error()
-		} else if err := e.UploadImage(ctx, itemID, "Primary", -1, data, ct); err != nil {
-			res.Message = "海报上传失败：" + err.Error()
-		} else {
-			res.Images = append(res.Images, "Primary")
-		}
-	}
-	// 缩略图（Thumb）：Emby 列表 / 横版视图用的那张。优先横版剧照，没有就用封面。
-	if opts.OverwriteImages || !imageTagExists(item, "Thumb") {
-		thumbURL := previewURLAt(mv, 0)
-		if thumbURL == "" {
-			thumbURL = firstNonEmpty(mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
-		}
-		if thumbURL != "" {
-			data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, thumbURL)
+	// 图片：海报 + 缩略图 + 剧照。
+	// 要动哪些槽位由 imageSlotsToWrite 统一决定，预演用的是同一个函数 ——
+	// 条件两边各写一份的话，改一处忘另一处就会「预演说不动图片、真写把海报换了」。
+	for _, slot := range imageSlotsToWrite(item, opts.OverwriteImages, thumbSource(mv)) {
+		switch slot {
+		case "Primary":
+			data, ct, err := mt.FetchImage(ctx, "primary", provider, movieID, mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
+			if err != nil {
+				res.Message = "海报下载失败：" + err.Error()
+			} else if err := e.UploadImage(ctx, itemID, "Primary", -1, data, ct); err != nil {
+				res.Message = "海报上传失败：" + err.Error()
+			} else {
+				res.Images = append(res.Images, "Primary")
+			}
+		case "Thumb":
+			// 缩略图（Thumb）：Emby 列表 / 横版视图用的那张。优先横版剧照，没有就用封面。
+			data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, thumbSource(mv))
 			switch {
 			case err != nil:
 				res.Message = appendScrapeNote(res.Message, "缩略图下载失败："+err.Error())
@@ -148,18 +179,17 @@ func (a *App) ScrapeMovie(ctx context.Context, itemID string, opts ScrapeOptions
 					res.Images = append(res.Images, "Thumb")
 				}
 			}
-		}
-	}
-	if opts.OverwriteImages || !hasBackdrop {
-		for i := 0; i < 3; i++ {
-			data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, previewURLAt(mv, i))
-			if err != nil {
-				break
+		case "Backdrop":
+			for i := 0; i < 3; i++ {
+				data, ct, err := mt.FetchImage(ctx, "preview", provider, movieID, previewURLAt(mv, i))
+				if err != nil {
+					break
+				}
+				if err := e.UploadImage(ctx, itemID, "Backdrop", i, data, ct); err != nil {
+					break
+				}
+				res.Images = append(res.Images, "Backdrop/"+itoa(i))
 			}
-			if err := e.UploadImage(ctx, itemID, "Backdrop", i, data, ct); err != nil {
-				break
-			}
-			res.Images = append(res.Images, "Backdrop/"+itoa(i))
 		}
 	}
 	if opts.Refresh {
@@ -177,6 +207,37 @@ func appendScrapeNote(msg, note string) string {
 		return note
 	}
 	return msg + "；" + note
+}
+
+// thumbSource 返回缩略图（Thumb）该用哪张源图：优先横版剧照，没有就用封面。
+// 返回空串表示这个条目根本没有可用的缩略图源 —— 那就不该去动 Thumb 槽位。
+func thumbSource(mv *MTMovie) string {
+	if mv == nil {
+		return ""
+	}
+	if u := previewURLAt(mv, 0); u != "" {
+		return u
+	}
+	return firstNonEmpty(mv.BigCoverURL, mv.CoverURL, mv.PosterURL)
+}
+
+// imageSlotsToWrite 决定这次刮削要动哪些图片槽位（顺序即写入顺序）。
+//
+// 预演（dry-run）和真实写入**共用**这一个函数，就是为了让两边永远一致：
+// 早先这段条件是直接写在写入流程里的（`opts.OverwriteImages || !hasPrimary`），
+// 预演要再抄一遍 —— 抄漏一个条件，预演就会说谎。
+func imageSlotsToWrite(item Item, overwrite bool, thumbSrc string) []string {
+	var out []string
+	if overwrite || !imageTagExists(item, "Primary") {
+		out = append(out, "Primary")
+	}
+	if thumbSrc != "" && (overwrite || !imageTagExists(item, "Thumb")) {
+		out = append(out, "Thumb")
+	}
+	if overwrite || !imageTagExists(item, "Backdrop") {
+		out = append(out, "Backdrop")
+	}
+	return out
 }
 
 // ensureNumberPrefix 保证标题以番号开头，没有就补上，已有则原样返回。

@@ -14,6 +14,10 @@ renderMagnets()，然后在真实浏览器里断言：
   7. 没有 navigator.clipboard 时（Docker / 局域网 http 访问）回退 execCommand 成功
   8. 两条路都不通时必须给出可见的失败提示（不能静默）
   9. 重新渲染时保持当前选中的番号
+ 10. 「预览样例图」按钮每个面板都有，点了会去请求 `/api/javbus/samples?number=<番号>`
+ 11. 预览里的图**全部走同源代理** `/api/img?u=…` —— 直接塞 javbus 外链的话，
+     浏览器会因为 Referer 防盗链 403，而把 CSP 的 img-src 放开也救不了
+     （所以 CSP 一直是 `img-src 'self'`，这条断言就是守它的）
 
 需要先起 exe（127.0.0.1:8097）+ 无头 Edge。
 """
@@ -23,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -210,6 +215,95 @@ def main():
         check("地址里的查询参数（dn/tr）都还在",
               bool(rows) and "&dn=" in (rows[0]["href"] or "") and (rows[0]["href"] or "").count("&tr=") == 2,
               (rows[0]["href"] or "")[:60] if rows else None)
+
+        # ---- 样例图预览 ----
+        #
+        # 假响应必须是 {ok:true,data:…} 这个信封：app.js 的 api() 取的是 json.data，
+        # 回裸对象会让面板拿到 undefined（这个坑 verify_profile_view.py 踩过）。
+        SHOTS = ["https://www.javbus.com/pics/sample/ab_1.jpg",
+                 "https://www.javbus.com/pics/sample/ab_2.jpg",
+                 "https://www.javbus.com/pics/sample/ab_3.jpg"]
+        cdp.js("window.__pvFetch = []; window.__pvReal = window.fetch;"
+               "window.fetch = function (u, o) {"
+               "  if (String(u).indexOf('/api/javbus/samples') === 0) {"
+               "    window.__pvFetch.push(String(u));"
+               "    return Promise.resolve(new Response(JSON.stringify({ok: true, data: {"
+               "      number: 'SSNI-001', title: '示例标题', url: 'https://www.javbus.com/SSNI-001',"
+               "      samples: " + json.dumps(SHOTS) + "}"
+               "    }), {status: 200, headers: {'Content-Type': 'application/json'}}));"
+               "  }"
+               "  return window.__pvReal.apply(this, arguments);"
+               "};")
+        pvbtns = cdp.js("document.querySelectorAll('#jbMagList button[data-preview]').length")
+        check("每个番号面板都有「预览样例图」按钮",
+              pvbtns == 3, pvbtns)
+        check("预览按钮带着自己面板的番号",
+              cdp.js("Array.from(document.querySelectorAll('#jbMagList button[data-preview]'))"
+                     ".map(b => b.dataset.preview)") == ["SSNI-989", "SSNI-963", "SSNI-001"])
+        cdp.js("document.querySelector('#jbMagList .magpanel.on button[data-preview]').click()")
+        time.sleep(0.5)
+        check("点了预览会按当前番号请求接口",
+              (cdp.js("window.__pvFetch[0]") or "").endswith("number=SSNI-001"),
+              cdp.js("window.__pvFetch"))
+        pv = cdp.js(
+            "(() => {"
+            "  const d = document.querySelector('#drawerHost .drawer');"
+            "  if (!d) return null;"
+            "  const imgs = Array.from(d.querySelectorAll('.magpv img'));"
+            "  return {imgs: imgs.map(i => i.getAttribute('src')), n: imgs.length,"
+            "          text: d.textContent.slice(0, 400),"
+            "          loaded: imgs.filter(i => i.naturalWidth > 0).length};"
+            "})()")
+        check("预览抽屉里出现了样例图", bool(pv) and pv["n"] == 3, pv and pv.get("n"))
+        # 这一条是这个功能的核心：图必须是同源代理地址。
+        # 直接写 javbus 外链 → 浏览器直连带的是我们页面的 Referer → 403 破图；
+        # 而且为了让外链能加载去放开 CSP img-src，会顺带把「注入的外链图片」也放进来。
+        check("预览图全部走 /api/img 同源代理",
+              bool(pv) and all((s or "").startswith("/api/img?u=") for s in pv["imgs"]),
+              pv and pv["imgs"])
+        check("代理地址里是被编码过的原始图地址",
+              bool(pv) and pv["imgs"]
+              and urllib.parse.unquote(pv["imgs"][0].split("u=", 1)[1]) == SHOTS[0],
+              pv and pv["imgs"][:1])
+        check("抽屉里说明了图片是服务端代取",
+              bool(pv) and "服务端代取" in pv["text"], pv and pv["text"][:80])
+        # 真浏览器里这三张图是不存在的（javbus 没有 ab_N.jpg），
+        # 但请求确实发到了同源代理 —— 用「请求数」证明没被 CSP 直接干掉。
+        check("预览图请求确实打到了同源地址（不是外链）",
+              cdp.js("performance.getEntriesByType('resource')"
+                     ".filter(e => e.name.indexOf('/api/img') !== -1).length") >= 1)
+
+        # 番号没有样例图时，抽屉要给出可读的原因，不能是空白
+        cdp.js("window.fetch = function (u, o) {"
+               "  if (String(u).indexOf('/api/javbus/samples') === 0) {"
+               "    return Promise.resolve(new Response(JSON.stringify({ok: true, data: {number: 'SSNI-001', samples: []}}),"
+               "      {status: 200, headers: {'Content-Type': 'application/json'}}));"
+               "  }"
+               "  return window.__pvReal.apply(this, arguments);"
+               "};")
+        cdp.js("document.querySelector('#drawerHost').innerHTML = '';"
+               "document.querySelector('#jbMagList .magpanel.on button[data-preview]').click()")
+        time.sleep(0.5)
+        empty_txt = cdp.js("(document.querySelector('#drawerHost .drawer') || {}).textContent || ''")
+        check("没有样例图时给出说明而不是空白",
+              "没有样例图" in empty_txt and len(empty_txt) > 20, empty_txt[:80])
+
+        # 接口报错时也要看得见原因
+        cdp.js("window.fetch = function (u, o) {"
+               "  if (String(u).indexOf('/api/javbus/samples') === 0) {"
+               "    return Promise.resolve(new Response(JSON.stringify({ok: false, error: '访问 javbus 失败：返回 403'}),"
+               "      {status: 502, headers: {'Content-Type': 'application/json'}}));"
+               "  }"
+               "  return window.__pvReal.apply(this, arguments);"
+               "};")
+        cdp.js("document.querySelector('#drawerHost').innerHTML = '';"
+               "document.querySelector('#jbMagList .magpanel.on button[data-preview]').click()")
+        time.sleep(0.5)
+        err_txt = cdp.js("(document.querySelector('#drawerHost .drawer') || {}).textContent || ''")
+        check("接口报错时把原因显示出来",
+              "读取失败" in err_txt and "403" in err_txt, err_txt[:100])
+        # 还原，别影响后面的步骤
+        cdp.js("window.fetch = window.__pvReal; document.querySelector('#drawerHost').innerHTML = '';")
 
         # 复制当前番号：拦截 clipboard，只应拿到当前标签的 3 条
         cdp.js("window.__cp = null; navigator.clipboard.writeText = (t) => { window.__cp = t; return Promise.resolve(); };")

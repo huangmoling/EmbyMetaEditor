@@ -4,7 +4,7 @@ Go 写的 Emby 媒体库元数据编辑器。**单文件 exe + 内嵌 Web UI**�
 
 > 界面自带**访问认证**（单密码登录，PBKDF2 派生、内存会话），与 Emby 登录是两回事 —— 所以把端口开到局域网也不等于把管理员权限摊在网上。见[访问认证](#访问认证)。
 >
-> 下载：[`EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows x64，约 8.9 MB，无运行库依赖）
+> 下载：[`EmbyMetaEditor.exe`](https://github.com/huangmoling/EmbyMetaEditor/releases/latest/download/EmbyMetaEditor.exe)（Windows x64，约 9.1 MB，无运行库依赖）
 > Docker：[`aag111/emby-meta-editor`](https://hub.docker.com/r/aag111/emby-meta-editor)（linux/amd64 + arm64）
 
 | 模块 | 说明 |
@@ -16,6 +16,10 @@ Go 写的 Emby 媒体库元数据编辑器。**单文件 exe + 内嵌 Web UI**�
 | **演员资料** | 简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID（三源合并、**抓取源分列可选**、**搜索用名字可临时改**），并列出该人物在本库的作品；**打开面板不联网**，写入默认「只填空白」、单卡可勾选覆盖、可回滚 |
 | **番号补全** | 按演员抓全部番号 → 与本地库比对找缺失 → 抓磁力列表（**按体积倒序**、**按番号并排分页**、带连通性诊断） |
 | **国产传媒** | 选库列条目 → 单个 / 勾选批量刮削 / 直接编辑元数据；四站并发按 **封面 → 标题 → 标签 → 日期** 合并 |
+| **预演（dry-run）** | 批量写入前先看「会改成什么」：逐字段新旧对照 + 会写哪些图片，**一个字节都不写** |
+| **写入历史与回滚** | 每次写条目元数据（刮削 / 国产传媒 / 手动编辑）前自动留快照，设置页可逐字段回滚（**图片不还原**） |
+| **媒体库体检** | 只读扫描：缺封面 / 缺简介 / 认不出番号 / 标题就是文件名 / 没年份 / 没标签，按问题分组行出 |
+| **诊断包** | 一键导出脱敏 zip（配置 / 历史 / 任务 / 缓存清单），发给作者排障**不怕泄漏密钥** |
 | **翻译** | 刮削时把非中文标题 / 简介翻成简体中文（OpenAI 兼容接口，可选） |
 | **媒体库统计** | 各库条目数、电影 / 剧集 / 集数 |
 
@@ -208,6 +212,67 @@ curl "http://127.0.0.1:8097/api/javbus/probe?q=三上悠亜"
 curl "http://127.0.0.1:8097/api/cn/search?q=91CM-014"
 ```
 
+### 预演（dry-run）
+
+批量写入前先看一眼「到底会改成什么」。媒体库页与国产传媒页的批量按钮旁边都有一个**预演**按钮：
+它跑完整条搜索 / 合并 / 翻译链路，把每个条目的**逐字段差集**（字段 / 现在的值 / 会改成）摊在抽屉里，
+然后**一个字节都不写** —— 不放写入按钮是刻意的，预演就是预演。
+
+服务端的 `dry_run` 其实一直存在（`ScrapeOptions.DryRun` / `CNOptions.DryRun`），但界面从来不传，
+等于白放了好几个版本 —— 「后端支持、界面没接」和「界面能改、请求里没带」是同一个病，
+所以 `check_frontend.py` 把整条链静态钉死：按钮存在 → 绑到 `dry=true` → 请求体带 `dry_run`。
+
+关键约束：**预演与真实写入必须共用同一份「算出要改什么」的逻辑**，否则会出现
+「预演说改 3 个字段、真写改了 5 个」—— 预览变成谎话，比没有预览更糟。
+MetaTube 侧抽出了 `imageSlotsToWrite()` / `thumbSource()`，国产传媒侧抽出了 `planCN()`，
+`previewPatch()` 只做比对与截断（简介动辄几千字，不截断一次批量就是几 MB）。
+`TestScrapeMovieDryRunMatchesRealWrite` / `TestCNPlanMatchesRealWrite` 会逐字段核对两边是否一致。
+
+### 写入历史与回滚
+
+这是 Emby 写入**不可逆**（`POST /Items/{id}` 整对象替换、服务端没有版本历史）的唯一后悔药。
+
+每次写条目元数据之前 —— 无论走的是 MetaTube 刮削、国产传媒刮削，还是手动编辑 ——
+都会先把「这次要写的字段」的**当前值**存进 `cache/sync_history.json`（上限 1000 条）。
+设置页的「条目写入历史」列出最近 50 条，每条可以**回滚**（要点两次确认，防误触）。
+演员资料那条路径用的是同一份历史文件，靠 `kind` 字段区分（老记录没有这个字段，一律按人物处理，
+升级后旧历史照常能用）。
+
+回滚到「原来没有这个值」时要注意：清空列表字段必须发 `[]` 而不是 `null` ——
+`UpdateItem` 会把 nil 跳过，字段根本没被还原，而界面显示「已回滚」。
+
+⚠️ **快照只覆盖元数据字段，图片不在范围内**。被一次刮削覆盖掉的旧海报回滚之后不会回来（Emby 也不留旧图），
+界面上和接口返回里都把这句话写出来了。
+
+### 媒体库体检
+
+只读扫描一个库，按问题类型把「还没被收拾过」的条目分组列出来：
+
+| 级别 | 问题 | 为什么算问题 |
+|---|---|---|
+| err | 认不出番号 | 刮削要靠番号去搜，这类条目自动刮削会直接跳过 |
+| err | 标题像文件名 | 标题还是 `xxx.mp4` / `hhd800.com@…` 这种下载站名字 |
+| warn | 缺海报 / 缺简介 / 缺年份 / 无标签 | 影响列表可读性与筛选，也基本等于「没刮过」 |
+
+每条能点开看细节（打开条目抽屉），但**没有「一键自动修复」** —— 扫描全程不发写请求。
+一个自动修复按钮配上一个不可逆的写接口，出事只是时间问题。
+
+「标题像文件名」的判据刻意保守（只认扩展名结尾与 `@下载站域名`）：宽了会把正经片名误报，
+而误报比漏报更烦人。另外 `hhd800.com@xxx.mp4` 这类水印**会被 `itemNumber` 当成番号**抽出来
+（它认「字母+数字」，于是得到 `hhd800`），所以这条不会同时落进「认不出番号」。
+
+### 诊断包
+
+设置页「诊断」里的一个下载链接，把排障要用的东西打成一个 zip：
+`info.txt`（版本 / Go / 平台 / 运行时长 / 路径）、`config.redacted.json`、`sync_history.json`
+（不含快照本体）、`jobs.json`（最近任务与日志）、`cache.json`（落盘文件清单）。
+
+它设计出来就是**要被贴到公开 issue 里**的，所以脱敏用的是**键名模式匹配**
+（`password` / `token` / `cookie` / `api_key` / `secret` / `hash`…）而不是列举字段名 ——
+以后新加的密钥字段会自动被覆盖。只有非空字符串才替换，并带上原值长度；
+URL 里的 `user:pass@` 也抹掉。`TestDiagBundleNoSentinelAnywhere` 会往配置里塞哨兵值，
+然后逐字节扫整个 zip 确认一个都没漏。
+
 ### 翻译（OpenAI）
 
 刮削时把**非中文**的标题、简介翻成简体中文（国产传媒 / MetaTube / javbus 路径都生效）。
@@ -262,9 +327,9 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 单文件 exe：`web/` 用 `go:embed`、图标走 PE 资源（`rsrc_windows_amd64.syso`），拷走 exe 就能跑。`-buildvcs=false` 让构建**可复现** —— 照这条命令重建与仓库里的 `EmbyMetaEditor.exe` 逐字节一致（不加则 Go 会嵌当前 commit 的 VCS 信息，体积与哈希都会变，属正常）。
 
 > 仓库里的 exe **跟着 main 走**，下载链 `releases/latest/download/` 只在**发版时**更新，两者不一定同步。
-> 当前对齐 **v1.5.0**：Release 与 main 的 md5 同为 `7c5affda825e67dcb9c1af849e4796a2`（9,288,704 字节）。
+> 当前对齐 **v1.6.0**：Release 与 main 的 md5 同为 `a61c76afd06ce3c92a96fd11d4cb35ec`（9,510,912 字节）。
 
-`go test ./...` 共 **239 个用例**，覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、**搜索用名字的回退与透传**（假源注入：查询词是手填名、`prof.Name` 仍是 Emby 名、手填名不进别名候选、抓取不落盘）、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、作品列表与库名映射、gfriends 两层 CDN 容错，以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
+`go test ./...` 共 **259 个用例**（通过 253，跳过 6），覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、**搜索用名字的回退与透传**（假源注入：查询词是手填名、`prof.Name` 仍是 Emby 名、手填名不进别名候选、抓取不落盘）、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、作品列表与库名映射、gfriends 两层 CDN 容错、**预演与真实写入逐字段一致**（`TestScrapeMovieDryRunMatchesRealWrite` / `TestCNPlanMatchesRealWrite`，含「预演一个字节都不写」）、**条目写入快照与逐字段回滚**（清空数组要发 `[]` 而不是 `null`，否则字段静默还原不了）、媒体库体检六条规则与分组、以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
 > mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径 404）、写操作只认全局路径、`POST /Items/{id}` 整对象替换、图片上传只收 base64 文本、列表不返回 `SortName`、`/Persons` 传非法 GUID 会 500。线上踩过的坑因此能在单测里复现。
 >
@@ -291,12 +356,15 @@ EmbyMetaEditor.exe -port 8097 -open=false &  # 起应用，后面几个脚本共
 | `verify_magnet_tabs.py` | 磁力**按番号分页**（标签切换、复制当前 / 全部、空态；每行是完整 `<a href>`、无 clipboard 时回退） | 起 exe + 无头 Edge |
 | `verify_clipboard_insecure.py` | **非安全上下文下的复制**（局域网地址 `isSecureContext === false`、回退生效、提示可见）—— Docker 的真实访问方式 | 起 exe（`-host 0.0.0.0`）+ 无头 Edge |
 | `verify_cn_view.py` | 国产传媒**选库 → 列表 → 单选/多选刮削 → 编辑元数据**（41 项，写路径全用假 `api()`） | 起 exe + 无头 Edge |
+| `verify_dry_run.py` | 批量刮削**预演真的不写**（29 项：预演按钮发出 `dry_run=true`、真写按钮发 `false`、抽屉写明「没有写入任何东西」、逐字段对照表与 `.same` 灰行、**抽屉里没有任何写入按钮**；国产传媒同一条链路） | 起 exe + 无头 Edge |
+| `verify_item_history.py` | 条目写入历史 / 回滚的界面（16 项：切到设置页自动拉取、列表四列、已回滚行置灰且**不再给回滚按钮**、回滚点两次才发 POST、请求体是 `{"id":…}`、写着「图片不可还原」） | 起 exe + 无头 Edge |
+| `verify_health_view.py` | 媒体库体检页（24 项：不选库只提示不发请求、请求带 parent/type/limit、汇总 chip 含截断计数、err 组排在前面、点明细行开详情、**页面里没有任何写入按钮**） | 起 exe + 无头 Edge |
 | `smoke_profile.py` | 演员资料只读冒烟（源清单与说明 / 只填空白 / 预览无副作用 / 错误路径）；`PROFILE_LIVE=1` 加重 真实写入 → 回滚 → 校验还原，以及勾选覆盖 → 回滚 → 还原 | 起 exe + 真实 config |
 | `verify_profile_view.py` | 资料面板**渲染与抓取时机**（打开不抓、源分列与两处同步、对照表勾选态、作品区块、覆盖按钮文案与配色、与 emby 对照）；**手动改「搜索用名字」**（拦下 `/api/profile/preview` 读请求体：带的是手填名、`name` 仍是 Emby 名、预览与写入两条路径都有；回显实际搜索名、重画不退回原名） | 起 exe + 无头 Edge |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
 | `extract_cn_fixtures.py` | 从 `cache/debug/` 的原始响应切测试夹具 | 落盘的原始 HTML |
 | `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest：多架构、`revision` = 本地 tag / HEAD、`source`、入口、非 root；**再解开层在二进制里实查内嵌前后端字面量**） | 能连 Docker Hub |
-| `EMBY_LIVE=1 go test -run TestLive` | 实机**写**路径，幂等不改数据 | 真实 config |
+| `EMBY_LIVE=1 go test -run TestLive` | 实机路径，幂等不改数据：头像**原样回传**后比对 md5、详情读回原样写回不丢字段、**写入 → 回滚后字段逐字节还原**（挑一个列表字段写真值再撤销，专门验「还原列表要发 `[]`」这条 mock 未必兜得住的行为） | 真实 config |
 
 几条环境约定：
 
@@ -325,14 +393,29 @@ docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/
 `.github/workflows/docker.yml` 在**打 `v*` tag 时**自动构建 `linux/amd64` + `linux/arm64` 并推送，也可在 Actions 手动触发（改完 Dockerfile 想先验一次）。首次需配两个 secret：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（权限 Read & Write）。
 
 ```bash
-git tag v1.5.0 && git push origin v1.5.0
+git tag v1.6.0 && git push origin v1.6.0
 ```
 
-镜像标签由 tag 推导：`v1.5.0` → `1.5.0` / `1.5` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
+镜像标签由 tag 推导：`v1.6.0` → `1.6.0` / `1.6` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
 
 > **Docker Hub 用户名 `aag111` ≠ GitHub 用户名 `huangmoling`**，别照搬。手动触发构建的 `revision` = 触发时的 `main` HEAD，**之后再往 main 提交镜像就落后了** —— `verify_docker_image.py` 会如实报 FAIL，重新触发即可。dispatch 镜像的版本标签是 `latest`，所以那个脚本改从**镜像对应提交的 `version.go`** 取版本串来比，而不是拿 `latest` 拼 `vlatest`。
 >
 > **改了 `web/` 下任何东西都必须重新打镜像** —— 前端是 `go:embed` 编进二进制的，源码修对不等于镜像修对。这是唯一一种「CI 全绿、镜像能拉、容器能起，但界面还是坏的」故障（v1.0.8 的镜像就这么带着 gfriends 弹窗的 bug 发出去过）。`verify_docker_image.py` 解开镜像层在二进制里实查内嵌前端，专门守这条。
+
+---
+
+## 持续集成
+
+`.github/workflows/test.yml` 每次推送与 PR 跑两件事：
+
+| job | 步骤 |
+|---|---|
+| `test` | `gofmt -l .`（有输出即失败）、`go vet ./...`、`go build`、`go test -count=1 -timeout 10m`、`check_frontend.py`、`sync_readme.py --check` |
+| `build-windows` | 交叉编译 Windows exe → 体积上限检查 → `grep -aq` 二进制里有没有「媒体库体检」「开始体检」「预演」这几个字面量 → 与仓库里那个**有意跟踪**的 exe 比对 → 传构建产物 |
+
+最后两步是这个 job 存在的理由：**源码改对了不等于 exe 改对了**。前端是 `go:embed` 进去的，`grep` 是唯一能证明「用户拿到的那个 exe 里真有新界面」的手段；字节比对则是提醒「改了 Go 源码要顺手重建仓库里的 exe」，否则下载链上的文件会和源码对不上。
+
+`sync_readme.py --check` 守的是另一类事故：README 里的版本号 / 体积 / md5 / 单测条数都是手抄的，md5 尤其容易过期，而它看起来最可信。
 
 ---
 
@@ -350,18 +433,23 @@ metatube.go          MetaTube v1 客户端
 gfriends.go          gfriends 索引下载 / 缓存 / 查询
 javbus.go            javbus 抓取、HTML 解析、连通性诊断
 cnmedia.go           国产传媒四站抓取、番号归一化、精确匹配合并
-scrape.go            刮削编排、番号比对
+scrape.go            刮削编排、番号比对（含 dry-run 分支与图片槽位计算）
+preview.go           预演差异：把 patch 拆成「字段 / 现在的值 / 会改成」的 []FieldChange
 actorprofile.go      演员资料来源适配、姓名匹配、字段合并
 profile.go           演员资料编排：只填空白 / 按勾选覆盖、搜索用名字、同步快照与回滚、别名记忆、作品列表
+itemsnapshot.go      条目写入快照与回滚（与演员资料共用 SyncStore，靠 Kind 区分）
 api_profile.go       演员资料路由（sources / preview / apply / batch / history / rollback / aliases / works）
+health.go            媒体库体检：六条规则、按问题分组（纯计算 + 只读路由，不做自动修复）
+diag.go              诊断包导出（zip）：按键名模式脱敏，URL 里的账号密码也抹掉
 jobs.go              后台任务与进度
 util.go              番号归一化、HTML 辅助、HTTP 客户端
 console_windows.go   Windows 控制台切 UTF-8
 web/                 前端（原生 JS，无构建步骤）
-tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 封面渲染 / 人物按库与类型筛 / 磁力分页 / 剪贴板回退 / 国产传媒 / 演员资料 / 夹具切取 / 实机冒烟
+tools/               验证脚本：模拟站点 / CDP 界面回归 / 前端自检 / 预演 / 条目回滚 / 体检 / 封面渲染 / 人物按库与类型筛 / 磁力分页 / 剪贴板回退 / 国产传媒 / 演员资料 / 夹具切取 / README 数字同步 / 实机冒烟
 app.ico              图标源文件
 Dockerfile           Docker 镜像定义（两阶段，静态链接）
 .github/workflows/docker.yml  打 tag 自动构建并推送 Docker Hub
+.github/workflows/test.yml    每次推送跑 gofmt / vet / 单测 / 前端自检 / README 数字，并构建 Windows exe
 ```
 
 ---
@@ -378,6 +466,9 @@ Dockerfile           Docker 镜像定义（两阶段，静态链接）
 - **人物列表的内容取决于你的 Emby 数据**：有些刮削器把片商 / 系列名写进条目的 `People`，于是它们以「演员」身份出现。类型下拉能滤掉「纯导演 / 编剧 / 制片」，**滤不掉被当成 `Actor` 的片商名**（全量 10561 vs 演员+导演 10559，只差 2 条）。
 - 「该人物在媒体库里的作品」按 Emby 侧的 `People` 关联查：同一人被写成不同名字、或条目没关联到这个人时不会出现。库名靠 `Library/VirtualFolders` 的盘路径匹配，挂载点变了就只显示不出库名（不影响列表）。一次最多 400 条。
 - **单卡勾选覆盖是唯一会改人物已有资料的入口**（批量永远只填空白）。写前自动留快照，可逐字段回滚，但快照上限 1000 条。
+- 条目的写入历史同样有上限（1000 条，超出丢最旧的），且**只还原元数据字段，不还原图片** —— 旧海报被覆盖后回滚也找不回来，界面上写明了这一点。
+- 体检只扫 `Movie` / `Episode`，一次最多 2000 条（默认 500）。它**只报告不修复**：Emby 的写入不可逆，自动「修复」在番号识别有瑕疵时会把好数据改坏。要改就按体检结果点开条目手动改，或者用预演先看清楚。
+- 诊断包（设置页可下载）**按键名模式脱敏**：名字里带 `password` / `token` / `cookie` / `api_key` / `secret` / `hash` 之类的值一律替换成 `<已脱敏：N 字符>`。但这终究是模式匹配 —— 往外发之前自己扫一眼 `config.redacted.json` 更稳妥。
 - `SortName` / `ForcedSortName` 在部分构建上设不进去，见下。
 - 访问认证**没有关闭开关**；真的不想要就别把端口开出去（默认只听 `127.0.0.1`）。
 
@@ -424,10 +515,13 @@ Dockerfile           Docker 镜像定义（两阶段，静态链接）
 | 资料抽屉里加了一组「选源」勾选框后，点「写入勾选字段」报「写入 0 个字段」，按钮上却写着「写入 3 个字段」 | 抽屉里有**两组** `input[data-key]`（选字段 / 选源），提交时 `$$('#pfBody input[data-key]:checked')` 把源名（`AvDataBank` 等）也当字段名发了上去 | 提交范围收到对照表：`$$('#pfBody .pf-tbl input[data-key]:checked')`。两组勾选框语义完全不同，别用同一个选择器一锅端 |
 | 界面回归脚本的断言详情里传了个 dict，脚本在最需要它的时候炸掉 | `check()` 是把详情**直接拼进输出字符串**的，一旦断言**失败**（正要看快照的时候）就抛 `TypeError`，堆栈把真正的失败信息顶掉。`verify_profile_view.py` 还有一处更早的：把 `Page.errors()` 当 dict 用（`e.get("method")`）—— 它返回的是**字符串**，所以那段代码只在没有任何报错时才不炸 | 详情统一 `str(detail)`，**逐条打印与结尾失败汇总两处都要**；错误分类改成按前缀判（`HTTP …` / `未捕获异常` / `console.error`） |
 | 复制磁力按钮在**本机 exe 正常，Docker 部署后点了没反应**（连失败提示都没有） | `navigator.clipboard` 只在**安全上下文**里存在：`http://127.0.0.1` 算，`http://192.168.x.x`（Docker / NAS / 局域网访问）**不算**。非安全上下文里它是 `undefined`，`writeText()` 直接抛 `TypeError`；这行异常写在 `onclick` 里会被浏览器吞掉，于是既不复制、也不报错。**本机测不出来**，必须走局域网地址 | 抽 `copyText()`：先特性检测（`try` 包住，同步抛也算），不可用就回退隐藏 `<textarea>` + `document.execCommand('copy')`（回退元素得 `position:fixed;width:1px;height:1px;opacity:0`，`display:none` 会让 `execCommand` 返回 false）；两条路都失败才弹**看得见**的错误提示。`verify_clipboard_insecure.py` 用局域网地址实测 |
-| 点磁力链接弹不出 javbus 的预览图（项目初期是好的），控制台也不报错 | 预览图是 **javbus 页面脚本注入到我们页面里的外部 `<img>`**，而 v1.0.8 把 CSP 收成 `img-src 'self' data: blob:` 之后被一律拦掉（`securitypolicyviolation` 实测：`img-src <- https://www.javbus.com/pics/sample/c421_1.jpg`）。拦得极安静 —— 图片只是不显示 | `img-src` 放开 `http: https:`（`connect-src` 仍 `'self'`，自家取图仍走 `/api/img` / `/api/emby/image`）。**别再把 CSP 当成「外链图片静默失效」的兜底守卫**，这条改由 `check_frontend.py` 静态扫描承担。另外这些 sample 图有 Referer 防盗链（无 Referer 或带我们 origin 都 403），只有用户自己浏览器里那套 javbus 工具带得上 |
+| 点磁力链接弹不出 javbus 的预览图，控制台也不报错 | 预览图是 javbus 页面脚本注入到我们页面里的**外部 `<img>`**，被 CSP 的 `img-src 'self' data: blob:` 一律拦掉，而且拦得极安静 —— 图片只是不显示。**v1.4.0 当时的修法是放开 `img-src` 到 `http: https:`，方向是错的**：这些图是**防盗链**的（同一张 `pics/sample/c421_1.jpg`：无 Referer → `HTTP 403 text/html`，带 javbus Referer → `HTTP 200 image/jpeg 4708 字节`），放宽 CSP 治不了 403 —— 放宽之后浏览器倒是肯发请求了，请求照样被对方拒绝。真正的代价是：`img-src` 一放开，**我们自己模板里的外链 `<img>` 也再没有浏览器兜底了**（追踪像素、外链图片旁路都回来了），而这一类错误在命令行上复现不出来（`curl` 服务端代取永远是 200） | **v1.6.0 把 `img-src` 收回 `'self' data: blob:`**，并改成**我们自己实现预览**：`/api/javbus/samples` 从详情页 `#sample-waterfall` 解析出样例图，前端一律经 `/api/img` 同源代取（`imageproxy.go` 会自动补上目标站 Referer），所以 403 问题从根上消失。`TestSecurityHeaders` 现在会**切出 `img-src` 指令**并断言它不含 `http:` / `https:` / `*`（以前只查了个 `img-src *`，等于没查）。另外 `util.go` 的 `pageMarkers` 加上了 `sample-waterfall` / `pics/sample/`，让诊断能区分「页面里没这个区块」和「解析器坏了」 |
 | 磁力地址在列表里显示成 `magnet:?xt=…` 后面接省略号，点它没反应、也触发不了预览 | 之前把地址当**纯文本**渲染，还 `slice(0,110) + '…'` 截断。磁力处理脚本按 `<a href>` 里**完整**的 URI 认链接 —— 截断后既不是合法磁力、也不在 DOM 的 href 里，依赖 href 的工具（javbus 预览、下载器接管）全失效 | 每行渲染成真正的 `<a href="完整地址">`，可见文本也是完整地址，长地址靠 CSS `text-overflow: ellipsis` 省略。`verify_magnet_tabs.py` 用一条 200+ 字符、带 `dn` 与两条 `tr` 的真实地址钉住「参数一个不少」 |
 | 人物类型筛到「仅演员」，列表里还是有片商名（如 `プレミアムビデオ`） | Emby 人物库里**连片商名都建成了 Person、类型就是 `Actor`**，按 `PersonTypes` 过滤不掉（实测全量 10561、演员 9497、导演 1189、演员+导演 10559，只差 2 条）。且返回条目的 `Type` 恒为 `Person`，「是演员还是导演」只在查询参数里 | 如实写明：类型筛选滤得掉「纯导演 / 编剧 / 制片」，滤不掉被当成演员的片商名。默认 `Actor,Director`，`?types=` 支持 `all` 与未知值兜底回默认；`TestPersonTypesParam` / `TestHandlePersonsPassesPersonTypes` 守着 |
+| 预演说「会改 3 个字段」，真写却改了 5 个 —— 预览成了谎话 | 预演和真实写入**各写一份「算出要改什么」的条件**，两边只靠人工保持一致。这类分叉不会报错，只会让预览慢慢变得不可信；而预览一旦不可信，用户就会开始凭感觉点批量 —— 偏偏 Emby 的写入是不可逆的 | 把「算出要改什么」抽成**两边共用**的一份东西：MetaTube 走 `imageSlotsToWrite()` + `thumbSource()`，国产传媒走 `planCN()`（从 `applyCN` 原样拆出的纯计算），`previewPatch()` 只负责把 patch 和现值比对成一张表。`TestScrapeMovieDryRunMatchesRealWrite` / `TestCNPlanMatchesRealWrite` 逐字段核对「预演算出的新值」与「真写进去的值」是否一致 |
 | 想模拟「浏览器没有 clipboard」测回退，`delete navigator.clipboard` 之后它**还在** | `clipboard` 是挂在 `Navigator.prototype` 上的 **getter**，`delete` 删实例属性对它无效；于是回退分支根本没被执行，测试却「通过」了 —— 假绿比红更危险 | 用 `Object.defineProperty(navigator, 'clipboard', {value: undefined, configurable: true})` 在实例上盖住。断言前先清掉已有 toast，否则会看到上一条残留的「已复制」而误判 |
+
+| 做「诊断包」给用户发给作者排障，怎么保证不泄漏密钥 | 逐个列举要脱敏的字段名是最自然的写法，但它是**漏一个就完**的：以后新加一个 `xxx_token`，脱敏代码不会报错、不会红，只会安静地把新密钥打进包里 —— 而用户拿到包的第一件事就是把它贴到公开 issue | 改成**按键名模式匹配**（`password` / `token` / `cookie` / `api_key` / `secret` / `hash`…），新字段自动被覆盖；只有**非空字符串**才替换（`password_generated` 这种值是 bool 的开关保留，否则看不出「密码还是自动生成的」），并在标记里带上原值长度（能看出「只填了 3 个字符」这类手抖）。URL 里的 `user:pass@` 也抹掉。`TestDiagBundleNoSentinelAnywhere` 往配置里塞哨兵值，然后**逐字节**扫整个 zip |
 
 ### 一个改不回来的字段
 

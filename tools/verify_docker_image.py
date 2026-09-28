@@ -8,10 +8,13 @@
 
 最后还会**解开 amd64 的层**，在二进制里实查内嵌的 `web/` 与后端字面量：这正是唯一能抓出
 「源码修了、镜像没重建」的断言 —— 静态检查（revision / 入口 / 非 root）在那种情况下全是绿的。
-`check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复，以及 v1.2.0 的资料面板
-「媒体库作品」区块和「将覆盖原值」文案；`check_embedded_backend` 查 gfriends CDN 模板、
-`GET /api/profile/works`、`/Library/VirtualFolders` 与磁力体积正则。
+`check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复、v1.2.0 的资料面板
+「媒体库作品」区块与「将覆盖原值」文案、v1.3.0 的选图尺寸小字与源分列、v1.4.0 的复制回退与
+人物类型下拉、v1.5.0 的搜索用名字，以及 v1.6.0 的预演抽屉 / 体检页 / 写入历史 / 诊断包四个面板；
+`check_embedded_backend` 查 gfriends CDN 模板、`GET /api/profile/works`、`/Library/VirtualFolders`、
+磁力体积正则、v1.6.0 的四条新路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`。
 **加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL）。
+断言里凡是「v1.4.0 做过、v1.6.0 又改回来」的地方，按**当前**形态写（CSP 那条就是例子）。
 
 用法： python tools/verify_docker_image.py [镜像名] [tag]
 默认： aag111/emby-meta-editor:latest
@@ -182,6 +185,19 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.6.0：预演抽屉、媒体库体检页、条目写入历史面板、诊断包入口。
+    # 这一版**四个前端面板**都是新增的，正好都是「源码改了、镜像没重建」的高危区。
+    for marker, what in [
+        ("showScrapePreview", "预演抽屉渲染（v1.6.0）"),
+        ("没有写入任何东西", "预演抽屉的「没写任何东西」承诺（v1.6.0）"),
+        ("媒体库体检", "媒体库体检导航与页面（v1.6.0）"),
+        ("hchip", "体检汇总 chip（v1.6.0）"),
+        ("条目写入历史", "条目写入历史面板（v1.6.0）"),
+        ("诊断包", "诊断包下载入口（v1.6.0）"),
+        ("已脱敏", "诊断包的脱敏文案（v1.6.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -213,15 +229,32 @@ def check_embedded_backend(blob):
         ("POST /api/img/info", "图片尺寸/体积探测路由（v1.3.0）"),
         ("字段最全：简介、出生日期", "资料源的界面说明文案（v1.3.0）"),
         ("读不到大小", "探测失败时的分档文案（v1.3.0）"),
-        # v1.4.0：人物类型参数归一化 + CSP 放开外部图片（磁力预览）+ 批量接口字段。
+        # v1.4.0：人物类型参数归一化 + 磁力预览。注意 **CSP 已经在 v1.6.0 收回来了**：
+        # v1.4.0 为了让 javbus 注入的外链预览图能显示，把 img-src 放开到 http:/https:，
+        # 那是错的方向 —— 实测那些图有 Referer 防盗链（带 → 200，不带 → 403），
+        # CSP 治不了它，正解是服务端代取（/api/img 注入 Referer）。
+        # 所以这里断言的是**收紧后**的形态，写成放开的那版会误判成 FAIL。
         ("Actor,Director", "人物类型默认值（v1.4.0）"),
         ("person_types", "批量接口的人物类型字段（v1.4.0）"),
-        ("img-src 'self' data: blob: http: https:", "CSP 放开 img-src 外部图片（v1.4.0）"),
+        ("img-src 'self' data: blob:; connect-src 'self'", "CSP img-src 收紧回同源（v1.6.0）"),
         # v1.5.0：手动搜索名。函数名也在产物里（Go 的符号表没被 -s 完全剥掉），
         # 所以能一起断言「effectiveSearchName 这条规则确实编进去了」。
         ("search_name", "抓取/写入入参里的搜索名（v1.5.0）"),
         ("effectiveSearchName", "搜索名回退规则（v1.5.0）"),
         ("fetchActorProfileWith", "可注入资料源的抓取入口（v1.5.0）"),
+        # v1.6.0：预演 / 条目快照回滚 / 体检 / 诊断包四条后端链路。
+        # 断言的都是**源码里真实存在的字面量**（加之前先在产物里 grep 过一遍）。
+        ("GET /api/items/history", "条目写入历史路由（v1.6.0）"),
+        ("POST /api/items/rollback", "条目回滚路由（v1.6.0）"),
+        ("GET /api/health", "媒体库体检路由（v1.6.0）"),
+        ("GET /api/diag/bundle", "诊断包路由（v1.6.0）"),
+        ("recordItemWrite", "写入前留快照（v1.6.0）"),
+        ("rollbackItemSync", "逐字段回滚条目（v1.6.0）"),
+        ("emptyForItemField", "按类型补空值（清空列表要发 []，v1.6.0）"),
+        ("imageSlotsToWrite", "图片槽位计算（预演与真写共用，v1.6.0）"),
+        ("planCN", "国产传媒的纯计算计划（预演与真写共用，v1.6.0）"),
+        ("previewPatch", "差异表构造（v1.6.0）"),
+        ("buildDiagZip", "诊断包打包（v1.6.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 

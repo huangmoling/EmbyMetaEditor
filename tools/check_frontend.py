@@ -104,9 +104,12 @@ def main():
     # --- 3. 接口路径 ---
     routes = set(re.findall(
         r'mux\.HandleFunc\("(?:GET|POST|PUT|DELETE) ([^"]+)"', api))
-    # 两种写法都要认：api('/api/x') 和直接拼字符串 '<img src="/api/x?u=...">'。
-    # 后者带查询串，所以先按引号取整段，再剥掉 ?query / #hash。
+    # 三种写法都要认：api('/api/x')、直接拼字符串 '<img src="/api/x?u=...">'，
+    # 以及 index.html 里的普通链接（比如诊断包那个 <a href="/api/diag/bundle">——
+    # 它走的是浏览器下载，不经过 fetch，但同样是前端在调后端）。
+    # 后面那种带查询串，所以先按引号取整段，再剥掉 ?query / #hash。
     raw_called = set(re.findall(r"""['"](/api/[^'"`\s]+)['"]""", js))
+    raw_called |= set(re.findall(r"""['"](/api/[^'"`\s]+)['"]""", html))
     called = {p.split("?")[0].split("#")[0] for p in raw_called}
     bad_paths = sorted(c for c in called if not route_matches(c, routes))
     print(f"      后端注册 {len(routes)} 条路由，前端调用 {len(called)} 个路径")
@@ -125,10 +128,11 @@ def main():
             print("      " + u)
 
     # --- 5. img 模板必须走同源地址 ---
-    # 服务端的 CSP 允许外部图片（img-src 里有 http/https，见 auth.go），但**我们自己
-    # 插进页面的图**仍然只能来自 imgSrc / embyImg / personImg：直连外链会带上 Referer、
-    # 泄露 Emby 地址，而且 javbus 这类图床有防盗链，直连 403、经服务端代取才 200。
-    # （CSP 那条只放给第三方塞进来的图，比如磁力预览工具。）
+    # CSP 的 img-src 是 `'self' data: blob:`（见 auth.go），所以**我们自己插进页面的
+    # 图**只能来自 imgSrc / embyImg / personImg。直连外链不止会被拦成破图，还会带上
+    # Referer 泄露 Emby 地址；而且 javbus 这类图床有防盗链 —— 直连 403、经服务端代取才 200。
+    # （v1.4.0 曾把 img-src 放开到 http/https 来「修」磁力预览，方向是错的：
+    #  防盗链不是 CSP 能解决的。现在预览走 /api/javbus/samples + /api/img，CSP 已收回。）
     proxies = ("imgSrc(", "embyImg(", "personImg(")
     # 允许先算好再引用（missCard 里的 `const src = imgSrc(m.cover)` 就是这种写法）。
     proxied_vars = set(re.findall(
@@ -197,6 +201,114 @@ def main():
         bad += 1
     else:
         print("PASS  搜索用名字进了请求体")
+
+    # --- 8. 预演（dry-run）的接线必须完整 ---
+    # 服务端的 dry-run 早就实现了，界面从来没人传 —— 这个功能白放了好几个版本。
+    # 这类「后端支持、界面没接」的失效和 §7 是同一个病：按钮点下去看着正常，
+    # 实际上正在**不可逆地写**（Emby 的 POST /Items/{id} 是整对象替换，没有历史版本）。
+    # 所以把整条链静态钉死：按钮存在 → 绑到 dry=true → 请求体带 dry_run。
+    dry_problems = []
+    for bid, fn in (("lbDry", "runLbBatch"), ("cnDry", "cnScrapeSelected")):
+        if f'id="{bid}"' not in html:
+            dry_problems.append(f"index.html 缺少预演按钮 #{bid}")
+    for fn in ("runLbBatch", "cnScrapeSelected"):
+        m = re.search(r"async function " + fn + r"\([\s\S]*?\n\}", code_only)
+        body = m.group(0) if m else ""
+        if not body:
+            dry_problems.append(f"app.js 找不到 {fn}")
+        elif "dry_run" not in body:
+            dry_problems.append(f"{fn} 的请求体没带 dry_run —— 预演按钮会真的写入")
+    if not re.search(r"runLbBatch\(true\)", code_only):
+        dry_problems.append("#lbDry 没有绑到 runLbBatch(true)")
+    if not re.search(r"cnScrapeSelected\(true\)", code_only):
+        dry_problems.append("#cnDry 没有绑到 cnScrapeSelected(true)")
+    if "function showScrapePreview" not in code_only:
+        dry_problems.append("app.js 缺少只读的 showScrapePreview（预演结果没法展示）")
+    print(f"      预演接线问题 {len(dry_problems)} 处")
+    if dry_problems:
+        for p in dry_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  预演按钮 → dry=true → dry_run 全线接通")
+
+    # --- 9. 条目写入历史（可回滚）必须真的被拉取 ---
+    # 服务端每次写条目之前都会存快照，但快照摆在那里没人看就等于没有。
+    # 这条防的是「面板写好了、切到设置页却没触发加载」—— 界面上一片空白，
+    # 用户会以为「这个功能没做」，而实际是入口没接上。
+    hist_problems = []
+    if 'id="stHistList"' not in html:
+        hist_problems.append("index.html 缺少历史面板 #stHistList")
+    if 'id="stHistReload"' not in html:
+        hist_problems.append("index.html 缺少「刷新」按钮 #stHistReload")
+    if "function loadItemHistory" not in code_only:
+        hist_problems.append("app.js 缺少 loadItemHistory")
+    if "loadItemHistory()" not in re.sub(r"function loadItemHistory", "", code_only):
+        hist_problems.append("loadItemHistory 没有被调用（切到设置页时面板是空的）")
+    if not re.search(r"\$\('#stHistReload'\)\.onclick", code_only):
+        hist_problems.append("#stHistReload 没有绑定刷新")
+    if "function rollbackItemWrite" not in code_only:
+        hist_problems.append("app.js 缺少 rollbackItemWrite")
+    # 回滚必须走二次确认：window.confirm() 在无头浏览器里会卡死，这个项目一律不用它
+    if "window.confirm" in code_only:
+        hist_problems.append("用了 window.confirm()（无头浏览器里会卡死，改成「点两次」）")
+    print(f"      条目历史接线问题 {len(hist_problems)} 处")
+    if hist_problems:
+        for p in hist_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  条目写入历史面板接通，回滚走二次确认")
+
+    # --- 10. 媒体库体检页的库下拉必须被填上 ---
+    # #hLib 是动态填充的：ensureLibs() 里少写一行，下拉就永远是「请选择媒体库」，
+    # 而页面本身看着完全正常 —— 用户只会觉得「体检按钮没反应」。
+    health_problems = []
+    if 'id="hLib"' not in html or 'id="hScan"' not in html:
+        health_problems.append("index.html 缺少 #hLib / #hScan")
+    if "health" not in re.findall(r"data-view=\"(\w+)\"", html):
+        health_problems.append("导航里没有 data-view=\"health\"")
+    if "'health'" not in code_only and '"health"' not in code_only:
+        health_problems.append("VIEW_TITLES / switchView 里没有 health")
+    if not re.search(r"\$\('#hLib'\)\.innerHTML", code_only):
+        health_problems.append("#hLib 没有被填充（ensureLibs 里漏了）")
+    if not re.search(r"\$\('#hScan'\)\.onclick", code_only):
+        health_problems.append("#hScan 没有绑定扫描")
+    if "function renderHealth" not in code_only:
+        health_problems.append("app.js 缺少 renderHealth")
+    print(f"      体检页接线问题 {len(health_problems)} 处")
+    if health_problems:
+        for p in health_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  体检页：导航 / 库下拉 / 扫描按钮 / 渲染 全线接通")
+
+    # --- 11. 诊断包入口必须写着「已脱敏」---
+    # 这个包是**要被贴到公开 issue 里**的。界面上如果只说「下载诊断包」，
+    # 用户不知道里面有配置，就不敢点；反过来说，如果哪天脱敏被去掉而文案没改，
+    # 用户会以为它是安全的。所以「入口存在」和「文案承诺脱敏」一起守。
+    diag_problems = []
+    if 'id="stDiag"' not in html:
+        diag_problems.append("index.html 缺少诊断包入口 #stDiag")
+    if "api/diag/bundle" not in html:
+        diag_problems.append("诊断包入口没指向 /api/diag/bundle")
+    a_tag = re.search(r"<a[^>]*id=\"stDiag\"[^>]*>", html or "")
+    if not a_tag or "download" not in a_tag.group(0):
+        diag_problems.append("#stDiag 没有 download 属性（会变成在页面里打开 zip）")
+    diag_card = re.search(r"<h3>诊断</h3>[\s\S]{0,600}?</div>\s*</div>", html or "")
+    card_txt = diag_card.group(0) if diag_card else ""
+    if "脱敏" not in card_txt:
+        diag_problems.append("诊断卡片上没有说明「密钥已脱敏」")
+    if "不含" not in card_txt:
+        diag_problems.append("诊断卡片上没有说明包里不含什么（用户才敢贴出去）")
+    print(f"      诊断包接线问题 {len(diag_problems)} 处")
+    if diag_problems:
+        for p in diag_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  诊断包入口接通，且明确承诺脱敏")
 
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0

@@ -757,6 +757,13 @@ type CNScrape struct {
 	AppliedTo []string     `json:"applied_fields"`
 	Matched   []string     `json:"matched"`
 	Sites     []CNSiteHits `json:"sites"`
+	// Changes / WillImages 只在 DryRun 时有值：逐字段的「现值 → 新值」，
+	// 以及会尝试写入的图片。注意 AppliedTo 在预演时**保持为空** ——
+	// 它表示「真的写进去了什么」，预演什么也没写。
+	Changes    []FieldChange `json:"changes,omitempty"`
+	WillImages []string      `json:"will_images,omitempty"`
+	// SnapshotID 是写入前那份快照的记录 ID（可回滚）。预演不写，所以为空。
+	SnapshotID string `json:"snapshot_id,omitempty"`
 }
 
 // CNOptions 是一次国产传媒刮削的选项。
@@ -828,15 +835,33 @@ func (a *App) scrapeCNWith(ctx context.Context, cn *CNMedia, e *Emby, itemID, nu
 		return res, nil
 	}
 	if opts.DryRun {
-		res.Message = "试运行：命中 " + itoa(len(matched)) + " 个站点，未写入"
+		// 预演：拿**同一份** planCN 算出会改什么，然后把计划摊开给用户看。
+		pl := a.planCN(item, pick, opts)
+		res.Changes = previewPatch(item, pl.Patch)
+		res.WillImages = pl.Images
+		will := changedFields(res.Changes)
+		res.Message = "试运行：命中 " + itoa(len(matched)) + " 个站点"
+		if len(will) > 0 {
+			res.Message += "，会改动 " + itoa(len(will)) + " 个字段"
+		} else {
+			res.Message += "，没有字段需要改动"
+		}
+		if len(pl.Images) > 0 {
+			res.Message += "、" + itoa(len(pl.Images)) + " 张图"
+		}
+		res.Message += "，未写入"
+		if pl.Note != "" {
+			res.Message += "（" + pl.Note + "）"
+		}
 		return res, nil
 	}
 
-	applied, note, err := a.applyCN(ctx, e, item, pick, opts)
+	applied, note, recordID, err := a.applyCN(ctx, e, item, pick, opts)
 	if err != nil {
 		return res, err
 	}
 	res.AppliedTo = applied
+	res.SnapshotID = recordID
 	res.Applied = len(applied) > 0
 	res.Skipped = len(applied) == 0
 	if res.Skipped {
@@ -850,22 +875,31 @@ func (a *App) scrapeCNWith(ctx context.Context, cn *CNMedia, e *Emby, itemID, nu
 	return res, nil
 }
 
-// applyCN 把合并出来的字段写进 Emby。
-func (a *App) applyCN(ctx context.Context, e *Emby, item Item, p *CNPicked, opts CNOptions) ([]string, string, error) {
-	itemID, _ := item["Id"].(string)
-	var applied, notes []string
-	patch := map[string]any{}
+// cnPlan 是一次国产传媒写入的「计划」：要写什么、动哪些图片、有什么提示。
+//
+// applyCN（真写）与 dry-run（预演）**共用**它 —— 预演必须和真实写入走同一份逻辑，
+// 否则「预演说改 3 个字段、真写改了 5 个」，预览就成了谎话。
+type cnPlan struct {
+	Patch   map[string]any // 要发给 Emby 的 patch
+	Applied []string       // 会写入的文本类字段（人类可读：标题 / 日期）
+	Images  []string       // 会尝试写入的图片（封面 / 缩略图）
+	Note    string         // 跳过的原因之类的提示
+}
+
+// planCN 只算不写。
+func (a *App) planCN(item Item, p *CNPicked, opts CNOptions) cnPlan {
+	pl := cnPlan{Patch: map[string]any{}}
 
 	if opts.Fields["title"] && p.Title != "" {
 		cur, _ := item["Name"].(string)
 		if opts.OverwriteTitle || cnShouldSetTitle(cur, cnItemNumber(item)) {
-			patch["Name"] = p.Title
+			pl.Patch["Name"] = p.Title
 			if p.OrigTitle != "" {
-				patch["OriginalTitle"] = p.OrigTitle
+				pl.Patch["OriginalTitle"] = p.OrigTitle
 			}
-			applied = append(applied, "标题")
+			pl.Applied = append(pl.Applied, "标题")
 		} else {
-			notes = append(notes, "标题已存在且不像文件名，跳过")
+			pl.Note = appendScrapeNote(pl.Note, "标题已存在且不像文件名，跳过")
 		}
 	}
 
@@ -878,49 +912,68 @@ func (a *App) applyCN(ctx context.Context, e *Emby, item Item, p *CNPicked, opts
 		tags = append(tags, p.Tags...)
 	}
 	if len(tags) > 0 {
-		patch["Tags"] = dedupeStrings(tags)
+		pl.Patch["Tags"] = dedupeStrings(tags)
 	}
 
 	if opts.Fields["date"] && p.Date != "" {
 		if d := normalizeDate(p.Date); d != "" {
-			patch["PremiereDate"] = d
-			patch["ProductionYear"] = atoiSafe(d[:4])
-			applied = append(applied, "日期")
-		}
-	}
-
-	if len(patch) > 0 {
-		if err := e.UpdateItem(ctx, itemID, patch); err != nil {
-			return applied, "", fmt.Errorf("写入元数据失败：%w", err)
+			pl.Patch["PremiereDate"] = d
+			pl.Patch["ProductionYear"] = atoiSafe(d[:4])
+			pl.Applied = append(pl.Applied, "日期")
 		}
 	}
 
 	if opts.Fields["cover"] && p.Cover != "" {
 		if opts.OverwriteImages || !imageTagExists(item, "Primary") {
-			data, ct, err := fetchImageBytes(ctx, e.HTTP, p.Cover, "")
-			switch {
-			case err != nil:
-				notes = append(notes, "封面下载失败："+err.Error())
-			case len(data) == 0:
-				notes = append(notes, "封面响应为空")
-			default:
-				if err := e.UploadImage(ctx, itemID, "Primary", -1, data, ct); err != nil {
-					notes = append(notes, "封面上传失败："+err.Error())
-				} else {
-					applied = append(applied, "封面")
-					// 缩略图（Thumb）复用同一份封面字节：Emby 列表 / 横版视图也有图。
-					if err := e.UploadImage(ctx, itemID, "Thumb", -1, data, ct); err != nil {
-						notes = append(notes, "缩略图上传失败："+err.Error())
-					} else {
-						applied = append(applied, "缩略图")
-					}
-				}
-			}
+			// 缩略图（Thumb）复用同一份封面字节：Emby 列表 / 横版视图也有图。
+			pl.Images = append(pl.Images, "封面", "缩略图")
 		} else {
-			notes = append(notes, "已有封面，跳过（可勾选「覆盖已有封面」）")
+			pl.Note = appendScrapeNote(pl.Note, "已有封面，跳过（可勾选「覆盖已有封面」）")
 		}
 	}
-	return applied, strings.Join(notes, "；"), nil
+	return pl
+}
+
+// applyCN 把合并出来的字段写进 Emby。
+//
+// 返回的 recordID 是写入前那份快照的 ID（空串 = 没留快照 / 没有字段要写），
+// 交给 `/api/items/rollback` 就能撤销这次写入。
+func (a *App) applyCN(ctx context.Context, e *Emby, item Item, p *CNPicked, opts CNOptions) ([]string, string, string, error) {
+	itemID, _ := item["Id"].(string)
+	pl := a.planCN(item, p, opts)
+	applied := append([]string{}, pl.Applied...)
+	note := pl.Note
+	recordID := ""
+
+	if len(pl.Patch) > 0 {
+		// 先留快照再写：顺序反了快照里存的就是新值。
+		recordID = a.recordItemWrite(item, pl.Patch, "国产传媒刮削")
+		if err := e.UpdateItem(ctx, itemID, pl.Patch); err != nil {
+			return applied, "", recordID, fmt.Errorf("写入元数据失败：%w", err)
+		}
+	}
+
+	if len(pl.Images) > 0 {
+		data, ct, err := fetchImageBytes(ctx, e.HTTP, p.Cover, "")
+		switch {
+		case err != nil:
+			note = appendScrapeNote(note, "封面下载失败："+err.Error())
+		case len(data) == 0:
+			note = appendScrapeNote(note, "封面响应为空")
+		default:
+			if err := e.UploadImage(ctx, itemID, "Primary", -1, data, ct); err != nil {
+				note = appendScrapeNote(note, "封面上传失败："+err.Error())
+			} else {
+				applied = append(applied, "封面")
+				if err := e.UploadImage(ctx, itemID, "Thumb", -1, data, ct); err != nil {
+					note = appendScrapeNote(note, "缩略图上传失败："+err.Error())
+				} else {
+					applied = append(applied, "缩略图")
+				}
+			}
+		}
+	}
+	return applied, note, recordID, nil
 }
 
 // cnShouldSetTitle 判断是否该用站点标题覆盖现有标题。

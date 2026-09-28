@@ -125,6 +125,15 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("POST /api/items/update", a.handleItemUpdate)
 	mux.HandleFunc("POST /api/items/scrape", a.handleScrapeItem)
 	mux.HandleFunc("POST /api/items/scrape-batch", a.handleScrapeBatch)
+	// 条目写入历史 / 回滚。写入前的快照存在 cache/sync_history.json（与人物共用，
+	// 用 Kind 区分），所以「刮错了想撤销」有地方可退。
+	mux.HandleFunc("GET /api/items/history", a.handleItemsHistory)
+	mux.HandleFunc("POST /api/items/rollback", a.handleItemsRollback)
+	// 媒体库体检：只读扫描，按问题类型分组。扫描不发任何写请求。
+	mux.HandleFunc("GET /api/health", a.handleHealth)
+	// 诊断包：把配置（脱敏）、写入历史、任务日志、缓存清单打成一个 zip。
+	// 用户排障时贴这个就够了，不必手工去翻 cache/ 和 config.json。
+	mux.HandleFunc("GET /api/diag/bundle", a.handleDiagBundle)
 
 	// ---- 演员 ----
 	mux.HandleFunc("GET /api/persons", a.handlePersons)
@@ -155,6 +164,7 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("POST /api/javbus/scan", a.handleJavbusScan)
 	mux.HandleFunc("POST /api/javbus/magnets", a.handleJavbusMagnets)
 	mux.HandleFunc("GET /api/javbus/probe", a.handleJavbusProbe)
+	mux.HandleFunc("GET /api/javbus/samples", a.handleJavbusSamples)
 
 	// ---- 国产传媒专项刮削 ----
 	mux.HandleFunc("GET /api/cn/sites", a.handleCNSites)
@@ -657,18 +667,25 @@ func (a *App) handleItemUpdate(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	if err := NewEmby(a.store.Get()).UpdateItem(ctx, id, patch); err != nil {
+	e := NewEmby(a.store.Get())
+	// 先读当前值留快照（可回滚），再写。顺序不能反 —— 反过来快照里就是新值了。
+	snapshotID := a.recordItemWriteByID(ctx, e, id, patch, "手动编辑")
+	if err := e.UpdateItem(ctx, id, patch); err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
 	// 回读一次，让前端拿到服务端归一化之后的真实值（顺带带回算好的番号）。
-	it, err := NewEmby(a.store.Get()).ItemDetail(ctx, id)
+	it, err := e.ItemDetail(ctx, id)
 	if err != nil {
-		writeOK(w, map[string]any{"id": id, "updated": sortedKeys(patch)})
+		writeOK(w, map[string]any{
+			"id": id, "updated": sortedKeys(patch), "snapshot_id": snapshotID,
+		})
 		return
 	}
 	it["Number"] = itemNumber(it)
-	writeOK(w, map[string]any{"id": id, "updated": sortedKeys(patch), "item": it})
+	writeOK(w, map[string]any{
+		"id": id, "updated": sortedKeys(patch), "item": it, "snapshot_id": snapshotID,
+	})
 }
 
 // isDateOnly 判断是不是严格的 YYYY-MM-DD（normalizeDate 只检查了短横线的位置，
@@ -706,6 +723,7 @@ func (a *App) handleScrapeItem(w http.ResponseWriter, r *http.Request) {
 		MovieID         string `json:"movie_id"`
 		OverwriteImages bool   `json:"overwrite_images"`
 		Refresh         bool   `json:"refresh"`
+		DryRun          bool   `json:"dry_run"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -722,6 +740,7 @@ func (a *App) handleScrapeItem(w http.ResponseWriter, r *http.Request) {
 		MovieID:         in.MovieID,
 		OverwriteImages: in.OverwriteImages,
 		Refresh:         in.Refresh,
+		DryRun:          in.DryRun,
 	})
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
@@ -731,6 +750,9 @@ func (a *App) handleScrapeItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleScrapeBatch 批量刮削影片，异步执行并返回任务 id。
+//
+// 带 `dry_run` 时走**预演**：只搜索与解析，算出每条会改成什么，一个字节都不写。
+// 预演结果放进 job.Result，界面用它渲染「会改成什么」的表格。
 func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		IDs             []string `json:"ids"`
@@ -740,6 +762,7 @@ func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 		Provider        string   `json:"provider"`
 		OverwriteImages bool     `json:"overwrite_images"`
 		Refresh         bool     `json:"refresh"`
+		DryRun          bool     `json:"dry_run"`
 	}
 	if err := decodeBody(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -783,11 +806,20 @@ func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, jobCtx := a.jobs.New("movie-scrape", fmt.Sprintf("批量刮削影片（%d 个）", len(targets)), len(targets))
+	jobTitle := fmt.Sprintf("批量刮削影片（%d 个）", len(targets))
+	if in.DryRun {
+		jobTitle = fmt.Sprintf("预演批量刮削（%d 个，不会写入）", len(targets))
+	}
+	job, jobCtx := a.jobs.New("movie-scrape", jobTitle, len(targets))
 	job.addLog("info", fmt.Sprintf("开始刮削 %d 个条目", len(targets)))
+	if in.DryRun {
+		job.addLog("warn", "试运行：只搜索并展示会改成什么，不会写入 Emby、也不会下载图片")
+	}
 	go func() {
 		sem := make(chan struct{}, maxInt(1, cfg.Concurrency))
 		var wg sync.WaitGroup
+		var rmu sync.Mutex
+		results := make([]*ScrapeResult, 0, len(targets))
 		for _, id := range targets {
 			if jobCtx.Err() != nil {
 				break
@@ -803,6 +835,7 @@ func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 					Provider:        in.Provider,
 					OverwriteImages: in.OverwriteImages,
 					Refresh:         in.Refresh,
+					DryRun:          in.DryRun,
 				})
 				job.mu.Lock()
 				if err != nil {
@@ -811,16 +844,26 @@ func (a *App) handleScrapeBatch(w http.ResponseWriter, r *http.Request) {
 					job.addLog("error", fmt.Sprintf("%s：%v", id, err))
 					return
 				}
+				if in.DryRun {
+					rmu.Lock()
+					results = append(results, res)
+					rmu.Unlock()
+				}
 				if res.Skipped {
 					job.Skipped++
 				} else {
 					job.Done++
 				}
 				job.mu.Unlock()
-				job.addLog("ok", fmt.Sprintf("%s → %s（%s）", res.ItemName, res.Title, res.Number))
+				job.addLog("ok", fmt.Sprintf("%s → %s（%s）%s", res.ItemName, res.Title, res.Number, res.Message))
 			}(id)
 		}
 		wg.Wait()
+		if in.DryRun {
+			job.mu.Lock()
+			job.Result = results
+			job.mu.Unlock()
+		}
 		if jobCtx.Err() != nil {
 			job.setStatus("canceled")
 		} else {
@@ -1238,6 +1281,36 @@ func (a *App) handleJavbusProbe(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, jb.Probe(ctx, keyword))
 }
 
+// handleJavbusSamples 返回某个番号的样例图（缩略图），给「磁力预览」用。
+//
+// 为什么不让前端直接 `<img src="https://www.javbus.com/pics/sample/...">`：
+// 该站有 Referer 防盗链 —— 实测同一张图，带 javbus 的 Referer 是 200，
+// 不带（浏览器从本机页面直连就是这个情况）是 403。所以前端拿到地址后必须走
+// `/api/img` 代取：那个代理在白名单命中时会用「目标自己的 origin」当 Referer。
+//
+// 全程只读：不碰 Emby，也不写任何数据。
+func (a *App) handleJavbusSamples(w http.ResponseWriter, r *http.Request) {
+	number := strings.TrimSpace(r.URL.Query().Get("number"))
+	if number == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("缺少番号参数 number"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	mv, err := NewJavBus(a.store.Get()).MovieSamples(ctx, number)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeOK(w, map[string]any{
+		"number":  mv.Number,
+		"title":   mv.Title,
+		"cover":   mv.Cover,
+		"url":     mv.URL,
+		"samples": mv.Samples,
+	})
+}
+
 // ---------- 国产传媒专项刮削 ----------
 
 // handleCNSites 返回站点列表（含当前配置的地址），前端用来展示与排障。
@@ -1273,7 +1346,7 @@ func (a *App) handleCNSearch(w http.ResponseWriter, r *http.Request) {
 // handleCNScrape 对单个条目刮削一次并写入。
 //
 // 字段固定全开（封面/标题/标签/日期），界面上不再给勾选；
-// `dry_run` 只为只读的冒烟脚本保留，界面不传，默认即写入。
+// `dry_run` 为 true 时只搜索合并、算出差集并返回，**不写 Emby**。
 func (a *App) handleCNScrape(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		ID              string   `json:"id"`
@@ -1323,8 +1396,9 @@ func (a *App) handleCNScrapeBatch(w http.ResponseWriter, r *http.Request) {
 		Fields           []string `json:"fields"`
 		OverwriteImages  bool     `json:"overwrite_images"`
 		OverwriteTitle   bool     `json:"overwrite_title"`
-		// DryRun 界面已不再暴露（国产传媒页直接写入），保留是为了让
-		// 只读的冒烟脚本还能安全地跑一遍完整链路。
+		// DryRun 为 true 时只预演：勾选的条目照常搜索合并，逐条算出
+		// 「会改成什么」汇总进 job.Result，**一个字节都不写**。界面上的
+		// 「预演」按钮走的就是这条路径。
 		DryRun bool `json:"dry_run"`
 	}
 	if err := decodeBody(r, &in); err != nil {

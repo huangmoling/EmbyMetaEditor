@@ -81,15 +81,22 @@ type JBMagnet struct {
 
 // JBMovie 是 javbus 上的一部作品。
 type JBMovie struct {
-	Number  string     `json:"number"`
-	Title   string     `json:"title"`
-	Date    string     `json:"date"`
-	Cover   string     `json:"cover"`
-	URL     string     `json:"url"`
-	Runtime string     `json:"runtime"`
-	Studio  string     `json:"studio"`
-	Actors  []string   `json:"actors"`
-	Genres  []string   `json:"genres"`
+	Number  string   `json:"number"`
+	Title   string   `json:"title"`
+	Date    string   `json:"date"`
+	Cover   string   `json:"cover"`
+	URL     string   `json:"url"`
+	Runtime string   `json:"runtime"`
+	Studio  string   `json:"studio"`
+	Actors  []string `json:"actors"`
+	Genres  []string `json:"genres"`
+	// Samples 是详情页 `#sample-waterfall` 里的样例图（缩略图，绝对地址）。
+	//
+	// 页面上每张样例图有两个地址：外层 <a href> 指向 dmm 的原图，内层
+	// <img src> 是 javbus 自己的 `/pics/sample/xxx_N.jpg`。这里**只收后者** ——
+	// dmm 不在我们的图片代理白名单里，收了也取不到；javbus 的缩略图能走
+	// `/api/img` 代取（白名单里有 javbus.com，服务端会自动补 Referer）。
+	Samples []string   `json:"samples,omitempty"`
 	Magnets []JBMagnet `json:"magnets,omitempty"`
 }
 
@@ -388,99 +395,9 @@ var (
 
 // MovieDetail 抓取作品详情页。
 func (j *JavBus) MovieDetail(ctx context.Context, numberOrURL string) (*JBMovie, error) {
-	full := numberOrURL
-	if !strings.HasPrefix(full, "http") {
-		if canonNumber(numberOrURL) == "" && !strings.Contains(numberOrURL, "/") {
-			return nil, fmt.Errorf("无法识别的番号：%s", numberOrURL)
-		}
-		full = j.BaseURL + "/" + strings.TrimLeft(numberOrURL, "/")
-	}
-	data, err := j.get(ctx, full, map[string]string{"Referer": j.BaseURL + "/"})
+	full, data, mv, err := j.detailPage(ctx, numberOrURL)
 	if err != nil {
 		return nil, err
-	}
-	mv := &JBMovie{URL: full}
-	doc, perr := html.Parse(bytes.NewReader(data))
-	if perr == nil {
-		// 标题：优先 <h3>，其次 <title>
-		if h3 := htmlFind(doc, func(n *html.Node) bool { return isElem(n, "h3") }); h3 != nil {
-			mv.Title = strings.TrimSpace(htmlText(h3))
-		}
-		if mv.Title == "" {
-			if t := htmlFind(doc, func(n *html.Node) bool { return isElem(n, "title") }); t != nil {
-				mv.Title = strings.TrimSpace(htmlText(t))
-				mv.Title = strings.TrimSuffix(mv.Title, " - JavBus")
-			}
-		}
-		// 封面
-		if a := htmlFind(doc, func(n *html.Node) bool {
-			return isElem(n, "a") && htmlHasClass(n, "bigImage")
-		}); a != nil {
-			h := htmlAttr(a, "href")
-			if !strings.HasPrefix(h, "http") && h != "" {
-				h = j.BaseURL + "/" + strings.TrimLeft(h, "/")
-			}
-			mv.Cover = h
-		}
-		// info 区字段
-		for _, p := range htmlFindAll(doc, func(n *html.Node) bool {
-			return isElem(n, "p") && htmlFind(n, func(c *html.Node) bool {
-				return isElem(c, "span") && strings.Contains(htmlClass(c), "header")
-			}) != nil
-		}) {
-			label := ""
-			if sp := htmlFind(p, func(n *html.Node) bool {
-				return isElem(n, "span") && strings.Contains(htmlClass(n), "header")
-			}); sp != nil {
-				label = strings.Trim(strings.TrimSpace(htmlText(sp)), ":：")
-			}
-			// 段落文本形如「品番: SSIS-001」，取冒号之后的部分作为值
-			rowText := strings.TrimSpace(htmlText(p))
-			val := rowText
-			if i := strings.IndexAny(rowText, ":："); i >= 0 {
-				val = strings.TrimSpace(rowText[i+1:])
-			}
-			switch label {
-			case "品番", "番號", "番号", "識別碼", "识别码":
-				if c := canonNumber(val); c != "" {
-					mv.Number = c
-				}
-			case "發行日期", "发行日期", "配信開始日":
-				if d := reDate.FindString(val); d != "" {
-					mv.Date = d
-				}
-			case "長度", "长度", "収録時間":
-				mv.Runtime = val
-			case "製作商", "制作商", "メーカー":
-				mv.Studio = val
-			case "演員", "演员", "出演者":
-				for _, a := range htmlFindAll(p, func(n *html.Node) bool { return isElem(n, "a") }) {
-					if nm := strings.TrimSpace(htmlText(a)); nm != "" {
-						mv.Actors = append(mv.Actors, nm)
-					}
-				}
-			case "類別", "类别", "ジャンル":
-				for _, a := range htmlFindAll(p, func(n *html.Node) bool { return isElem(n, "a") }) {
-					if g := strings.TrimSpace(htmlText(a)); g != "" {
-						mv.Genres = append(mv.Genres, g)
-					}
-				}
-			}
-		}
-		if mv.Cover == "" {
-			if img := htmlFind(doc, func(n *html.Node) bool {
-				return isElem(n, "img") && strings.Contains(htmlAttr(n, "src"), "/pics/")
-			}); img != nil {
-				src := htmlAttr(img, "src")
-				if !strings.HasPrefix(src, "http") {
-					src = j.BaseURL + "/" + strings.TrimLeft(src, "/")
-				}
-				mv.Cover = src
-			}
-		}
-	}
-	if mv.Number == "" {
-		mv.Number = canonNumber(numberOrURL)
 	}
 	// 磁力：需要 gid / img / uc 三个参数
 	src := string(data)
@@ -496,6 +413,145 @@ func (j *JavBus) MovieDetail(ctx context.Context, numberOrURL string) (*JBMovie,
 		}
 	}
 	return mv, nil
+}
+
+// MovieSamples 只要样例图，不抓磁力。
+//
+// 单独开一个入口是因为「磁力预览」是纯展示：它不该顺带发一次磁力 ajax ——
+// javbus 有请求间隔限速（默认 1.5s），白等一秒去取用户没要看的东西不划算。
+func (j *JavBus) MovieSamples(ctx context.Context, numberOrURL string) (*JBMovie, error) {
+	_, _, mv, err := j.detailPage(ctx, numberOrURL)
+	return mv, err
+}
+
+// detailPage 抓一页详情并解析成 JBMovie（不含磁力）。
+func (j *JavBus) detailPage(ctx context.Context, numberOrURL string) (string, []byte, *JBMovie, error) {
+	full := numberOrURL
+	if !strings.HasPrefix(full, "http") {
+		if canonNumber(numberOrURL) == "" && !strings.Contains(numberOrURL, "/") {
+			return "", nil, nil, fmt.Errorf("无法识别的番号：%s", numberOrURL)
+		}
+		full = j.BaseURL + "/" + strings.TrimLeft(numberOrURL, "/")
+	}
+	data, err := j.get(ctx, full, map[string]string{"Referer": j.BaseURL + "/"})
+	if err != nil {
+		return full, nil, nil, err
+	}
+	return full, data, j.parseMovieDoc(full, numberOrURL, data), nil
+}
+
+// parseMovieDoc 从详情页 HTML 里抠出影片字段。
+//
+// 抽成独立函数是为了让解析逻辑能被**字节级真实夹具**直接测到：
+// 之前这段只存在于 MovieDetail 内部，测试只能手写一段「结构相似」的 HTML
+// 再把解析逻辑抄一遍（见 javbus_detail_test.go 早先的写法），等于测了个寂寞 ——
+// 线上结构一变，抄出来的那套照样过。
+func (j *JavBus) parseMovieDoc(full, raw string, data []byte) *JBMovie {
+	mv := &JBMovie{URL: full}
+	doc, perr := html.Parse(bytes.NewReader(data))
+	if perr != nil {
+		return mv
+	}
+	// 标题：优先 <h3>，其次 <title>
+	if h3 := htmlFind(doc, func(n *html.Node) bool { return isElem(n, "h3") }); h3 != nil {
+		mv.Title = strings.TrimSpace(htmlText(h3))
+	}
+	if mv.Title == "" {
+		if t := htmlFind(doc, func(n *html.Node) bool { return isElem(n, "title") }); t != nil {
+			mv.Title = strings.TrimSpace(htmlText(t))
+			mv.Title = strings.TrimSuffix(mv.Title, " - JavBus")
+		}
+	}
+	// 封面
+	if a := htmlFind(doc, func(n *html.Node) bool {
+		return isElem(n, "a") && htmlHasClass(n, "bigImage")
+	}); a != nil {
+		h := htmlAttr(a, "href")
+		if !strings.HasPrefix(h, "http") && h != "" {
+			h = j.BaseURL + "/" + strings.TrimLeft(h, "/")
+		}
+		mv.Cover = h
+	}
+	// 样例图：`/pics/sample/xxx_N.jpg` 是 javbus 独有的路径，直接按它找，
+	// 不依赖外层容器的 id/class（站点改版常改容器名，图片路径很少变）。
+	// 页面里是相对路径，补成绝对地址后才能交给服务端代取。
+	seen := map[string]bool{}
+	for _, img := range htmlFindAll(doc, func(n *html.Node) bool {
+		return isElem(n, "img") && strings.Contains(htmlAttr(n, "src"), "/pics/sample/")
+	}) {
+		src := strings.TrimSpace(htmlAttr(img, "src"))
+		if src == "" {
+			continue
+		}
+		if !strings.HasPrefix(src, "http") {
+			src = j.BaseURL + "/" + strings.TrimLeft(src, "/")
+		}
+		if seen[src] {
+			continue
+		}
+		seen[src] = true
+		mv.Samples = append(mv.Samples, src)
+	}
+	// info 区字段
+	for _, p := range htmlFindAll(doc, func(n *html.Node) bool {
+		return isElem(n, "p") && htmlFind(n, func(c *html.Node) bool {
+			return isElem(c, "span") && strings.Contains(htmlClass(c), "header")
+		}) != nil
+	}) {
+		label := ""
+		if sp := htmlFind(p, func(n *html.Node) bool {
+			return isElem(n, "span") && strings.Contains(htmlClass(n), "header")
+		}); sp != nil {
+			label = strings.Trim(strings.TrimSpace(htmlText(sp)), ":：")
+		}
+		// 段落文本形如「品番: SSIS-001」，取冒号之后的部分作为值
+		rowText := strings.TrimSpace(htmlText(p))
+		val := rowText
+		if i := strings.IndexAny(rowText, ":："); i >= 0 {
+			val = strings.TrimSpace(rowText[i+1:])
+		}
+		switch label {
+		case "品番", "番號", "番号", "識別碼", "识别码":
+			if c := canonNumber(val); c != "" {
+				mv.Number = c
+			}
+		case "發行日期", "发行日期", "配信開始日":
+			if d := reDate.FindString(val); d != "" {
+				mv.Date = d
+			}
+		case "長度", "长度", "収録時間":
+			mv.Runtime = val
+		case "製作商", "制作商", "メーカー":
+			mv.Studio = val
+		case "演員", "演员", "出演者":
+			for _, a := range htmlFindAll(p, func(n *html.Node) bool { return isElem(n, "a") }) {
+				if nm := strings.TrimSpace(htmlText(a)); nm != "" {
+					mv.Actors = append(mv.Actors, nm)
+				}
+			}
+		case "類別", "类别", "ジャンル":
+			for _, a := range htmlFindAll(p, func(n *html.Node) bool { return isElem(n, "a") }) {
+				if g := strings.TrimSpace(htmlText(a)); g != "" {
+					mv.Genres = append(mv.Genres, g)
+				}
+			}
+		}
+	}
+	if mv.Cover == "" {
+		if img := htmlFind(doc, func(n *html.Node) bool {
+			return isElem(n, "img") && strings.Contains(htmlAttr(n, "src"), "/pics/")
+		}); img != nil {
+			src := htmlAttr(img, "src")
+			if !strings.HasPrefix(src, "http") {
+				src = j.BaseURL + "/" + strings.TrimLeft(src, "/")
+			}
+			mv.Cover = src
+		}
+	}
+	if mv.Number == "" {
+		mv.Number = canonNumber(raw)
+	}
+	return mv
 }
 
 // fetchMagnets 调用 ajax 接口取磁力列表。

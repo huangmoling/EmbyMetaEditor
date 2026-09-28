@@ -463,6 +463,32 @@ func TestCNScrapeDryRunDoesNotWrite(t *testing.T) {
 		}
 	}
 
+	// 预演必须给出「会改成什么」：逐字段差集 + 会动的图片槽位。
+	// 界面上的预演抽屉全靠这两个字段，缺了就成了「空白的预演」。
+	if !res.DryRun {
+		t.Error("结果应标记为预演（dry_run）")
+	}
+	if len(res.Changes) == 0 {
+		t.Fatal("预演没有给出任何字段变更")
+	}
+	var title *FieldChange
+	for i := range res.Changes {
+		if res.Changes[i].Field == "Name" {
+			title = &res.Changes[i]
+		}
+	}
+	if title == nil {
+		t.Errorf("预演少了 Name 字段：%+v", res.Changes)
+	} else if title.After == "" || title.Same {
+		t.Errorf("预演应算出标题会变（现在 %q → 会改成 %q）", title.Before, title.After)
+	}
+	if got := strings.Join(res.WillImages, ","); got != "封面,缩略图" {
+		t.Errorf("预演图片槽位 = %q，期望 封面,缩略图", got)
+	}
+	if res.AppliedTo != nil {
+		t.Errorf("预演不该报告已写入的字段，实际 %v", res.AppliedTo)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.patched) != 0 || len(m.uploaded) != 0 || m.refresh != 0 {
@@ -491,6 +517,98 @@ func TestCNScrapeDryRunFindsSevenMMTV(t *testing.T) {
 	}
 	if res.Date != "2023-02-21" {
 		t.Errorf("日期 = %q，期望 2023-02-21", res.Date)
+	}
+}
+
+// 预演算出的计划，必须和真实写入时发出去的 body 逐字段一致。
+//
+// 这条是「预演不能撒谎」的守卫：applyCN 与 dry-run 共用 planCN，
+// 谁要是给其中一条路径单独加逻辑（比如「真写时顺便补个字段」），这里就会红。
+func TestCNPlanMatchesRealWrite(t *testing.T) {
+	m := newMockEmby(t)
+	mainSrv, madouSrv := cnTestServers(t)
+	app := cnTestApp(t, m, mainSrv, madouSrv)
+
+	// 封面走本地测试服务器，避免单测访问外网
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer coverSrv.Close()
+
+	m.mu.Lock()
+	m.items["it-cn"] = map[string]any{
+		"Id": "it-cn", "Name": "91CM-014", "Type": "Movie",
+		"ImageTags":   map[string]any{},
+		"ProviderIds": map[string]any{},
+		"Overview":    "原有简介不能丢",
+	}
+	m.mu.Unlock()
+
+	e := NewEmby(app.store.Get())
+	item, err := e.ItemDetail(context.Background(), "it-cn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pick := &CNPicked{
+		Title: "日本街头拜金女大测试", TitleFrom: "xchina",
+		Cover: coverSrv.URL + "/c.jpg", CoverFrom: "xchina",
+		Tags: []string{"果冻传媒"}, TagFrom: "xchina",
+		Date: "2021-04-06", DateFrom: "madouqu",
+	}
+	opts := CNOptions{Fields: cnFieldsFrom(nil)}
+
+	pl := app.planCN(item, pick, opts)
+	if len(pl.Patch) == 0 {
+		t.Fatal("计划里没有任何字段")
+	}
+	if got := strings.Join(pl.Images, ","); got != "封面,缩略图" {
+		t.Errorf("计划图片 = %q，期望 封面,缩略图", got)
+	}
+
+	// 预演的差集必须覆盖计划里的每个字段（不多不少）
+	changes := previewPatch(item, pl.Patch)
+	if len(changes) != len(pl.Patch) {
+		t.Errorf("预演字段数 = %d，计划字段数 = %d", len(changes), len(pl.Patch))
+	}
+
+	// 真写：applyCN 必须消费同一份 patch
+	applied, note, _, err := app.applyCN(context.Background(), e, item, pick, opts)
+	if err != nil {
+		t.Fatalf("写入失败：%v", err)
+	}
+	if note != "" {
+		t.Logf("写入告警（不影响断言）：%s", note)
+	}
+	if len(applied) == 0 {
+		t.Fatal("没有写入任何字段")
+	}
+	body := m.patched["it-cn"]
+	if body == nil {
+		t.Fatal("没有发生 POST /Items/it-cn")
+	}
+
+	// 只核对文本类字段：数字经 JSON 往返会变成 float64，那是序列化差异。
+	textFields := map[string]bool{
+		"Name": true, "Tags": true, "PremiereDate": true, "OriginalTitle": true,
+	}
+	checked := 0
+	for _, c := range changes {
+		if !textFields[c.Field] {
+			continue
+		}
+		if got := formatFieldValue(body[c.Field]); got != c.After {
+			t.Errorf("预演说 %s 会改成 %q，真写进去的是 %q", c.Field, c.After, got)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("没有任何字段被核对，测试没起作用")
 	}
 }
 
@@ -531,7 +649,7 @@ func TestCNApplyWritesFieldsAndCover(t *testing.T) {
 		Tags: []string{"果冻传媒"}, TagFrom: "xchina",
 		Date: "2021-04-06", DateFrom: "madouqu",
 	}
-	applied, note, err := app.applyCN(context.Background(), e, item, pick, CNOptions{
+	applied, note, _, err := app.applyCN(context.Background(), e, item, pick, CNOptions{
 		Fields: cnFieldsFrom(nil),
 	})
 	if err != nil {
@@ -606,7 +724,7 @@ func TestCNApplySkipsExistingCoverAndTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	pick := &CNPicked{Title: "站点标题", Cover: "https://example.com/c.jpg", Date: "2021-04-06"}
-	applied, note, err := app.applyCN(context.Background(), e, item, pick, CNOptions{Fields: cnFieldsFrom(nil)})
+	applied, note, _, err := app.applyCN(context.Background(), e, item, pick, CNOptions{Fields: cnFieldsFrom(nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

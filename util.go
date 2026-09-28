@@ -354,6 +354,9 @@ func pageMarkers(data []byte) map[string]int {
 	markers := []string{
 		"movie-box", "photo-frame", "photo-info", "bigImage",
 		"/star/", "searchstar", "uncledatoolsbyajax", "pics/cover",
+		// sample-waterfall 是磁力预览用的样例图区块，单独计数，
+		// 这样「预览按钮点开是空的」能一眼看出是页面少了这个区块还是解析坏了。
+		"sample-waterfall", "pics/sample/",
 		"age=verified", "cf-browser-verification", "Just a moment",
 	}
 	out := make(map[string]int, len(markers))

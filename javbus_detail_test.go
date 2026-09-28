@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,5 +107,52 @@ func TestMovieDetailParsingFromRealFixture(t *testing.T) {
 		t.Error("没找到 .bigImage 封面链接")
 	} else if htmlAttr(a, "href") != "/pics/cover/83hf_b.jpg" {
 		t.Errorf("封面 href 异常: %q", htmlAttr(a, "href"))
+	}
+}
+
+// 磁力预览用的样例图。夹具由 `python tools/fetch_javbus_fixture.py` 从真实
+// 详情页里**逐字节**截出来（`testdata/javbus/`），不是手写的。
+//
+// 这里钉三件事，任何一条错了预览都是废的：
+//  1. 收的是**内层 `<img>` 的相对路径**，不是外层 `<a href>` 的 dmm 原图 ——
+//     dmm 不在图片代理白名单里，收进来就是一排破图；
+//  2. 相对路径必须补成绝对地址，前端要把它喂给 `/api/img?u=…`；
+//  3. 顺序保持页面顺序（第 1 张其实是封面缩略图，乱序预览就乱了）。
+func TestMovieSamplesFromRealFixture(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "javbus", "detail_ssis001_samples.html"))
+	if err != nil {
+		t.Fatalf("读夹具失败（夹具丢了？重跑 tools/fetch_javbus_fixture.py）：%v", err)
+	}
+	jb := &JavBus{BaseURL: "https://www.javbus.com"}
+	mv := jb.parseMovieDoc("https://www.javbus.com/SSIS-001", "SSIS-001", data)
+
+	if len(mv.Samples) != 10 {
+		t.Fatalf("样例图数量 = %d，期望 10（夹具是 SSIS-001 的真实片段）", len(mv.Samples))
+	}
+	for i, s := range mv.Samples {
+		if strings.Contains(s, "dmm.co.jp") {
+			t.Errorf("第 %d 张收成了 dmm 原图（不在白名单里，浏览器取不到）：%s", i+1, s)
+		}
+		if !strings.HasPrefix(s, "https://www.javbus.com/pics/sample/") {
+			t.Errorf("第 %d 张不是补全后的 javbus 绝对地址：%s", i+1, s)
+		}
+	}
+	if !strings.HasSuffix(mv.Samples[0], "_1.jpg") {
+		t.Errorf("第 1 张应为 _1.jpg，实际 %s（顺序没保持）", mv.Samples[0])
+	}
+	if !strings.HasSuffix(mv.Samples[9], "_10.jpg") {
+		t.Errorf("第 10 张应为 _10.jpg，实际 %s（顺序没保持）", mv.Samples[9])
+	}
+	// 夹具只截了样例图区块，页面上的品番取不到，应回退到传入值的**规范形式**
+	// （canonNumber 会去掉数字部分的前导零：SSIS-001 → SSIS-1），
+	// 不然「预览」抽屉会没有标题。
+	if mv.Number != "SSIS-1" {
+		t.Errorf("番号应回退成规范形式 SSIS-1，实际 %q", mv.Number)
+	}
+	// 镜像站 / 反代前缀（BaseURL 可配置）也要跟着走，不能写死 javbus.com。
+	mirror := &JavBus{BaseURL: "https://mirror.example.com/jb"}
+	mm := mirror.parseMovieDoc("https://mirror.example.com/jb/SSIS-001", "SSIS-001", data)
+	if len(mm.Samples) == 0 || !strings.HasPrefix(mm.Samples[0], "https://mirror.example.com/jb/pics/sample/") {
+		t.Errorf("自定义 BaseURL 下没补对前缀：%v", mm.Samples)
 	}
 }

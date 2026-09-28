@@ -8,10 +8,13 @@
   - 库下拉里**没有**「全部媒体库」—— 这个功能只在具体某一个库里成立
   - 网格里每张卡都有勾选框和「编辑」
   - 选中状态跨重渲染不丢（`S.cn.sel` 是个 Set）
-  - 「刮削选中」打到 `/api/cn/scrape-batch`，且 `ids` 就是勾选的那几个
-  - 单个「刮削」打到 `/api/cn/scrape`，且不传 `fields` / `dry_run`
+  - 「刮削选中」打到 `/api/cn/scrape-batch`，且 `ids` 就是勾选的那几个，
+    并明确带 `dry_run=false`（预演走旁边的「预演」按钮，见 `verify_dry_run.py`）
+  - 单个「刮削」打到 `/api/cn/scrape`，且不传 `fields`（字段固定全开）
   - 编辑抽屉只把**改动过**的字段提交给 `/api/items/update`
-  - 旧界面（站点卡片 / 试运行 / 抓取字段勾选）确实被删掉了
+  - 旧界面（站点卡片 / 「试运行」模式开关 / 抓取字段勾选）确实被删掉了 ——
+    注意 v1.6.0 新加的「预演」是个**按钮**（点一次跑一次），不是当年那个
+    会把批量按钮变成静默不写的模式开关
 
 会写 Emby 的地方一律把 `window.api` 换成假的，零副作用。
 
@@ -218,7 +221,13 @@ def main():
 
         # ---------- B. 旧界面确实被删掉了 ----------
         check("站点卡片已删除", cdp.js("!document.querySelector('#cnSiteList')"))
-        check("试运行开关已删除", cdp.js("!document.querySelector('#cnDry')"))
+        # `#cnDry` 在 v1.6.0 回来了，但**不是**当年那个「试运行开关」复选框：
+        # 现在它是一个按钮（点一次就走一次预演），而不是一个会改变「刮削选中」
+        # 行为的模式开关 —— 后者才是当年被删掉的原因（开关开着时点批量会静默不写，
+        # 用户以为自己刮了）。
+        check("预演是按钮而不是「试运行」模式开关",
+              (cdp.js("document.querySelector('#cnDry').tagName") or "") == "BUTTON" and
+              (cdp.js("document.querySelector('#cnDry').textContent") or "") == "预演")
         check("抓取字段勾选已删除",
               cdp.js("!document.querySelector('#cnFCover') && !document.querySelector('#cnFTitle')"))
 
@@ -323,8 +332,11 @@ def main():
               (call or {}).get("body"))
         check("批量不传 fields（字段固定全开）",
               bool(call) and "fields" not in (call.get("body") or {}))
-        check("批量不传 dry_run（界面已删除试运行）",
-              bool(call) and "dry_run" not in (call.get("body") or {}))
+        # 「刮削选中」是**真写**，必须明确发 dry_run=false。
+        # （预演走的是旁边那个 #cnDry 按钮，见 verify_dry_run.py。）
+        check("批量明确发 dry_run=false（真写的那条路径不能被预演劫持）",
+              bool(call) and (call.get("body") or {}).get("dry_run") is False,
+              (call or {}).get("body"))
 
         # 没勾选时点批量：要拦下来，不能发请求
         cdp.js(RESTORE + " S.cn.sel.clear(); cnSyncSelUI();")

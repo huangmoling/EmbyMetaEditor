@@ -2,6 +2,16 @@
 
 真实点击（而不是直接调函数）：点「跳过登录」-> 切到「番号补全」-> 填演员名 -> 点「连通性诊断」。
 全程收集 console 报错与未捕获异常。
+
+⚠️ 必须先起 mock javbus，否则第 5 步（正常路径）**必然 4 项红**：
+脚本会把 javbus 地址复位成 `http://127.0.0.1:9500`，起不来就是「连接被拒绝」，
+于是「标记为连通 / 显示 HTTP 状态 / 页面结构正常 / 演员搜索接口有结果」全挂 ——
+看着像回归，其实只是少起了一个进程。失败路径（第 6 步）不需要 mock，所以只有一半会红。
+
+前置：
+    EMBYME_AUTH_PASSWORD=test-pass EmbyMetaEditor.exe -open=false
+    python tools/mock_javbus.py 9500
+    <无头 Edge 开在 9333>
 """
 import base64
 import json

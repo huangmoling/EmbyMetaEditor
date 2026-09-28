@@ -10,6 +10,15 @@ cache/
 .workbuddy-ai/
 .workbuddy/
 
+# ===== 本地验证用的临时目录 =====
+# .tmp-test-home：拷一份真实 config.json 进去跑 exe / 回归，跑完删（内容已被上面的
+#   config.json、cache/ 规则覆盖，所以本来就不入库）；
+# .tmp-edge-profile：无头 Edge 的 --user-data-dir。**必须指仓库内路径**，
+#   指 /tmp 会让 Edge 静默起不来（9333 不监听，还不报错）。里面全是浏览器自己的文件，
+#   十几万个，不入库；留着不影响运行，但要记得跑完删掉。
+.tmp-test-home/
+.tmp-edge-profile/
+
 # ===== 真实环境截图 =====
 # 只保留下面这几张白名单截图（README 引用的就是它们）。
 # 其余一律不入库 —— 都是在真实 Emby 上截的，含真实媒体库内容。

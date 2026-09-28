@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,6 +97,125 @@ func TestLiveItemDetail(t *testing.T) {
 			}
 		}
 	}
+}
+
+// 实机「写入 → 回滚」验证。默认跳过，只有显式打开才跑：
+//
+//	EMBY_LIVE=1 go test -run TestLiveItemWriteRollback -v
+//
+// 为什么非要在实机上跑一遍：mock Emby 是照真实 4.9 的行为建模的，但「把字段还原回
+// 原来的样子，列表字段要发 `[]`」这条是**整对象替换**语义里最反直觉的一处 ——
+// mock 里对了不等于真 Emby 里也对（发 `null` 会被 updateItem 的 nil 防护吞掉，
+// 于是字段根本没还原，而界面显示「已回滚」）。
+//
+// 还有一个只有实机能暴露的前提：**这个构建到底认不认这个字段**。
+// 详情接口不返回的字段（`Countries` / `Genres` / `Tags`…）写进去也读不回来 ——
+// 那说明它不参与这条读写链路，拿它做实验会得到假结论。所以这里先写一次探针值、
+// 确认读得回来，读不回来就 Skip 并指出该换哪个字段（见 EMBY_LIVE_FIELD）。
+//
+// 安全性：先记下字段原值、挂 defer 兜底还原，快照落在 t.TempDir() 里，
+// 完全不碰用户自己的 cache/sync_history.json。
+func TestLiveItemWriteRollbackIsIdempotent(t *testing.T) {
+	if os.Getenv("EMBY_LIVE") != "1" {
+		t.Skip("未设置 EMBY_LIVE=1，跳过实机写验证")
+	}
+	cfg := loadLiveConfig(t) // 必须先读真实配置：testApp 会把 EMBYME_HOME 改到临时目录
+	itemID := firstNonEmpty(os.Getenv("EMBY_LIVE_ITEM"), "520826")
+	field := firstNonEmpty(os.Getenv("EMBY_LIVE_FIELD"), "ProductionLocations")
+	if !itemListFields[field] {
+		t.Fatalf("EMBY_LIVE_FIELD=%q 不是列表字段 —— 这个用例专门验「清空列表要发 []」", field)
+	}
+
+	app := testApp(t, cfg.EmbyURL, cfg.MetaTubeURL)
+	if err := app.store.Update(func(c *Config) {
+		c.Token = cfg.Token
+		c.UserID = cfg.UserID
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEmby(app.store.Get())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	item, err := e.ItemDetail(ctx, itemID)
+	if err != nil {
+		t.Fatalf("详情读取失败：%v", err)
+	}
+	orig, hadOrig := item[field]
+	origBlank := !hadOrig || isBlank(orig)
+	// 还原目标：原来有值就还原成原值，原来没有就还原成空列表。
+	restore := any([]any{})
+	if !origBlank {
+		restore = orig
+	}
+	t.Logf("样本：%v；%s 原值 = %s", item["Name"], field, formatFieldValue(orig))
+
+	// defer 兜底：无论中间哪一步失败，都把字段还原回去。
+	defer func() {
+		if err := e.UpdateItemExact(context.Background(), itemID, map[string]any{field: restore}); err != nil {
+			t.Errorf("兜底还原 %s 失败：%v（请手工确认条目 %s）", field, err, itemID)
+		}
+	}()
+
+	const probe = "__live_rollback_probe__"
+	patch := map[string]any{field: []any{probe}}
+	recID := app.recordItemWrite(item, patch, "实机写入回滚验证")
+	if recID == "" {
+		t.Fatal("写入前没有留下快照 —— 这个用例要验的正是快照能不能把字段还原回去")
+	}
+
+	if err := e.UpdateItem(ctx, itemID, patch); err != nil {
+		t.Fatalf("写入失败：%v", err)
+	}
+	after, err := e.ItemDetail(ctx, itemID)
+	if err != nil {
+		t.Fatalf("写入后回读失败：%v", err)
+	}
+	if dumped := fmt.Sprint(after[field]); !strings.Contains(dumped, probe) {
+		// 不是产品 bug：这个构建不认这个字段（写进去读不回来），换一个再跑。
+		t.Skipf("字段 %s 在条目 %s 上写进去读不回来（读到的还是 %s）—— "+
+			"这个构建可能不返回/不接受它。换一个 EMBY_LIVE_FIELD（可用 %v）再跑；"+
+			"注意：详情接口不返回的字段不参与这条读写链路，用它验不出结论。",
+			field, itemID, formatFieldValue(after[field]), liveListFieldsIn(item))
+	}
+	t.Logf("写入生效：%s = %s", field, formatFieldValue(after[field]))
+
+	if _, err := app.rollbackItemSync(ctx, recID); err != nil {
+		t.Fatalf("回滚失败：%v", err)
+	}
+	restored, err := e.ItemDetail(ctx, itemID)
+	if err != nil {
+		t.Fatalf("回滚后回读失败：%v", err)
+	}
+	// 关键断言：必须真的回到原样。
+	// 如果回滚发的是 `null`，它会被 updateItem 跳过，这里就会读到探针值。
+	if formatFieldValue(restored[field]) != formatFieldValue(orig) {
+		t.Fatalf("回滚没有把 %s 还原：%s → %s（期望 %s）—— 回滚多半是发了 null 被 nil 防护吞掉了",
+			field, formatFieldValue(orig), formatFieldValue(restored[field]), formatFieldValue(orig))
+	}
+	if origBlank && !isBlank(restored[field]) {
+		t.Fatalf("回滚没有把 %s 清空：%s", field, formatFieldValue(restored[field]))
+	}
+	t.Logf("回滚还原正确：%s = %s", field, formatFieldValue(restored[field]))
+
+	// 同一条记录不能回滚两次（否则第二次会用「已经还原过的」状态再写一遍）。
+	if _, err := app.rollbackItemSync(ctx, recID); err == nil {
+		t.Error("同一条记录被允许回滚两次")
+	}
+}
+
+// liveListFieldsIn 列出这个条目 DTO 里**真的出现**的列表字段，
+// 出错时告诉用户该把 EMBY_LIVE_FIELD 换成什么。
+func liveListFieldsIn(item Item) []string {
+	var out []string
+	for k := range item {
+		if itemListFields[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ---------- 辅助 ----------

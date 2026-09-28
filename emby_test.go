@@ -574,6 +574,102 @@ func TestScrapeMovieOverwrite(t *testing.T) {
 	}
 }
 
+// 预演（dry_run）必须**一个字节都不写**，同时把「会改成什么」如实算出来。
+func TestScrapeMovieDryRunDoesNotWrite(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+
+	m.items["m1"] = map[string]any{
+		"Id": "m1", "Name": "SSIS-001 某个片名", "Type": "Movie",
+		"Path":        "F:\\媒体\\SSIS-001\\SSIS-001.strm",
+		"ProviderIds": map[string]any{}, "ImageTags": map[string]any{},
+	}
+
+	res, err := app.ScrapeMovie(context.Background(), "m1", ScrapeOptions{DryRun: true, Refresh: true})
+	if err != nil {
+		t.Fatalf("预演失败: %v", err)
+	}
+	if !res.DryRun {
+		t.Error("结果应标记为预演（dry_run）")
+	}
+	if len(res.Changes) == 0 {
+		t.Fatal("预演应给出逐字段的变更列表")
+	}
+	byField := map[string]FieldChange{}
+	for _, c := range res.Changes {
+		byField[c.Field] = c
+	}
+	if c, ok := byField["Name"]; !ok || c.After != "SSIS-001 中文标题" {
+		t.Errorf("预演应算出标题会改成 %q，实际 %+v", "SSIS-001 中文标题", byField["Name"])
+	}
+	if c, ok := byField["Name"]; ok && c.Before != "SSIS-001 某个片名" {
+		t.Errorf("预演应带上当前值 %q，实际 %q", "SSIS-001 某个片名", c.Before)
+	}
+	// 图片槽位要和真正写入时一致（条目没有图 → 三个槽都该动）
+	if got := strings.Join(res.WillImages, ","); got != "Primary,Thumb,Backdrop" {
+		t.Errorf("预演图片槽位 = %q，期望 Primary,Thumb,Backdrop", got)
+	}
+	if len(m.patched) != 0 || len(m.uploaded) != 0 || m.refresh != 0 {
+		t.Errorf("预演却发生了写操作：patched=%v uploaded=%v refresh=%d", m.patched, m.uploaded, m.refresh)
+	}
+}
+
+// 「预演说的话必须是真的」—— 逐字段核对：预演算出的新值，和真正写入时发出去的
+// 值必须一致。只要 buildItemPatch / 翻译 / 补番号 / imageSlotsToWrite 里任何一处
+// 在「预演」和「真写」两条路径上分叉，这个测试就会红。
+func TestScrapeMovieDryRunMatchesRealWrite(t *testing.T) {
+	m := newMockEmby(t)
+	mt := newMockMetaTube(t)
+	app := testApp(t, m.srv.URL, mt.URL)
+
+	m.items["m1"] = map[string]any{
+		"Id": "m1", "Name": "SSIS-001 某个片名", "Type": "Movie",
+		"Path":        "F:\\媒体\\SSIS-001\\SSIS-001.strm",
+		"ProviderIds": map[string]any{}, "ImageTags": map[string]any{},
+	}
+
+	pre, err := app.ScrapeMovie(context.Background(), "m1", ScrapeOptions{DryRun: true})
+	if err != nil {
+		t.Fatalf("预演失败: %v", err)
+	}
+	if _, err := app.ScrapeMovie(context.Background(), "m1", ScrapeOptions{}); err != nil {
+		t.Fatalf("真实刮削失败: %v", err)
+	}
+	body := m.patched["m1"]
+	if body == nil {
+		t.Fatal("真实刮削没有写入任何字段")
+	}
+
+	// 只核对文本类字段：数字经 JSON 往返变成 float64（RunTimeTicks 会变成
+	// 7.2e+10 这种科学计数），那是序列化造成的，不代表两条路径分叉。
+	textFields := map[string]bool{
+		"Name": true, "Overview": true, "Tags": true,
+		"PremiereDate": true, "OriginalTitle": true, "Studios": true,
+	}
+	checked := 0
+	for _, c := range pre.Changes {
+		if c.Same || !textFields[c.Field] {
+			continue
+		}
+		if got := formatFieldValue(body[c.Field]); got != c.After {
+			t.Errorf("预演说 %s 会改成 %q，真写进去的是 %q", c.Field, c.After, got)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("没有任何字段被核对，测试没起作用")
+	}
+
+	// 图片槽位也要对上：预演列的每个槽位都必须真的被写过。
+	real := strings.Join(m.uploaded, " | ")
+	for _, slot := range pre.WillImages {
+		if !strings.Contains(real, "m1/"+slot+"/") {
+			t.Errorf("预演说会写图片槽位 %s，实际上传记录里没有：%s", slot, real)
+		}
+	}
+}
+
 func TestScrapeMovieNoNumber(t *testing.T) {
 	m := newMockEmby(t)
 	mt := newMockMetaTube(t)

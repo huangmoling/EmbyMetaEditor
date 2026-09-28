@@ -311,7 +311,7 @@ function watchJob(jobId, title, onDone) {
 }
 
 // ---------------- 视图切换 ----------------
-const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', cn: '国产传媒', settings: '设置' };
+const VIEW_TITLES = { stats: '概览统计', library: '媒体库刮削', persons: '演员头像', javbus: '番号补全', health: '媒体库体检', cn: '国产传媒', settings: '设置' };
 
 function switchView(v) {
   S.view = v;
@@ -321,8 +321,9 @@ function switchView(v) {
   if (v === 'stats') loadStats();
   if (v === 'library') { ensureLibs(); loadItems(0); }
   if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); loadProfileSources(); }
+  if (v === 'health') ensureLibs();
   if (v === 'cn') { ensureLibs(); cnSyncSelUI(); }
-  if (v === 'settings') fillSettings();
+  if (v === 'settings') { fillSettings(); loadItemHistory(); }
 }
 
 // ---------------- 概览 ----------------
@@ -388,10 +389,93 @@ async function ensureLibs() {
     $('#lbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#jbLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
     $('#psLib').innerHTML = '<option value="">全部媒体库</option>' + opts;
+    // 体检页也不给「全部」：整库扫一遍在几万条的库上又慢又没用，
+    // 用户真正想问的是「我某个库里哪些条目还没收拾过」。
+    $('#hLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
     // 国产传媒页不给「全部」这个选项：这个功能只在某个具体库里成立，
     // 留个「全部」等于留个坑。
     $('#cnLib').innerHTML = '<option value="">请选择媒体库</option>' + opts;
   } catch (e) { /* 未登录时忽略 */ }
+}
+
+// ---------------- 媒体库体检 ----------------
+
+// 只读扫描一个库，把「还没被收拾过」的条目按问题类型分组列出来。
+//
+// 刻意不做「一键自动修复」：扫描本身不发任何写请求，修不修、怎么修由用户
+// 点进具体条目决定。一个自动修复按钮配上一个不可逆的写接口，出事只是时间问题。
+async function loadHealth() {
+  const lib = $('#hLib').value;
+  if (!lib) { toast('先选一个媒体库', 'err'); return; }
+  const btn = $('#hScan');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '体检中…';
+  $('#hSummary').innerHTML = '';
+  $('#hBody').innerHTML = '<div class="empty"><span class="spin"></span> 正在扫描…</div>';
+  try {
+    const params = new URLSearchParams({
+      parent: lib,
+      type: $('#hType').value,
+      limit: Number($('#hLimit').value) || 500,
+    });
+    const d = await api('/api/health?' + params.toString());
+    renderHealth(d);
+  } catch (e) {
+    $('#hBody').innerHTML = '<div class="empty">扫描失败：' + esc(e.message) + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+function renderHealth(d) {
+  d = d || {};
+  const groups = d.groups || [];
+  const bad = groups.filter((g) => g.count > 0);
+  const good = groups.filter((g) => !g.count);
+  const chip = (k, v, cls) => '<span class="hchip ' + cls + '"><b>' + v + '</b>' + esc(k) + '</span>';
+  $('#hSummary').innerHTML = '<div class="card" style="box-shadow:none">' +
+    '<div class="hchips">' +
+    chip('检查条目', num(d.scanned) + (d.truncated ? ' / 共 ' + num(d.total) : ''), d.truncated ? 'warn' : '') +
+    chip('有问题', num(d.problem), d.problem ? 'warn' : 'ok') +
+    chip('干净', num(d.clean), 'ok') +
+    '</div>' +
+    (d.truncated
+      ? '<div class="cnhint" style="margin-top:10px">库里共 ' + num(d.total) + ' 条，本次只检查了 ' +
+        num(d.scanned) + ' 条（受「最多检查」限制，调大这个值可以扫更多）。</div>'
+      : '') +
+    (good.length
+      ? '<div class="cnhint" style="margin-top:10px">这几项全部通过：' +
+        good.map((g) => '✓ ' + esc(g.label)).join('　') + '</div>'
+      : '') +
+    '</div>';
+
+  if (!bad.length) {
+    $('#hBody').innerHTML = '<div class="card" style="box-shadow:none">' +
+      '<div class="empty">检查到的 ' + num(d.scanned) + ' 条里没有发现问题</div></div>';
+    return;
+  }
+  $('#hBody').innerHTML = bad.map((g) => {
+    const rows = (g.items || []).map((it) =>
+      '<button class="hrow" data-id="' + esc(it.id) + '">' +
+      '<span class="hrow-n">' + esc(it.name || it.id) + '</span>' +
+      '<span class="grow"></span>' +
+      (it.number ? '<span class="tag mono">' + esc(it.number) + '</span>'
+                 : '<span class="cnhint">无番号</span>') +
+      (it.year ? '<span class="cnhint mono">' + num(it.year) + '</span>' : '') +
+      '</button>').join('');
+    return '<div class="card" style="box-shadow:none">' +
+      '<h3>' + esc(g.label) +
+      '<span class="tag' + (g.level === 'err' ? ' bad' : '') + '" style="margin-left:8px">' +
+      num(g.count) + ' 条</span></h3>' +
+      '<div class="cnhint" style="margin-bottom:8px">' + esc(g.hint) + '</div>' +
+      '<div class="hlist">' + rows + '</div>' +
+      (g.more ? '<div class="cnhint" style="margin-top:8px">还有 ' + num(g.more) + ' 条未列出</div>' : '') +
+      '</div>';
+  }).join('');
+  // 点一条就打开它的详情抽屉（能看能改），顺手也能从那里直接刮削。
+  $$('#hBody button.hrow').forEach((b) => { b.onclick = () => openItemDetail(b.dataset.id); });
 }
 
 async function loadItems(start) {
@@ -1495,7 +1579,9 @@ function renderMagnets() {
       '<span class="sz">' + esc(m.size || '') + '</span><span class="dt">' + esc(m.date || '') + '</span>' +
       '<button class="btn btn-sm" data-copy="' + esc(m.link) + '">复制</button></div>').join('');
     return '<div class="magpanel' + (g.number === S.jb.magTab ? ' on' : '') + '" data-num="' + esc(g.number) + '">' +
-      (g.title ? '<div class="maghead">' + esc(g.title) + '</div>' : '') +
+      '<div class="maghead maghead-act">' + esc(g.title || g.number) +
+      '<span class="grow"></span>' +
+      '<button class="btn btn-sm" data-preview="' + esc(g.number) + '">预览样例图</button></div>' +
       (rows || '<div class="magempty">' + esc(g.error || '没有磁力链接') + '</div>') + '</div>';
   }).join('');
 
@@ -1509,6 +1595,9 @@ function renderMagnets() {
   $$('button[data-copy]', list).forEach((b) => b.onclick = () => {
     doCopy(b.dataset.copy, '已复制磁力链接');
   });
+  $$('button[data-preview]', list).forEach((b) => b.onclick = () => {
+    openMagPreview(b.dataset.preview);
+  });
 
   const copy = (links, label) => {
     if (!links.length) { toast('没有磁力链接', 'err'); return; }
@@ -1521,6 +1610,43 @@ function renderMagnets() {
   };
   const ca = $('#jbCopyAll');
   if (ca) ca.onclick = () => copy(groups.flatMap((g) => (g.magnets || []).map((m) => m.link)), '全部番号');
+}
+
+// 预览样例图：这是 javbus 详情页自己的东西（`#sample-waterfall` 区块），
+// 我们只是把它搬过来看，不下载、不写库。
+//
+// 两个必须走服务端代取的理由：
+//   1. javbus 图片有 Referer 防盗链 —— 浏览器从本机页面直连是 403，服务端带
+//      正确的 Referer 才是 200（`/api/img` 里已经这么干了）；
+//   2. 走代取就不必为了这个功能把页面的 CSP `img-src` 放开到外网，
+//      注入型 XSS 能偷图/打点的那条路一直是关着的。
+async function openMagPreview(number) {
+  const host = openDrawer(
+    '<h3>样例图 · ' + esc(number) + '</h3>' +
+    '<div class="sub">来源：javbus 详情页（点图可看原尺寸）</div>' +
+    '<div id="magPv"><div class="empty"><span class="spin"></span> 正在读取详情页…</div></div>' +
+    '<div class="cnhint" style="margin-top:12px">图片由服务端代取 —— javbus 有 Referer 防盗链，' +
+    '浏览器直连会 403。番号本身没收录样例图时这里就是空的。</div>');
+  const box = $('#magPv', host);
+  let r;
+  try {
+    r = await api('/api/javbus/samples?number=' + encodeURIComponent(number));
+  } catch (e) {
+    box.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
+    return;
+  }
+  const shots = r.samples || [];
+  if (!shots.length) {
+    box.innerHTML = '<div class="empty">这个番号没有样例图</div>' +
+      '<div class="cnhint">可能该作品在 javbus 上没有样张，或页面被验证页拦了（先到「番号补全」页跑一次连通性诊断）。</div>';
+    return;
+  }
+  box.innerHTML =
+    '<div class="magpv">' + shots.map((s, i) =>
+      '<a href="' + esc(imgSrc(s)) + '" target="_blank" rel="noopener noreferrer" title="第 ' + (i + 1) + ' 张">' +
+      '<img src="' + esc(imgSrc(s)) + '" loading="lazy" alt="样例图 ' + (i + 1) + '"></a>').join('') + '</div>' +
+    '<div class="sub" style="margin-top:10px">共 ' + shots.length + ' 张' +
+    (r.title ? ' · ' + esc(r.title) : '') + '</div>';
 }
 
 // ---------------- 国产传媒专项刮削 ----------------
@@ -1641,8 +1767,63 @@ async function cnScrapeOne(itemId, btn) {
   }
 }
 
+// 批量写入前的「预演」报告（dry-run）。
+//
+// 服务端的 dry_run 会返回每条「会改成什么」：changes 是逐字段的现值 → 新值
+// （same=true 表示两边一样，写了等于没写），will_images 是会动的图片槽位。
+// 「会改成什么」这件事**由服务端算是唯一正确的做法** —— 前端自己拼表格的话，
+// 和真正写进去的内容迟早会对不上。
+//
+// 这里刻意不放任何写入按钮：预演的唯一目的就是「看完决定要不要真跑」，
+// 抽屉里再放个「现在就写」最容易被顺手点掉。
+function showScrapePreview(results, title) {
+  const list = results || [];
+  if (!list.length) {
+    openDrawer('<h3>' + esc(title) + '</h3><div class="empty">没有可预演的条目</div>');
+    return;
+  }
+  let touched = 0;
+  let fields = 0;
+  const cards = list.map((r) => {
+    const ch = (r.changes || []).filter((c) => !c.same);
+    if (ch.length) touched += 1;
+    fields += ch.length;
+    const rows = (r.changes || []).map((c) => {
+      const cell = (v) => (v ? esc(v) : '<span class="cnhint">（空）</span>');
+      return '<tr' + (c.same ? ' class="same"' : '') + '>' +
+        '<td class="mono">' + esc(c.field) + '</td>' +
+        '<td>' + cell(c.before) + '</td><td>' + cell(c.after) + '</td></tr>';
+    }).join('');
+    const imgs = (r.will_images || []).length
+      ? '<div class="cnhint" style="margin-top:6px">会尝试写入图片：' + esc((r.will_images || []).join(' / ')) + '</div>'
+      : '';
+    return '<div class="card" style="box-shadow:none">' +
+      '<h3>' + esc(r.item_name || r.item_id || '（无名条目）') +
+      '<span class="spacer"></span><span class="tag">' + esc(r.number || '') + '</span></h3>' +
+      (rows
+        ? '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
+          '<th style="width:96px">字段</th><th>现在的值</th><th>会改成</th>' +
+          '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+        : '<div class="cnhint">没有字段需要改动</div>') +
+      imgs +
+      (r.message ? '<div class="cnhint" style="margin-top:6px">' + esc(r.message) + '</div>' : '') +
+      '</div>';
+  }).join('');
+
+  openDrawer(
+    '<h3>' + esc(title) + '</h3>' +
+    '<div class="alert" style="background:var(--warn-soft);border-color:#f6e0b8;color:var(--warn);margin:10px 0">' +
+    '预演 —— 本次<strong>没有写入任何东西</strong>，也没有下载图片。' +
+    '共 ' + list.length + ' 条，其中 ' + touched + ' 条会被改动，合计 ' + fields + ' 个字段。' +
+    '灰色行表示新旧值相同（写了等于没写）。</div>' +
+    cards +
+    '<div class="cnhint">要真的写入就关掉这个抽屉，点「批量刮削」。</div>');
+}
+
 // 批量刮削勾选的条目：把 id 明确传给后端，不用「整库前 N 条」那种模糊范围。
-async function cnScrapeSelected() {
+//
+// dry=true 走预演（服务端只搜索、算差异，不写）。
+async function cnScrapeSelected(dry) {
   const ids = [...S.cn.sel];
   if (!ids.length) { toast('先勾选要刮削的条目', 'err'); return; }
   try {
@@ -1652,9 +1833,11 @@ async function cnScrapeSelected() {
         ids,
         overwrite_images: $('#cnOverwriteImg').checked,
         overwrite_title: $('#cnOverwriteTitle').checked,
+        dry_run: !!dry,
       },
     });
-    watchJob(r.job_id, '国产传媒刮削（' + ids.length + ' 条）', () => {
+    watchJob(r.job_id, (dry ? '预演国产传媒刮削（' : '国产传媒刮削（') + ids.length + ' 条）', (j) => {
+      if (dry) { showScrapePreview(j.result, '国产传媒刮削预演（' + ids.length + ' 条）'); return; }
       S.cn.sel.clear();
       cnSyncSelUI();
       loadCnItems(S.cn.start);
@@ -1779,6 +1962,78 @@ async function openCnEditor(itemId) {
       else ev.target.disabled = false;
     } catch (e) { toast(e.message, 'err'); ev.target.disabled = false; }
   };
+}
+
+// ---------------- 条目写入历史（可回滚） ----------------
+
+// 每次往 Emby 写条目元数据前，服务端都会先存一份快照（见 itemsnapshot.go）。
+// 这里只负责列出来 + 给一个回滚入口 —— Emby 的写入是整对象替换、没有版本历史，
+// 快照是唯一的后悔药，所以入口不能藏太深。
+async function loadItemHistory() {
+  const host = $('#stHistList');
+  const msg = $('#stHistMsg');
+  if (!host) return;
+  msg.textContent = '加载中…';
+  let data;
+  try {
+    data = await api('/api/items/history?limit=50');
+  } catch (e) {
+    msg.textContent = '';
+    host.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
+    return;
+  }
+  const recs = data.records || [];
+  msg.textContent = '共 ' + (data.total || 0) + ' 条';
+  if (!recs.length) {
+    host.innerHTML = '<div class="empty">还没有写入记录</div>';
+    return;
+  }
+  host.innerHTML =
+    '<div class="hint" style="margin:0 0 8px">' + esc(data.note || '') + '</div>' +
+    '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
+    '<th style="width:150px">时间</th><th>条目</th><th>来源</th>' +
+    '<th>改动的字段</th><th style="width:104px"></th>' +
+    '</tr></thead><tbody>' +
+    recs.map((r) => {
+      const when = String(r.created_at || '').replace('T', ' ').slice(0, 19);
+      return '<tr' + (r.rolled_back ? ' class="same"' : '') + '>' +
+        '<td class="mono">' + esc(when) + '</td>' +
+        '<td>' + esc(r.name || r.item_id || '') + '</td>' +
+        '<td>' + esc((r.sources || []).join(' / ')) + '</td>' +
+        '<td class="mono">' + esc((r.changed || []).join('、')) + '</td>' +
+        '<td>' + (r.rolled_back
+          ? '<span class="cnhint">已回滚</span>'
+          : '<button class="btn btn-sm" data-rollback="' + esc(r.id) + '">回滚</button>') +
+        '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+  $$('button[data-rollback]', host).forEach((b) => {
+    b.onclick = () => rollbackItemWrite(b.dataset.rollback, b);
+  });
+}
+
+// 回滚要点两次：第一次只把按钮切成确认态。
+// 不用 window.confirm() —— 它在无头浏览器里会卡住（老问题，别再用）。
+async function rollbackItemWrite(id, btn) {
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = '确认回滚？';
+    setTimeout(() => {
+      if (btn.isConnected) { btn.dataset.armed = ''; btn.textContent = '回滚'; }
+    }, 4000);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '回滚中…';
+  try {
+    const r = await api('/api/items/rollback', { method: 'POST', body: { id } });
+    toast(r.message || '已回滚', 'ok');
+    loadItemHistory();
+  } catch (e) {
+    toast(e.message, 'err');
+    btn.disabled = false;
+    btn.dataset.armed = '';
+    btn.textContent = '回滚';
+  }
 }
 
 // ---------------- 设置 ----------------
@@ -1967,6 +2222,28 @@ async function doLogin() {
 }
 
 // ---------------- 事件绑定 ----------------
+
+// 媒体库批量刮削。dry=true 时只预演：服务端只搜索并算差异，一个字节都不写。
+async function runLbBatch(dry) {
+  try {
+    const r = await api('/api/items/scrape-batch', {
+      method: 'POST',
+      body: {
+        parent_id: $('#lbLib').value,
+        only_no_poster: $('#lbNoPoster').checked,
+        limit: Number($('#lbBatchLimit').value) || 50,
+        overwrite_images: $('#lbOverwrite').checked,
+        refresh: $('#lbRefresh').checked,
+        dry_run: !!dry,
+      },
+    });
+    watchJob(r.job_id, dry ? '预演批量刮削' : '批量刮削影片', (j) => {
+      if (dry) { showScrapePreview(j.result, '批量刮削预演'); return; }
+      loadItems(S.lb.start);
+    });
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 function bind() {
   // 访问认证（进程自己的登录）
   $('#agBtn').onclick = doAuthLogin;
@@ -1974,6 +2251,16 @@ function bind() {
   $('#agUser').onkeydown = (e) => { if (e.key === 'Enter') $('#agPass').focus(); };
   $('#sbLogout').onclick = doAuthLogout;
   $('#stAuthSave').onclick = saveAuth;
+  $('#stHistReload').onclick = loadItemHistory;
+  $('#hScan').onclick = loadHealth;
+  // 诊断包是个普通下载链接（<a download href="/api/diag/bundle">），浏览器自己
+  // 处理文件落盘。这里只补一句「在打包」的反馈 —— 大日志要压几秒，
+  // 什么都不显示的话用户会连点好几次。
+  $('#stDiag').onclick = () => {
+    const m = $('#stDiagMsg');
+    m.textContent = '正在打包…（密钥已脱敏）';
+    setTimeout(() => { if (m.isConnected) m.textContent = ''; }, 5000);
+  };
 
   $$('#loginMode button').forEach((b) => b.onclick = () => {
     $$('#loginMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1999,21 +2286,8 @@ function bind() {
     if (btn.dataset.act === 'scrape') scrapeOne(card.dataset.id, btn);
     else openItemDetail(card.dataset.id);
   };
-  $('#lbBatch').onclick = async () => {
-    try {
-      const r = await api('/api/items/scrape-batch', {
-        method: 'POST',
-        body: {
-          parent_id: $('#lbLib').value,
-          only_no_poster: $('#lbNoPoster').checked,
-          limit: Number($('#lbBatchLimit').value) || 50,
-          overwrite_images: $('#lbOverwrite').checked,
-          refresh: $('#lbRefresh').checked,
-        },
-      });
-      watchJob(r.job_id, '批量刮削影片', () => loadItems(S.lb.start));
-    } catch (e) { toast(e.message, 'err'); }
-  };
+  $('#lbBatch').onclick = () => runLbBatch(false);
+  $('#lbDry').onclick = () => runLbBatch(true);
 
   $('#psSearch').onclick = () => loadPersons(0);
   $('#psQ').onkeydown = (e) => { if (e.key === 'Enter') loadPersons(0); };
@@ -2096,7 +2370,8 @@ function bind() {
     });
     cnSyncSelUI();
   };
-  $('#cnBatch').onclick = cnScrapeSelected;
+  $('#cnDry').onclick = () => cnScrapeSelected(true);
+  $('#cnBatch').onclick = () => cnScrapeSelected(false);
   $('#cnGrid').onclick = (e) => {
     const card = e.target.closest('.mcard');
     if (!card) return;

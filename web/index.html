@@ -155,6 +155,7 @@
       <button data-view="library"><span class="ico">▤</span>媒体库刮削</button>
       <button data-view="persons"><span class="ico">☺</span>演员头像</button>
       <button data-view="javbus"><span class="ico">✓</span>番号补全</button>
+      <button data-view="health"><span class="ico">✚</span>媒体库体检</button>
       <button data-view="cn"><span class="ico">◈</span>国产传媒</button>
       <button data-view="settings"><span class="ico">⚙</span>设置</button>
     </nav>
@@ -203,10 +204,28 @@
           <label class="switch"><input type="checkbox" id="lbOverwrite"> 覆盖已有图片</label>
           <label class="switch"><input type="checkbox" id="lbRefresh" checked> 刮削后刷新</label>
           <input class="input" id="lbBatchLimit" type="number" value="50" min="1" style="width:82px" title="批量数量上限">
+          <button class="btn" id="lbDry" title="只计算会改成什么，不写入 Emby">预演</button>
           <button class="btn btn-primary" id="lbBatch">批量刮削当前条件</button>
         </div>
         <div class="grid" id="lbGrid"><div class="empty">尚未加载</div></div>
         <div class="pager" id="lbPager"></div>
+      </section>
+
+      <!-- ---- 媒体库体检 ---- -->
+      <section class="view" id="view-health">
+        <div class="toolbar">
+          <select class="select" id="hLib" style="width:190px" title="选一个媒体库再扫描"></select>
+          <select class="select" id="hType" style="width:110px" title="检查哪一类条目">
+            <option value="Movie">电影</option>
+            <option value="Episode">剧集</option>
+          </select>
+          <input class="input" id="hLimit" type="number" value="500" min="50" max="2000" style="width:90px" title="最多检查多少条">
+          <button class="btn btn-primary" id="hScan">开始体检</button>
+          <div class="grow"></div>
+          <span class="hint" style="margin:0">只读扫描，不会写入任何东西</span>
+        </div>
+        <div id="hSummary"></div>
+        <div id="hBody"><div class="empty">选一个媒体库，点「开始体检」</div></div>
       </section>
 
       <!-- ---- 演员 ---- -->
@@ -313,6 +332,7 @@
           <div class="grow"></div>
           <label class="switch"><input type="checkbox" id="cnOverwriteImg"> 覆盖已有封面</label>
           <label class="switch"><input type="checkbox" id="cnOverwriteTitle"> 覆盖已有标题</label>
+          <button class="btn" id="cnDry" title="只计算会改成什么，不写入 Emby">预演</button>
           <button class="btn btn-primary" id="cnBatch">刮削选中</button>
         </div>
         <div class="grid" id="cnGrid"><div class="empty">先选一个媒体库，再点「查询」</div></div>
@@ -415,6 +435,32 @@
           <div style="display:flex;gap:10px;align-items:center">
             <button class="btn btn-primary" id="stAuthSave">保存访问凭据</button>
             <span id="stAuthMsg" class="hint" style="margin:0"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>条目写入历史</h3>
+          <div class="hint" style="margin-bottom:10px">
+            每次写条目元数据（刮削 / 国产传媒 / 手动编辑）前都会先存一份快照。
+            Emby 的写入是<b>整对象替换</b>、没有版本历史，这是唯一的后悔药。
+            <b>注意：快照只覆盖元数据字段，被覆盖的旧图片不会回来。</b>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+            <button class="btn" id="stHistReload">刷新</button>
+            <span class="hint" id="stHistMsg" style="margin:0"></span>
+          </div>
+          <div id="stHistList"><div class="empty">点「刷新」查看</div></div>
+        </div>
+
+        <div class="card">
+          <h3>诊断</h3>
+          <div class="hint" style="margin-bottom:10px">
+            出问题时把诊断包发给开发者。里面是当前配置（<b>所有密钥已脱敏</b>）、写入历史、
+            最近的后台任务日志和数据目录清单 —— 不含密钥明文，也不含条目内容与图片。
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <a class="btn" id="stDiag" href="/api/diag/bundle" download>下载诊断包（zip）</a>
+            <span class="hint" id="stDiagMsg" style="margin:0"></span>
           </div>
         </div>
 

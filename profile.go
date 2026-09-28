@@ -141,11 +141,15 @@ func (a *AliasStore) Count() int {
 
 // ---------- 同步历史 ----------
 
-// SyncRecord 是一次资料写入的快照。Before/After 只存我们管内的那几个字段
+// SyncRecord 是一次写入的快照。Before/After 只存我们管内的那几个字段
 // （整份 Person DTO 没必要，而且回滚也不需要）。
 type SyncRecord struct {
+	// Kind 区分「人物资料写入」和「影片条目写入」。老记录没有这个字段（零值 ""），
+	// 一律按 person 处理 —— 升级后旧历史照常能用，别把用户的历史弄丢。
+	Kind       string         `json:"kind,omitempty"`
 	ID         string         `json:"id"`
 	PersonID   string         `json:"person_id"`
+	ItemID     string         `json:"item_id,omitempty"`
 	Name       string         `json:"name"`
 	CreatedAt  time.Time      `json:"created_at"`
 	Sources    []string       `json:"sources"`
@@ -154,6 +158,20 @@ type SyncRecord struct {
 	After      map[string]any `json:"after"`
 	RolledBack bool           `json:"rolled_back"`
 	RollbackAt time.Time      `json:"rollback_at,omitempty"`
+}
+
+// 写入记录的两类。
+const (
+	syncKindPerson = "person"
+	syncKindItem   = "item"
+)
+
+// kindOrDefault 把「没有 Kind 的老记录」当成人物资料写入。
+func (r SyncRecord) kindOrDefault() string {
+	if r.Kind == "" {
+		return syncKindPerson
+	}
+	return r.Kind
 }
 
 // SyncStore 保存最近的写入历史，容量满了丢最旧的。
@@ -211,15 +229,26 @@ func (s *SyncStore) Add(rec SyncRecord) string {
 
 // List 返回最近的历史（不含快照本体，省流量）。
 func (s *SyncStore) List(limit int) []SyncRecord {
+	return s.ListKind("", limit)
+}
+
+// ListKind 只返回某一类记录（syncKindItem / syncKindPerson）。
+// kind 为空表示不过滤 —— 人物资料的历史列表要用「全部」，里面本来就混着条目写入。
+func (s *SyncStore) ListKind(kind string, limit int) []SyncRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if limit <= 0 || limit > len(s.Records) {
-		limit = len(s.Records)
-	}
-	out := make([]SyncRecord, 0, limit)
-	for _, r := range s.Records[:limit] {
+	out := make([]SyncRecord, 0, 16)
+	for _, r := range s.Records {
+		if kind != "" && r.kindOrDefault() != kind {
+			continue
+		}
+		// 快照本体（Before/After）只在回滚时才需要，列表接口不带，
+		// 否则一次列表就能回几百 KB。
 		r.Before, r.After = nil, nil
 		out = append(out, r)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out
 }
@@ -516,6 +545,8 @@ type ApplyResult struct {
 	Message   string   `json:"message"`
 	Sources   []string `json:"sources"`
 	AliasMemo int      `json:"alias_memo"`
+	// ItemID 是条目（影片）写入 / 回滚时的条目 Id。人物路径不用它。
+	ItemID string `json:"item_id,omitempty"`
 	// Overwritten 列出这次**覆盖**掉了 Emby 原有值的字段（Written 的子集）。
 	// 界面据此把结果说得更准确：一律只说「已写入 N 个字段」会让用户以为
 	// 自己辛苦攒的资料被无声改掉了。

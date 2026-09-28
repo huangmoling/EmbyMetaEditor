@@ -367,6 +367,14 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
   word-break: break-word;
 }
 .magempty { padding: 18px 11px; text-align: center; color: var(--muted); font-size: 13px; }
+/* 面板头 + 右侧「预览样例图」按钮 */
+.magpanel .maghead-act { display: flex; align-items: center; gap: 10px; }
+
+/* 样例图预览：抽屉里的网格。图一律走 /api/img 代取（见 openMagPreview） */
+.magpv { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+.magpv a { display: block; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-2); }
+.magpv img { display: block; width: 100%; height: 96px; object-fit: cover; }
+.magpv a:hover { border-color: var(--accent); }
 
 /* ---------- 国产传媒专项刮削 ---------- */
 .cnlist { display: flex; flex-direction: column; }
@@ -632,3 +640,29 @@ table.pf-tbl td.pf-v { padding-top: 8px; padding-bottom: 8px; }
 }
 .pk-item img:hover { border-color: var(--accent); }
 .pk-meta { font-size: 10.5px; color: var(--muted); text-align: center; line-height: 1.45; }
+
+/* ---------- 媒体库体检：汇总 chip + 问题清单 ----------
+   一个库动辄几百条命中，列表要能一眼扫过去、每条都能点开看细节。
+   行做成 button 而不是 div，是为了键盘也能操作（体检结果常常要一条条过）。 */
+.hchips { display: flex; gap: 10px; flex-wrap: wrap; }
+.hchip {
+  display: flex; flex-direction: column; gap: 2px; min-width: 104px;
+  padding: 10px 14px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+  font-size: 11.5px; color: var(--muted);
+}
+.hchip b { font-size: 20px; font-weight: 600; color: var(--text); line-height: 1.1; }
+.hchip.warn { border-color: #f6e0b8; background: var(--warn-soft); }
+.hchip.warn b { color: var(--warn); }
+.hchip.ok b { color: var(--success); }
+
+.hlist { display: flex; flex-direction: column; }
+.hrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 4px; border: 0; border-bottom: 1px solid var(--border);
+  background: none; cursor: pointer; text-align: left; width: 100%;
+  font: inherit; color: var(--text);
+}
+.hrow:last-child { border-bottom: 0; }
+.hrow:hover { background: var(--surface-2); }
+.hrow-n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 62%; }

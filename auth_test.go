@@ -262,9 +262,26 @@ func TestSecurityHeaders(t *testing.T) {
 	if !strings.Contains(csp, "frame-ancestors 'none'") || !strings.Contains(csp, "object-src 'none'") {
 		t.Errorf("CSP 应当封死 iframe 嵌套与插件：%s", csp)
 	}
-	// 图片全部走本机代理，img-src 不该放开到任意站点
-	if strings.Contains(csp, "img-src *") {
-		t.Errorf("img-src 不该是通配：%s", csp)
+	// 图片一律走本机代理（`/api/img`、`/api/emby/image`），img-src 不该放开到外网。
+	//
+	// 这条是**安全性质**，不是风格问题：`img-src http: https:` 等于允许任何被注入的
+	// 标签把「这台机器打开了哪个页面」外发（跟踪像素）。v1.4.0 一度为了修磁力预览图
+	// 放开了它 —— 那个方向是错的，那些图有 Referer 防盗链，放开 CSP 浏览器照样 403；
+	// 正解是 `/api/javbus/samples` + `/api/img` 服务端代取。见 auth.go 那段注释。
+	img := csp
+	if i := strings.Index(img, "img-src "); i >= 0 {
+		img = img[i:]
+		if j := strings.Index(img, ";"); j >= 0 {
+			img = img[:j]
+		}
+	}
+	for _, bad := range []string{"http:", "https:", "*"} {
+		if strings.Contains(img, bad) {
+			t.Errorf("img-src 不该包含 %q（外链图片一律走同源代理）：%s", bad, csp)
+		}
+	}
+	if !strings.Contains(img, "'self'") {
+		t.Errorf("img-src 必须保留 'self'：%s", csp)
 	}
 }
 
