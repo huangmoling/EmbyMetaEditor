@@ -2189,9 +2189,9 @@ async function rollbackItemWrite(id, btn) {
 // ---------------- 设置 ----------------
 // refreshOfflineStat 把离线资料库「读到了几条 / 为什么读不到」显示在设置卡片里。
 //
-// 这个库是从另一个工具的**加密**资料库导出成 JSON 来的，失败原因往往很具体
-//（路径写错、还没导出、导出的是半截文件）。原样摆出来，比只留一个开关有用得多 ——
-// 开关打开了却什么都不生效，是最难自查的一种状态。
+// 这个库是从另一个工具的**加密**资料库导出成 CSV 来的，失败原因往往很具体
+//（路径写错、还没导出、导出的是半截文件、拿错了别的 CSV）。原样摆出来，
+// 比只留一个开关有用得多 —— 开关打开了却什么都不生效，是最难自查的一种状态。
 async function refreshOfflineStat() {
   const box = $('#stOffStat');
   if (!box) return;
@@ -2202,8 +2202,8 @@ async function refreshOfflineStat() {
     const d = await api('/api/profile/sources');
     const o = d.offline_db || {};
     if (!o.enabled) { box.textContent = '未启用。'; return; }
-    // 服务端那句 error 本身已经是一句完整的话（「读不到导出文件 <路径>：<原因>
-    // （先用 tools/export_offline_db.py 导出）」），别再套一层「读不到：」——
+    // 服务端那句 error 本身已经是一句完整的话（「读不懂资料库导出文件 <路径>：<原因>
+    // （先用 tools/sqlcipher_dump.py --csv … 导出）」），别再套一层「读不到：」——
     // 套上去就成了「读不到：读不到导出文件…」，而且会把服务端那句提示挤到看不出来。
     box.innerHTML = o.error
       ? esc(o.error)

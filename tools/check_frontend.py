@@ -445,6 +445,10 @@ def main():
             off_problems.append("卡片没说清「只读、不写回原库」")
         if "头像" not in off_txt:
             off_problems.append("卡片没说清「不提供头像，头像走独立顺序」")
+        # 「这个 CSV 是哪来的」必须写在卡片上：路径框是空的，用户不知道要先跑导出脚本，
+        # 就会去填一个随手找到的 CSV，然后对着「读不懂这个文件」发愣。
+        if "sqlcipher_dump" not in off_txt or "CSV" not in off_txt:
+            off_problems.append("卡片没说清「这个文件得先用 tools/sqlcipher_dump.py 导出成 CSV」")
     print(f"      离线资料库接线问题 {len(off_problems)} 处")
     if off_problems:
         for p in off_problems:

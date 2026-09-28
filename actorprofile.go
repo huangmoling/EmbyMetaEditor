@@ -61,9 +61,18 @@ type ActorFacts struct {
 	Hobby      string   `json:"hobby,omitempty"`
 	Agency     string   `json:"agency,omitempty"`
 	AgencySpan string   `json:"agency_span,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Summary    string   `json:"summary,omitempty"`
-	ProviderID string   `json:"provider_id,omitempty"` // 源站内部 ID / slug
+	// RetirementDate 目前只有离线资料库提供（导出库里 142 条带退役日期）。
+	// 加它是为了让「已退役」这件事在简介里看得见 —— 这些库里退隐的演员不少，
+	// 而只有出道日期的话读起来像是还在活跃。
+	RetirementDate string   `json:"retirement_date,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Summary        string   `json:"summary,omitempty"`
+	ProviderID     string   `json:"provider_id,omitempty"` // 源站内部 ID / slug
+	// Note 是「关于这次命中，用户需要知道的一件事」，会被并进面板的告警里。
+	// 目前只有离线资料库用它：那个库重名率不低（实测 name_original 有 15% 的键
+	// 同时属于两条以上记录），一个写法命中多条时必须说出来 ——
+	// 悄悄挑一条的后果是把别人的生日写进用户的 Emby。
+	Note string `json:"note,omitempty"`
 }
 
 // ProfileSource 是资料源的统一接口。
@@ -104,7 +113,7 @@ var actorSourceNotes = map[string]string{
 	"Wikipedia":  "日文维基：整段简介（通常最完整），兼出生日期、出生地与读音别名",
 	// 它不是在线源，是把本地那份加密资料库导出成 JSON 之后读出来的东西。
 	// 启用后它排在**最前面**（第一优先级），且不提供头像。
-	"OfflineDB": "本地只读的离线资料库（由 tools/export_offline_db.py 导出成 JSON）：排在最前面，已确认过的字段先落，不提供头像",
+	"OfflineDB": "本地只读的离线资料库（由 tools/sqlcipher_dump.py 从加密资料库导出成 CSV）：排在最前面，已确认过的字段先落，不提供头像",
 }
 
 // actorSourceNote 取某个源的界面说明；没登记就返回空串（界面会少一行，不会报错）。
@@ -900,6 +909,7 @@ func mergeFacts(facts []ActorFacts) *mergedFacts {
 		m.put("blood_type", f.BloodType, f.SourceLabel)
 		m.put("debut_date", f.DebutDate, f.SourceLabel)
 		m.put("debut_span", f.DebutSpan, f.SourceLabel)
+		m.put("retirement_date", f.RetirementDate, f.SourceLabel)
 		m.put("hobby", f.Hobby, f.SourceLabel)
 		m.put("agency", f.Agency, f.SourceLabel)
 		m.put("agency_span", f.AgencySpan, f.SourceLabel)
@@ -936,6 +946,7 @@ func buildOverview(m *mergedFacts) []string {
 	add("罩杯", "cup", " 杯")
 	add("血型", "blood_type", "")
 	add("出道", "debut_date", "")
+	add("退役", "retirement_date", "")
 	add("兴趣", "hobby", "")
 	return lines
 }
@@ -1035,6 +1046,16 @@ func buildActorProfile(name, personID string, facts []ActorFacts, ex embyExistin
 		lines = append(lines, "标签："+strings.Join(srcTags, "、"))
 	}
 	p.Overview = strings.Join(lines, "\n")
+	// 一条结构化字段都没凑出来时，退回源站那段自由文本。
+	//
+	// 为什么需要这一手：简介的版式是「一行一个字段」，而 Wikipedia 和离线资料库
+	// 这类源的主要贡献本来就是**成段的简介**（离线库里 2.6 万条有中文简介）。
+	// 不兜的话，一个只提供简介的源在界面上会显示成「简介：未抓取到」——
+	// 抓到了东西却当场丢掉，用户只能看着。
+	// 只在**一条结构化行都没有**时才兜：有结构化字段时仍优先它，版式不变。
+	if strings.TrimSpace(p.Overview) == "" {
+		p.Overview = strings.TrimSpace(m.fields["summary"])
+	}
 
 	// ProviderIds：每个命中的源各写一个
 	prov := map[string]string{}
@@ -1074,6 +1095,15 @@ func buildActorProfile(name, personID string, facts []ActorFacts, ex embyExistin
 	}
 	for i := range facts {
 		p.Sources = append(p.Sources, facts[i].SourceLabel)
+	}
+	// 源主动交代的「关于这次命中你该知道的事」。目前只有离线资料库会用：
+	// 一个写法在那个库里对应多条记录时必须说出来，否则用户看到的是一个
+	// 看起来毫无异常的出生日期，而它可能来自另一个同名的人。
+	// 放在**命中的来源**那一层说，用户才知道该去找哪个源核对。
+	for i := range facts {
+		if n := strings.TrimSpace(facts[i].Note); n != "" {
+			p.Warnings = append(p.Warnings, facts[i].SourceLabel+"："+n)
+		}
 	}
 	return p
 }

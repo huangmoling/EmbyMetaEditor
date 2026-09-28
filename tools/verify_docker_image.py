@@ -14,7 +14,8 @@
 人物归并页与磁力多源（外加一条**反向**断言：v1.7.0 删掉的体检页不该还在镜像里）；
 `check_embedded_backend` 查 gfriends CDN 模板、`GET /api/profile/works`、`/Library/VirtualFolders`、
 磁力体积正则、v1.6.0 的路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`、v1.7.0 的
-人物查重/归并/磁力源三条路由与 javdb 解析特征串。
+人物查重/归并/磁力源三条路由与 javdb 解析特征串，以及 v1.9.0 的离线资料库改读 CSV 那一组
+（前后端各一组正向字面量，外加**反向**断言：旧的 JSON 路径标签 / 占位示例 / 导出引导必须都消失）。
 **加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL；
 被编译器内联掉的函数名也一样 —— `mergeMagnets` 和 `sortMagnetsBySize` 就是这么消失的，
 所以优先挑字符串字面量）。断言里凡是「v1.4.0 做过、v1.6.0 又改回来」的地方，按**当前**形态写。
@@ -236,6 +237,25 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.9.0：离线源改读 CSV 导出，界面这一层要跟着换的那几处。
+    #
+    # 为什么这几条非得在**产物**里查：卡片文案与输入框标签是内嵌前端的字面量，
+    # 源码改对了而镜像是旧的，界面上会留下一个「路径填 JSON」的框 —— 用户照着
+    # 填一个早就没人生成的文件，然后对着「读不懂」发愣。
+    for marker, what in [
+        ("导出文件路径（CSV）", "路径输入框改成 CSV（v1.9.0）"),
+        ("库里同一个写法对应多条记录时会给出提醒", "卡片说明重名会提醒（v1.9.0）"),
+        ("actresses_export.csv", "路径框的占位示例（v1.9.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+    # 反向：旧的 JSON 那一套必须彻底消失。只加正向断言的话，「界面改了一半、
+    # 旧标签还在」这种状态照样全绿。
+    for marker, what in [
+        ("导出文件路径（JSON）", "旧的 JSON 路径标签（v1.9.0 已换掉）"),
+        ("offline_library.json", "旧的 JSON 占位示例（v1.9.0 已换掉）"),
+    ]:
+        check("内嵌前端已移除 %s" % what, marker.encode() not in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -311,15 +331,31 @@ def check_embedded_backend(blob):
         ("data-size", "javdb 体积取自 data-size 而非页面文本（v1.7.0）"),
         # v1.8.0：离线资料库（本地只读、第一优先级）+ 别名落盘入口。
         # 全部是先在产物里 grep 过一遍才写进来的（都是字符串字面量，内联不掉）：
-        # `OfflineDB` 会写进 ProviderIds，`export_offline_db.py` 在「读不到」的引导文案里，
-        # 这两个最值钱 —— 它们分别代表「这个源真的编进去了」和「读不到时的下一步」。
+        # `OfflineDB` 代表「这个源真的编进去了」，`alias_memo` / `rememberProfileAliases`
+        # 代表「别名落盘的两条入口都还在」。
         ("OfflineDB", "离线资料库源标识（v1.8.0）"),
         ("offline_db_enabled", "离线资料库开关字段（v1.8.0）"),
-        ("export_offline_db.py", "读不到时的导出引导文案（v1.8.0）"),
         ("alias_memo", "别名落盘条数的回显字段（v1.8.0）"),
         ("rememberProfileAliases", "别名落盘入口（人工采用 / 写入成功共用，v1.8.0）"),
+        # v1.9.0：离线源改读 CSV 导出（原来是读 JSON），并新增重名提醒与退役日期。
+        # 这些列名最值钱 —— 它们是**CSV 列映射真的编进去了**的证据：
+        # 只断言 `OfflineDB` 的话，一个还在读旧 JSON 的二进制同样能通过。
+        ("sqlcipher_dump.py", "读不到时的导出引导文案（v1.9.0）"),
+        ("name_original", "CSV 的姓名列（v1.9.0）"),
+        ("aliases_json", "CSV 的别名列（v1.9.0）"),
+        ("biography_zh_cn", "CSV 的中文简介列（v1.9.0）"),
+        ("retirement_date", "退役日期（v1.9.0）"),
+        ("这个写法在资料库里对应多条记录", "重名提醒文案（v1.9.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
+
+    # 反向：旧的 JSON 导出引导必须彻底消失。v1.9.0 把源改成直接读 CSV，
+    # `tools/export_offline_db.py` 连同它的 JSON 中间格式一起删了 —— 二进制里
+    # 若还留着这句话，用户会被指到一个仓库里根本不存在的脚本。
+    for marker, what in [
+        ("export_offline_db.py", "旧的 JSON 导出引导（v1.9.0 已删）"),
+    ]:
+        check("后端已移除 %s" % what, marker.encode() not in blob, marker)
 
 
 def main():

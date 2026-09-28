@@ -26,6 +26,8 @@
 
 只读写本项目自己的配置文件和 /api，不碰 Emby，也不碰原始 .db。
 """
+import csv
+import io
 import json
 import os
 import sys
@@ -38,45 +40,75 @@ import wbauth  # noqa: E402
 APP = "http://127.0.0.1:8097/"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# 夹具里放三个人。第一个的关键点是「本名查不到、只有别名查得到」——
+# 列名与列序照抄**真实导出文件**（tools/sqlcipher_dump.py 导出的 41 列）。
+# 夹具如果自己发明一套列名，「列名对不上」这类问题在这个脚本里就永远暴露不出来 ——
+# 而它恰恰是这条链路上最容易犯的错（真实的坑：文件带 BOM，第一列会变成 "\ufeffid"）。
+CSV_COLUMNS = [
+    "id", "name_original", "name_ja", "name_zh_cn", "name_romanized", "kana",
+    "nationality", "birthplace", "birthdate", "blood_type",
+    "height_cm", "bust_cm", "waist_cm", "hip_cm", "cup", "shoe_cm",
+    "body_type", "occupation", "agency", "debut_date", "debut_year",
+    "retirement_date", "retirement_year", "career_status", "hobbies", "specialties",
+    "biography_original", "biography_zh_cn", "profile_image_url", "official_site",
+    "favorite_count", "aliases_json", "nicknames_json", "tags_json",
+    "social_links_json", "awards_json", "timeline_json", "public_roles_json",
+    "data_conflicts_json", "created_at", "updated_at",
+]
+
+# 夹具里放四个人。第一个的关键点是「本名查不到、只有别名查得到」——
 # 这正对应真实用法：Emby 里的人物名是中文，而库里记的是旧艺名，
 # 能不能对上全靠别名索引 + 别名记忆。
-FIXTURE = {
-    "Version": 1,
-    "Source": "verify_offline_lib.py",
-    "Note": "回归夹具，不是真实导出",
-    "Entries": [
-        {
-            "Name": "离线検証 ひとり",
-            "Aliases": ["离线别名検証"],
-            "Summary": "离线库夹具简介：第一位。",
-            "BirthDate": "1991/04/19",
-            "BirthPlace": "東京都",
-            "BloodType": "A",
-            "Agency": "夹具事务所",
-            "ProviderID": "offline-1",
-        },
-        {
-            "Name": "离线検証 ふたり",
-            "Aliases": [],
-            "Summary": "离线库夹具简介：第二位。",
-            "BirthDate": "1993-07-02",
-            "BirthPlace": "大阪府",
-            "ProviderID": "offline-2",
-        },
-        {"Name": "空条目検証", "Aliases": []},  # 整条空白，不该被当成命中
-    ],
-}
+# 第四个人**故意和第一个重名**：真实库里 15% 的名字都对应多条记录，
+# 这条用来验「一个写法命中多条时会不会提醒」。
+FIXTURE_ROWS = [
+    {
+        "id": "1",
+        "name_original": "离线検証 ひとり",
+        "name_ja": "离线検証 ひとり",
+        "name_romanized": "Offline Hitori",
+        "biography_zh_cn": "离线库夹具简介：第一位。",
+        "birthdate": "1991/04/19",
+        "birthplace": "東京都",
+        "blood_type": "A",
+        "height_cm": "163.0",
+        "debut_date": "2013-03-09",
+        "retirement_date": "2018-12-01",
+        "agency": "夹具事务所",
+        "aliases_json": '["离线别名検証、夹具旧名"]',
+    },
+    {
+        "id": "2",
+        "name_original": "离线検証 ふたり",
+        "name_ja": "离线検証 ふたり",
+        "biography_zh_cn": "离线库夹具简介：第二位。",
+        "birthdate": "1993-07-02",
+        "birthplace": "大阪府",
+    },
+    # 整条只有名字：没有内容就不该被当成命中（否则「命中来源」里会多一个
+    # 什么都没提供的源，用户还得猜它为什么在那儿）。
+    {"id": "3", "name_original": "空条目検証", "name_ja": "空条目検証"},
+    {
+        "id": "4",
+        "name_original": "离线検証 ひとり",
+        "name_ja": "离线検証 ひとり",
+        "biography_zh_cn": "同名但其实是另一个人。",
+        "birthdate": "1975-11-02",
+    },
+]
 
 
 def fixture_path():
-    return os.path.join(HERE, "..", ".tmp-offlib-fixture.json")
+    return os.path.join(HERE, "..", ".tmp-offlib-fixture.csv")
 
 
 def write_fixture():
+    """按真实导出文件的形态写夹具（含 UTF-8 BOM、41 列）。"""
     p = os.path.abspath(fixture_path())
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(FIXTURE, f, ensure_ascii=False, indent=1)
+    with io.open(p, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(CSV_COLUMNS)
+        for row in FIXTURE_ROWS:
+            w.writerow([row.get(c, "") for c in CSV_COLUMNS])
     return p
 
 
@@ -178,7 +210,7 @@ def main():
               (("  | " + str(detail)) if detail else ""))
 
     fp = write_fixture()
-    print("夹具已写入 %s（%d 条）" % (fp, len(FIXTURE["Entries"])))
+    print("夹具已写入 %s（%d 条）" % (fp, len(FIXTURE_ROWS)))
 
     tgt = http_json("/json/new?about:blank", method="PUT")
     page = Page(tgt["webSocketDebuggerUrl"])
@@ -210,7 +242,7 @@ def main():
     txt = wait_stat(page, "已载入")
     print("   状态行：%s" % txt)
     check("保存后状态行报出载入条数", "已载入" in txt, txt)
-    check("条数与夹具一致", ("%d 条" % len(FIXTURE["Entries"])) in txt, txt)
+    check("条数与夹具一致", ("%d 条" % len(FIXTURE_ROWS)) in txt, txt)
     check("状态行说明了它排在最前面", "前面" in txt, txt)
 
     print("\n3) 重新加载页面，确认真的落盘了（不是只活在内存里）")
@@ -241,7 +273,7 @@ def main():
     check("离线源在列表里", "OfflineDB" in keys, keys[:3])
     check("离线源排在第一位（第一优先级）", keys and keys[0] == "OfflineDB", keys[:3])
     check("offline_db.enabled 为真", off.get("enabled") is True, off)
-    check("offline_db.entries 与夹具一致", off.get("entries") == len(FIXTURE["Entries"]), off.get("entries"))
+    check("offline_db.entries 与夹具一致", off.get("entries") == len(FIXTURE_ROWS), off.get("entries"))
     check("offline_db 没有报错", not off.get("error"), off.get("error"))
     note = next((s.get("note") for s in (srcs.get("sources") or []) if s["key"] == "OfflineDB"), "")
     check("源列表里带了说明文案", bool(note), note[:40])
@@ -283,6 +315,9 @@ def main():
     # 有没有落进简介，而不是夹具里那句 Summary。
     check("简介里的结构化行来自夹具",
           "血型：A" in ov and "事务所：夹具事务所" in ov, ov)
+    # 退役日期是我们为这个资料库新加进版式的一行：这些库里退隐的演员不少，
+    # 只有出道日期的话读起来像是还在活跃。
+    check("退役日期进了简介版式", "退役：2018-12-01" in ov, ov)
     check("斜杠日期被收敛成 YYYY-MM-DD",
           (fields.get("premiere_date") or {}).get("value") == "1991-04-19",
           (fields.get("premiere_date") or {}).get("value"))
@@ -295,13 +330,24 @@ def main():
     d2 = res2 or {}
     check("空条目不产生 facts", not (d2.get("facts") or []), len(d2.get("facts") or []))
 
+    print("\n6.5) 一个写法对应多条记录时必须提醒（真实库里 15% 的名字是这样）")
+    # 夹具里第 1 条与第 4 条同名。悄悄挑一条的后果是把另一个人的出生日期
+    # 写进用户的 Emby，而界面上看起来毫无异常 —— 所以这里要的是**有告警**。
+    res_dup = api(page, "/api/profile/preview",
+                  {"name": "离线検証 ひとり", "person_id": "", "sources": ["OfflineDB"]})
+    d_dup = res_dup or {}
+    warns = d_dup.get("warnings") or []
+    print("   warnings=%s" % warns)
+    check("重名时给出了告警", any("条记录" in w for w in warns), warns)
+    check("告警里点出了另一条记录的 id", any("另有 4" in w for w in warns), warns)
+
     print("\n7) 路径指向不存在的文件时，状态行要原样报出原因")
-    set_form(page, os.path.join(HERE, "..", ".tmp-offlib-nope.json"), True)
+    set_form(page, os.path.join(HERE, "..", ".tmp-offlib-nope.csv"), True)
     save_settings(page)
     txt = wait_stat(page, "读不到")
     print("   状态行：%s" % txt)
     check("报出了「读不到」", "读不到" in txt, txt)
-    check("原因里提到导出脚本", "export_offline_db" in txt, txt[:120])
+    check("原因里提到导出脚本", "sqlcipher_dump" in txt, txt[:120])
 
     print("\n8) 关掉开关 → 该源从列表里消失")
     set_form(page, fp, False)

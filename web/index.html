@@ -410,14 +410,14 @@
           <h3>离线演员资料库</h3>
           <div class="hint" style="margin-bottom:10px">
             本地<b>只读</b>的资料源。原始资料库（<span class="mono">.db</span>）是加密的、归另一个工具所有，
-            我们既不解析也不写入它 —— 先用 <span class="mono">tools/export_offline_db.py</span> 导出成 JSON，
+            我们既不解析也不写入它 —— 先用 <span class="mono">tools/sqlcipher_dump.py --csv</span> 把它导出成 CSV，
             再把路径填在这里。启用后它排在所有在线资料源<b>最前面</b>（已确认过的字段先落，在线源只补它没有的）；
-            它<b>不提供头像</b>，头像仍走上面 gfriends 那条独立顺序。
+            它<b>不提供头像</b>，头像仍走上面 gfriends 那条独立顺序。库里同一个写法对应多条记录时会给出提醒。
           </div>
           <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stOffOn"> 启用离线资料库</label>
           <div class="field">
-            <label>导出文件路径（JSON）</label>
-            <input class="input" id="stOffPath" placeholder="F:\桌面\offline_library.json" spellcheck="false">
+            <label>导出文件路径（CSV）</label>
+            <input class="input" id="stOffPath" placeholder="F:\桌面\emby\演员数据库\actresses_export.csv" spellcheck="false">
             <div class="hint" id="stOffStat">未启用。</div>
           </div>
         </div>
