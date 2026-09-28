@@ -518,6 +518,17 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .pf-srcbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; font-size: 12px; }
 
+/* 搜索用名字：抽屉顶部一行。它是**这一屏唯一会改的东西**（其余全是只读展示），
+   所以给它一个浅底把「可编辑」和下面的信息区分开。 */
+.pf-name {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 9px 11px; margin-bottom: 14px;
+}
+.pf-name > label { font-size: 12.5px; font-weight: 600; color: var(--text-2); white-space: nowrap; }
+.pf-name .input { width: 200px; padding: 5px 9px; background: var(--surface); }
+.pf-name .cnhint { flex: 1 1 220px; min-width: 0; }
+
 /* 抓取源：抽屉里**分列**摆（一列一个源），与侧栏那行小开关是同一份状态的两种呈现。
    抽屉那份写清了每个源会填什么字段 —— 用户在这里要做的是「这次从哪几个源导入」，
    得先知道每个源给什么才谈得上选。 */

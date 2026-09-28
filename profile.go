@@ -337,10 +337,37 @@ type FetchOptions struct {
 	UseAliasMemo bool     // 是否用别名记忆扩展搜索词
 }
 
+// effectiveSearchName 决定这次去外部源搜索时**用哪个名字**。
+//
+// 界面上的「搜索用名字」优先；留空（或只有空白）就退回 Emby 里的人物名。
+// 为什么需要这个开关：Emby 里的人物名多半是刮削器写进去的，常常和源站的写法
+// 对不上（中文「三上悠亚」vs 日文「三上悠亜」、缺空格、用了艺名），而三个资料源
+// 全是日文站 —— 拿对不上的名字去搜就是一条不中，用户手里明明有正确写法却没处填。
+//
+// 注意它**只影响查询词**：Emby 里的人物名、写入的字段归属、同步历史里的名字
+// 全都仍按 `name` 走（见 fetchActorProfile 里 prof.Name 那段注释）。
+func effectiveSearchName(name, searchName string) string {
+	if s := strings.TrimSpace(searchName); s != "" {
+		return s
+	}
+	return strings.TrimSpace(name)
+}
+
 // fetchActorProfile 并发跑各源，合并成一份可供界面比对的资料。
 //
 // 全程**只读**：不改 Emby、不落盘。界面点「抓取」走的也是这里。
-func (a *App) fetchActorProfile(ctx context.Context, personID, name string, opts FetchOptions) (*ActorProfile, error) {
+//
+// searchName 是界面上手动填的「搜索用名字」，空 = 用 Emby 里的人物名。
+func (a *App) fetchActorProfile(ctx context.Context, personID, name, searchName string, opts FetchOptions) (*ActorProfile, error) {
+	return a.fetchActorProfileWith(ctx, actorSources(), personID, name, searchName, opts)
+}
+
+// fetchActorProfileWith 是 fetchActorProfile 的可测版本：资料源清单当参数传进来。
+//
+// 和 scrapeCNWith 同一个套路 —— 真源要联网，单测里没法稳定重放，于是把协作者
+// 提成参数，测试换成假源。这样才能在不联网的前提下验到要害：
+// **搜索名有没有真的传到每个源**（而不是算出来就丢在半路）。
+func (a *App) fetchActorProfileWith(ctx context.Context, srcs []ProfileSource, personID, name, searchName string, opts FetchOptions) (*ActorProfile, error) {
 	cfg := a.store.Get()
 	client := newHTTPClient(cfg)
 
@@ -360,7 +387,16 @@ func (a *App) fetchActorProfile(ctx context.Context, personID, name string, opts
 		}
 	}
 
-	// 搜索名候选：本人名字 + 别名记忆里的写法
+	// 本次实际的查询词：界面手填的搜索名优先，留空用 Emby 里的人名。
+	// 它和下面的 aliases 是两个不同的东西，别混：
+	//   search  —— 发给源站当**关键字**的
+	//   aliases —— 用来**认可**源站返回的其他写法的（命中别名记 95 分）
+	search := effectiveSearchName(name, searchName)
+
+	// 别名候选：一律以 **Emby 里的名字** 去查别名记忆 —— 那是这条人物的身份，
+	// 和这次临时改的搜索词无关。手填的搜索名不进这个列表：用户明确说过
+	// 「不记，每次手填」，把它塞进别名记忆等于偷偷记住了。
+	// （源站自己返回的别名照旧会被记，那是另一回事，见 applyProfileFacts。）
 	names := []string{name}
 	var aliases []string
 	if opts.UseAliasMemo && a.aliases != nil {
@@ -373,7 +409,6 @@ func (a *App) fetchActorProfile(ctx context.Context, personID, name string, opts
 	}
 
 	// 选源
-	srcs := actorSources()
 	if len(opts.Sources) > 0 {
 		want := map[string]bool{}
 		for _, k := range opts.Sources {
@@ -401,15 +436,15 @@ func (a *App) fetchActorProfile(ctx context.Context, personID, name string, opts
 			defer wg.Done()
 			sctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 			defer cancel()
-			f, err := s.Fetch(sctx, client, name, aliases)
+			f, err := s.Fetch(sctx, client, search, aliases)
 			results[i] = res{f: f, err: err}
 		}(i, s)
 	}
 	wg.Wait()
 
-	// **顺序即优先级**：按 actorSources() 的注册顺序（AVデータバンク 最优先）
+	// **顺序即优先级**：按 srcs 的注册顺序（AVデータバンク 最优先）
 	var facts []ActorFacts
-	prof := &ActorProfile{Name: name, PersonID: personID}
+	prof := &ActorProfile{Name: name, PersonID: personID, SearchName: search}
 	for i, r := range results {
 		if r.err != nil {
 			prof.Warnings = append(prof.Warnings, fmt.Sprintf("%s：%v", srcs[i].Label(), r.err))
@@ -420,7 +455,10 @@ func (a *App) fetchActorProfile(ctx context.Context, personID, name string, opts
 		}
 		facts = append(facts, *r.f)
 	}
+	// buildActorProfile 第一个参数仍是 **Emby 里的名字**：prof.Name 进同步历史、
+	// 也是别名记忆的 canonical，必须是这条人物的身份，不能是临时的搜索词。
 	built := buildActorProfile(name, personID, facts, ex)
+	built.SearchName = search
 	built.Warnings = append(prof.Warnings, built.Warnings...)
 	return built, nil
 }
@@ -491,11 +529,14 @@ type ApplyResult struct {
 // （用户是在并排看到两边值之后亲手勾的）。
 // **无论哪种，最终写什么值由服务端重新抓取后决定**，不接受前端传来的值 ——
 // 避免把任意内容写进用户的 Emby。
-func (a *App) applyActorProfile(ctx context.Context, personID, name string, keys []string, opts FetchOptions) (*ApplyResult, error) {
+//
+// searchName 只当查询词（见 effectiveSearchName）：写入的字段归属、同步历史里的
+// 名字仍是 Emby 里的人物名。批量路径传空串 —— 一批人共用一个手填的搜索名没有意义。
+func (a *App) applyActorProfile(ctx context.Context, personID, name, searchName string, keys []string, opts FetchOptions) (*ApplyResult, error) {
 	if personID == "" {
 		return nil, fmt.Errorf("缺少演员 ID")
 	}
-	prof, err := a.fetchActorProfile(ctx, personID, name, opts)
+	prof, err := a.fetchActorProfile(ctx, personID, name, searchName, opts)
 	if err != nil {
 		return nil, err
 	}

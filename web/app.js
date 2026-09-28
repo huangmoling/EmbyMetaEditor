@@ -823,11 +823,55 @@ function bindProfileSourcePicker() {
   syncProfileSourceUI();
 }
 
+// profileNameField 是抽屉顶部的「搜索用名字」。
+//
+// 为什么需要它：Emby 里的人物名多半是刮削器写进去的，常常和资料站的写法对不上
+// （中文「三上悠亚」vs 日文「三上悠亜」、少个空格、写的是艺名），而这三个源全是
+// 日文站 —— 名字对不上就是一条都搜不到，用户手里明明有正确写法却没处填，
+// 只能跑去 Emby 里改人名（那会牵动别的地方）。
+//
+// 它**只当搜索词**：Emby 里的人物名一个字都不改，写进去的字段也仍然归属当前
+// 打开的这条人物（服务端 effectiveSearchName 那段注释是同一个保证）。
+// 留空 = 用 Emby 里的原名。
+function profileNameField() {
+  const cur = S.prof.cur || {};
+  const emby = cur.name || '';
+  const v = cur.searchName == null ? emby : cur.searchName;
+  return '<div class="pf-name">' +
+    '<label for="pfName">搜索用名字</label>' +
+    '<input class="input" id="pfName" spellcheck="false" autocomplete="off" ' +
+    'placeholder="' + esc(emby) + '" value="' + esc(v) + '">' +
+    '<span class="cnhint">只在去资料站搜索时用它，<strong>Emby 里的名字不会被改</strong>' +
+    '（' + esc(emby) + '）；留空 = 用原名</span>' +
+    '</div>';
+}
+
+// bindProfileNameField 把输入框里的字记进 S.prof.cur。
+//
+// 抽屉会整块重画（未抓取态 ↔ 对照表），不记下来的话，抓完一次名字就退回原名了，
+// 用户想「换一个写法再搜一次」就得重打一遍。
+function bindProfileNameField() {
+  const el = $('#pfName');
+  if (!el) return;
+  if (S.prof.cur) S.prof.cur.searchName = el.value;
+  el.oninput = () => { if (S.prof.cur) S.prof.cur.searchName = el.value; };
+}
+
+// profileSearchName 取当前要发出去的搜索名；空串照发，由服务端回退成 Emby 里的名字 ——
+// 「留空 = 用原名」这条规则只在有效的那个地方定义一次（effectiveSearchName）。
+function profileSearchName() {
+  const el = $('#pfName');
+  return el ? el.value.trim() : '';
+}
+
 // profileBody 组装抓取/写入入参；keys 只在写入时给（界面上的逐字段勾选）。
 function profileBody(personId, name, keys) {
   const b = {
     person_id: personId || '',
     name: name,
+    // name 是这条人物在 Emby 里的身份（同步历史、别名记忆都用它），
+    // search_name 只决定这次拿什么词去资料站搜。
+    search_name: profileSearchName(),
     sources: Array.from(S.prof.sel),
     use_alias_memo: $('#pfAlias') ? $('#pfAlias').checked : true,
   };
@@ -952,8 +996,12 @@ function renderProfilePanel(personId, name, prof) {
     : '';
 
   body.innerHTML = warns +
+    profileNameField() +
     profileSourcePicker() +
     '<div class="pf-srcbar">命中来源：' + (srcTags || '<span class="cnhint">无</span>') +
+    // 回显服务端**实际发出去**的查询词，而不是输入框当前的值：抓完之后用户还能
+    // 接着改输入框，光看输入框分不清哪次是这次的。
+    '<span class="cnhint">本次按「' + esc(prof.search_name || name) + '」搜索</span>' +
     '<span class="grow"></span>' +
     '<span class="cnhint">Emby 里为空的字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
     '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
@@ -972,6 +1020,7 @@ function renderProfilePanel(personId, name, prof) {
     '<details class="adv"' + (facts ? '' : ' hidden') + '><summary>各资料源明细（' + (prof.facts || []).length + ' 个源命中）</summary>' +
     facts + '</details>';
 
+  bindProfileNameField();
   bindProfileSourcePicker();
   // 只绑对照表里的勾选框。源勾选框由 bindProfileSourcePicker 管，
   // 两者的语义完全不同（一个选字段、一个选源），别用同一个选择器一锅端。
@@ -1077,7 +1126,9 @@ function renderProfileWorks() {
 // 站点稍有波动还会让整个面板开不了。所以打开时只做两件**本地**事
 // （列出可选的源 + 读 Emby 里的作品），抓取交给「抓取资料」按钮。
 async function openProfilePanel(personId, name) {
-  S.prof.cur = { personId: personId, name: name };
+  // searchName 初值 = Emby 里的名字：输入框预填它，用户改的是「搜索用的写法」，
+  // 不改身份。留空也算「用原名」，见 profileSearchName。
+  S.prof.cur = { personId: personId, name: name, searchName: name };
   openDrawer('<h3>' + esc(name) + '</h3>' +
     '<div class="sub">抓取简介 / 出生日期 / 出生地 / 外部 ID，与 Emby 现有值逐字段比对</div>' +
     '<div id="pfBody"></div>');
@@ -1092,6 +1143,7 @@ function renderProfileIdle() {
   if (!body) return;
   const cur = S.prof.cur || {};
   body.innerHTML =
+    profileNameField() +
     profileSourcePicker() +
     '<div class="pf-act">' +
     '<button class="btn btn-primary" id="pfFetch">抓取资料</button>' +
@@ -1101,6 +1153,7 @@ function renderProfileIdle() {
     '<div class="cnhint" style="margin-top:8px">抓取本身只读、不写 Emby：' +
     '抓到后会列出「Emby 现有值 vs 本次抓取值」，<strong>你勾哪些才写哪些</strong>。</div>' +
     '<div class="pf-works" id="pfWorks"></div>';
+  bindProfileNameField();
   bindProfileSourcePicker();
   $('#pfFetch').onclick = () => fetchProfileInto();
   // 作品列表只读本地 Emby，毫秒级 —— 抓不抓资料都不影响它，所以一进来就加载。

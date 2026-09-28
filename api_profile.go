@@ -13,8 +13,12 @@ import (
 
 // profileRequest 是抓取/写入共用的入参。
 type profileRequest struct {
-	PersonID     string   `json:"person_id"`
-	Name         string   `json:"name"`
+	PersonID string `json:"person_id"`
+	Name     string `json:"name"`
+	// SearchName 是界面上手填的「搜索用名字」，**只当查询词**：
+	// 留空 = 用 Emby 里的人物名。Emby 里的名字、写入字段的归属、
+	// 同步历史里的名字全都仍按 Name 走（见 effectiveSearchName）。
+	SearchName   string   `json:"search_name"`
 	Sources      []string `json:"sources"`
 	Keys         []string `json:"keys"`           // 只写这些字段；空 = 全部可写的
 	UseAliasMemo *bool    `json:"use_alias_memo"` // 默认 true
@@ -67,7 +71,7 @@ func (a *App) handleProfilePreview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
-	prof, err := a.fetchActorProfile(ctx, in.PersonID, in.Name, in.opts())
+	prof, err := a.fetchActorProfile(ctx, in.PersonID, in.Name, in.SearchName, in.opts())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
@@ -93,7 +97,7 @@ func (a *App) handleProfileApply(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
-	res, err := a.applyActorProfile(ctx, in.PersonID, in.Name, in.Keys, in.opts())
+	res, err := a.applyActorProfile(ctx, in.PersonID, in.Name, in.SearchName, in.Keys, in.opts())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return
@@ -235,7 +239,9 @@ func (a *App) handleProfileBatch(w http.ResponseWriter, r *http.Request) {
 				defer func() { <-sem }()
 				octx, cancel := context.WithTimeout(jobCtx, 90*time.Second)
 				defer cancel()
-				res, err := a.applyActorProfile(octx, t.ID, t.Name, keys, opts)
+				// 批量：搜索名一律空 —— 一人一个名字的清单里塞同一个手填查询词
+				// 只会让整批人都去搜同一个人。要手动改名的场景本来也是单卡。
+				res, err := a.applyActorProfile(octx, t.ID, t.Name, "", keys, opts)
 				job.mu.Lock()
 				if err != nil {
 					job.Failed++

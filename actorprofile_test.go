@@ -8,8 +8,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -199,6 +201,29 @@ func TestConfirmDetailName(t *testing.T) {
 	// 靠别名在详情页命中
 	if score, ok, _ := confirmDetailName("水户香奈", []string{"水戸かな"}, "水戸かな", 0); !ok || score != 95 {
 		t.Errorf("别名命中详情页应当通过，实际 %d/%v", score, ok)
+	}
+}
+
+// TestEffectiveSearchName 搜索名的回退规则。
+//
+// 「留空 = 用 Emby 里的原名」这条规则只在这一个函数里定义，前端发空串、后端
+// 回退，两边都不做第二份判断 —— 所以这条纯函数就是它的全部行为边界。
+func TestEffectiveSearchName(t *testing.T) {
+	cases := []struct {
+		name, search, want string
+	}{
+		{"三上悠亚", "三上悠亜", "三上悠亜"},         // 手填优先
+		{"三上悠亚", "", "三上悠亚"},             // 空 → 用 Emby 名
+		{"三上悠亚", "   ", "三上悠亚"},          // 只有空白 → 也算空
+		{"三上悠亚", "\t三上悠亜 ", "三上悠亜"},      // 前后空白修掉
+		{"  三上悠亚  ", "", "三上悠亚"},         // Emby 名自己也 trim
+		{"三上悠亚", "三上悠亜 みかみ", "三上悠亜 みかみ"}, // 中间的空格要留着（有些艺名带空格）
+		{"", "", ""}, // 两边都空 → 空（上层会按「缺少演员名」拦掉）
+	}
+	for _, c := range cases {
+		if got := effectiveSearchName(c.name, c.search); got != c.want {
+			t.Errorf("effectiveSearchName(%q, %q) = %q，期望 %q", c.name, c.search, got, c.want)
+		}
 	}
 }
 
@@ -532,6 +557,89 @@ func newProfileTestApp(t *testing.T, m *mockEmby) *App {
 		t.Fatalf("Update: %v", err)
 	}
 	return &App{store: store, aliases: NewAliasStore(), sync: NewSyncStore()}
+}
+
+// fakeProfileSource 是测试用的假资料源：把每次收到的「查询词 + 别名候选」原样记下来。
+//
+// 存在的理由：真源（av-db.net 等）要联网，单测里没法稳定重放。而这条链路上最该
+// 验的又不是解析（那有夹具），是**搜索名有没有真的传到每个源** —— 「算出来了、
+// 没用上」是这类改动最典型的错法：界面看着一切正常，就是一条都搜不到。
+type fakeProfileSource struct {
+	key, label string
+	calls      []fakeSourceCall
+}
+
+type fakeSourceCall struct {
+	name    string
+	aliases []string
+}
+
+func (s *fakeProfileSource) Key() string   { return s.key }
+func (s *fakeProfileSource) Label() string { return s.label }
+
+func (s *fakeProfileSource) Fetch(_ context.Context, _ *http.Client, name string, aliases []string) (*ActorFacts, error) {
+	s.calls = append(s.calls, fakeSourceCall{name: name, aliases: append([]string(nil), aliases...)})
+	return &ActorFacts{Source: s.key, SourceLabel: s.label, MatchScore: 100, BirthDate: "1993-08-16"}, nil
+}
+
+// TestFetchActorProfileUsesSearchName 手动改的搜索名只当查询词，不碰身份。
+//
+// 三件事要一起验，因为它们很容易只做对其中两个：
+//  1. 发给各源的查询词是**手填的搜索名**（功能本身）；
+//  2. `prof.Name` 仍是 **Emby 里的人物名** —— 它要进同步历史、要给回滚认人，
+//     还得当别名记忆的 canonical；被搜索词顶掉的话，「同步历史」里会记成源站的
+//     名字，回滚时也对不上是谁；
+//  3. 别名候选仍按 Emby 名从别名记忆里取，**手填的搜索名不许混进去** ——
+//     用户明确选的是「不记，每次手填」，混进去就等于偷偷记住了。
+func TestFetchActorProfileUsesSearchName(t *testing.T) {
+	m := newMockEmby(t)
+	a := newProfileTestApp(t, m)
+	// 预置一条别名记忆：Emby 里的中文名 ↔ 日文写法
+	a.aliases.Remember("三上悠亚", []string{"みかみゆあ"}, "测试")
+
+	cases := []struct {
+		desc         string
+		searchName   string
+		wantQuery    string
+		wantNotAlias string
+	}{
+		{"手填的搜索名优先", "三上悠亜", "三上悠亜", "三上悠亜"},
+		{"留空用 Emby 里的原名", "", "三上悠亚", ""},
+		{"只有空白也算留空", "  \t ", "三上悠亚", ""},
+	}
+	for _, c := range cases {
+		src := &fakeProfileSource{key: "Fake", label: "假源"}
+		before := a.aliases.Count()
+		prof, err := a.fetchActorProfileWith(context.Background(), []ProfileSource{src},
+			"", "三上悠亚", c.searchName, FetchOptions{UseAliasMemo: true})
+		if err != nil {
+			t.Fatalf("%s：fetchActorProfileWith: %v", c.desc, err)
+		}
+		if len(src.calls) != 1 {
+			t.Fatalf("%s：期望假源被调用 1 次，实际 %d 次", c.desc, len(src.calls))
+		}
+		if got := src.calls[0].name; got != c.wantQuery {
+			t.Errorf("%s：发给源的查询词 = %q，期望 %q", c.desc, got, c.wantQuery)
+		}
+		if prof.SearchName != c.wantQuery {
+			t.Errorf("%s：prof.SearchName = %q，期望 %q（界面要回显它）",
+				c.desc, prof.SearchName, c.wantQuery)
+		}
+		if prof.Name != "三上悠亚" {
+			t.Errorf("%s：prof.Name 必须是 Emby 里的人名，实际 %q", c.desc, prof.Name)
+		}
+		if !slices.Contains(src.calls[0].aliases, "みかみゆあ") {
+			t.Errorf("%s：别名记忆里的写法要作为候选传给源，实际 %q", c.desc, src.calls[0].aliases)
+		}
+		if c.wantNotAlias != "" && slices.Contains(src.calls[0].aliases, c.wantNotAlias) {
+			t.Errorf("%s：手填的搜索名不许进别名候选（用户选的是「不记，每次手填」），实际 %q",
+				c.desc, src.calls[0].aliases)
+		}
+		// 抓取全程只读：不落盘、不动别名记忆（只有写入成功才 Remember）
+		if after := a.aliases.Count(); after != before {
+			t.Errorf("%s：抓取不该动别名记忆，%d → %d 组", c.desc, before, after)
+		}
+	}
 }
 
 // profileWithFields 造一份「抓取结果」，fields 与 buildActorProfile 的产出同形。

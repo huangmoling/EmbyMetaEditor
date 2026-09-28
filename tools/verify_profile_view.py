@@ -18,6 +18,12 @@
   所以这里不只看有没有 `<img>`，还要看 `naturalWidth` —— 外链的图在命令行是 200、
   在浏览器里是全白，只看 src 永远发现不了。
 
+  第 10 步是**手动改「搜索用名字」**：这个名字只当查询词，Emby 里的人物名一个字都不改。
+  验的是**发出去的请求体**（把 `/api/profile/preview` 那一发拦下来读 body），
+  不是抓取结果 —— 结果由第 7 步真跑覆盖。所以要拦 fetch：真抓一次要连三个外部站点，
+  秒级起步，而上游一抖动这条断言就变成误报。拦的时候必须回 `{ok:true,data:…}` 这个
+  信封，`api()` 取的是 `json.data`，回裸对象会让面板拿到 undefined 并抛出未捕获异常。
+
 跑之前：
   1. `EMBYME_AUTH_PASSWORD=test-pass EmbyMetaEditor.exe -port 8097 -open=false`
      （用真实 config.json，演员列表与作品列表都要能连上 Emby）
@@ -592,7 +598,117 @@ def main():
     else:
         print("\n9) 回滚二次确认  —— 跳过（当前没有未回滚的历史记录）")
 
-    print("\n10) 页面错误与控制台")
+    # ---------- 手动改「搜索用名字」 ----------
+    #
+    # 这一步验的是**发出去的请求体**，不是抓取结果 —— 结果长什么样由第 7 步真跑覆盖。
+    # 所以把 /api/profile/preview 那一发拦掉：真抓一次要连三个外部站点（秒级起步），
+    # 而这里要的只是「界面上改了名字，请求里到底带的是谁」。拦掉既快，
+    # 也不会因为上游抖动把这条断言变成误报。
+    #
+    # 注意拦截要返回 api() 认得的信封（`{ok:true,data:…}`）—— api() 取的是 json.data，
+    # 直接返回裸对象的话 renderProfilePanel 会拿到 undefined，然后抛出未捕获异常，
+    # 反倒把第 11 步的「没有未捕获异常」测红。
+    print("\n10) 手动改「搜索用名字」：只换搜索词，不动 Emby 里的人名")
+    close_drawer()
+    target = page.eval("""(() => {
+      const card = document.querySelector('#psList .pcard[data-id]');
+      if (!card) return null;
+      const b = card.querySelector('button[data-act="prof"]');
+      if (!b) return null;
+      b.click();
+      return { id: card.dataset.id, name: card.dataset.name };
+    })()""")
+    if not target:
+        check("重新打开资料面板（取列表里第一张卡）", False, "列表里没有可用的人物卡")
+    else:
+        page.wait_for("!!document.querySelector('#pfName')", timeout=30,
+                      desc="搜索用名字输入框出现")
+        page.pump(0.5)
+        field = page.eval("""(() => {
+          const box = document.querySelector('#pfName');
+          const hint = box.closest('.pf-name').querySelector('.cnhint');
+          return {
+            value: box.value,
+            ph: box.placeholder || '',
+            hint: hint ? hint.textContent : '',
+            disabled: box.disabled,
+            hidden: box.type === 'hidden',
+          };
+        })()""")
+        print("     %s：预填 %r / 说明 %r" % (target["name"], field["value"], field["hint"]))
+        check("未抓取态就有「搜索用名字」输入框，且可用",
+              not field["hidden"] and not field["disabled"], field)
+        check("输入框预填 Emby 里的人名", field["value"] == target["name"],
+              "%r / 卡片上写的是 %r" % (field["value"], target["name"]))
+        check("写清了「Emby 里的名字不会被改」", "不会被改" in field["hint"], field["hint"])
+
+        page.eval("""(() => {
+          window.__pfOrigFetch = window.fetch;
+          window.__pfCaptured = null;
+          window.fetch = function (input, init) {
+            const url = typeof input === 'string' ? input : ((input && input.url) || '');
+            if (url.indexOf('/api/profile/preview') < 0) {
+              return window.__pfOrigFetch.apply(this, arguments);
+            }
+            window.__pfCaptured = (init && init.body) || '';
+            let req = {};
+            try { req = JSON.parse(window.__pfCaptured) || {}; } catch (e) {}
+            // 回显的搜索名照 effectiveSearchName 的规则算（手填优先、留空退原名），
+            // 这样下面那条回显断言验的才是界面有没有用服务端的答案。
+            const sn = String(req.search_name || '').trim() || String(req.name || '');
+            return Promise.resolve(new Response(JSON.stringify({
+              ok: true,
+              data: {
+                name: req.name || '', person_id: req.person_id || '',
+                search_name: sn, facts: [], fields: [], sources: [],
+                aliases: [], overview: '', warnings: [], write_count: 0,
+              },
+            }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          };
+          return true;
+        })()""")
+        manual = "手改·回归测试名"
+        page.eval("""(() => {
+          const box = document.querySelector('#pfName');
+          box.value = %s;
+          box.dispatchEvent(new Event('input', { bubbles: true }));
+          return true;
+        })()""" % json.dumps(manual))
+        page.eval("document.querySelector('#pfFetch').click();")
+        page.pump(1.5)
+        cap = page.eval("window.__pfCaptured || ''")
+        try:
+            body = json.loads(cap) if cap else {}
+        except ValueError:
+            body = {}
+        print("     请求体：name=%r search_name=%r" % (body.get("name"), body.get("search_name")))
+        check("改名字后，请求里带的正是手填的搜索名",
+              body.get("search_name") == manual, body.get("search_name"))
+        check("请求里的 name 仍是 Emby 里的人名（身份不被搜索词顶掉）",
+              body.get("name") == target["name"], body.get("name"))
+        # 「写入勾选字段」走的是同一个 profileBody（只多一个 keys），这里直接调它一次，
+        # 把写入那条路径也钉上 —— 只验 preview 的话，将来谁给 apply 单独拼一份入参就漏了。
+        apply_body = page.eval("""(() => {
+          const b = profileBody('p-1', '某人', ['overview']);
+          return { search_name: b.search_name, name: b.name, keys: (b.keys || []).join(',') };
+        })()""")
+        check("写入路径（profileBody 带 keys）同样带上了搜索名",
+              apply_body["search_name"] == manual and apply_body["name"] == "某人"
+              and apply_body["keys"] == "overview", apply_body)
+        bar = page.eval("(document.querySelector('.pf-srcbar') || {}).textContent || ''")
+        check("对照表回显本次实际用的搜索名", manual in bar, bar[:90])
+        # 抽屉会整块重画（未抓取态 ↔ 对照表），手填的名字要能活过这一轮，
+        # 否则用户想「换个写法再搜一次」就得每次重打。
+        keep = page.eval("(document.querySelector('#pfName') || {}).value || ''")
+        check("抓完一次后输入框仍保留手填的名字", keep == manual, keep)
+        restored = page.eval("""(() => {
+          window.fetch = window.__pfOrigFetch;
+          window.__pfCaptured = null;
+          return window.fetch === window.__pfOrigFetch;
+        })()""")
+        check("拦下来的 fetch 用完就还回去", restored is True, restored)
+
+    print("\n11) 页面错误与控制台")
     # Page.errors() 返回的是**格式化好的字符串**（"未捕获异常: …" / "HTTP 502 <- url"），
     # 不是事件对象 —— 这里原来按 dict 处理（e.get("method")），一旦真有报错就会
     # 抛 AttributeError 把整个脚本炸掉 —— 也就是说它只在"一切正常"时才不炸。

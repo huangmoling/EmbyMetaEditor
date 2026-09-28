@@ -13,7 +13,7 @@ Go 写的 Emby 媒体库元数据编辑器。**单文件 exe + 内嵌 Web UI**�
 | **Emby 登录** | 用户名密码 / API Key 两种，凭据本地保存 |
 | **MetaTube 刮削** | 单个 / 批量刮元数据与图片（公共后端已下线，**自建必填**） |
 | **gfriends 头像** | 10 万+ 头像索引；人物列表按**媒体库 + 人物类型（演员 / 导演）**筛；索引与图片各带两层 CDN 容错 |
-| **演员资料** | 简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID（三源合并、**抓取源分列可选**），并列出该人物在本库的作品；**打开面板不联网**，写入默认「只填空白」、单卡可勾选覆盖、可回滚 |
+| **演员资料** | 简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID（三源合并、**抓取源分列可选**、**搜索用名字可临时改**），并列出该人物在本库的作品；**打开面板不联网**，写入默认「只填空白」、单卡可勾选覆盖、可回滚 |
 | **番号补全** | 按演员抓全部番号 → 与本地库比对找缺失 → 抓磁力列表（**按体积倒序**、**按番号并排分页**、带连通性诊断） |
 | **国产传媒** | 选库列条目 → 单个 / 勾选批量刮削 / 直接编辑元数据；四站并发按 **封面 → 标题 → 标签 → 日期** 合并 |
 | **翻译** | 刮削时把非中文标题 / 简介翻成简体中文（OpenAI 兼容接口，可选） |
@@ -153,6 +153,7 @@ API Key 在 Emby 后台「高级 → API 密钥」生成。**它是服务器级�
 - **抓取是显式动作**：点「资料」只开面板，立刻给出**本地**能拿到的两样 —— 分列的源（每源写明会填哪些字段，顺序即优先级）与作品列表。要抓才点「抓取资料」（一次要并发访问三个站）。侧栏那组源开关与面板里这组是**同一份状态**。
 - **写入策略**：默认**只填空白**；Emby 已有值且本次也抓到的默认跳过，**手动勾上即变成「将覆盖原值」**（按钮改文案 + 危险色）。**批量路径永远只填空白** —— 唯一能改已有值的入口是单卡面板上亲手勾的字段。写前留快照，「同步历史」可逐字段回滚（**点两次**才执行）。
 - 姓名走**两轮匹配 + 详情页确认**（`minMatchScore`=80 / `minDetailMatchScore`=95）避免同名不同人；别名记忆在 `cache/actor_aliases.json`。
+- **搜索用名字**（v1.5.0）：面板顶上的输入框可以临时改「拿什么名字去搜」，预填 Emby 里的人名，**留空 = 用原名**。存在的理由很实在 —— Emby 里的人物名多是刮削器写的中文（「三上悠亚」），三个源却全是日文站，名字对不上就是一条都不中，而用户手里明明有正确写法。它**只当查询词**：Emby 里的人物名一个字都不改，写入字段的归属、同步历史里的名字、别名记忆的 canonical 仍全按 Emby 名走（`effectiveSearchName()` 是这条规则的唯一定义处，界面留空就发空串，由服务端回退）。手填的名字**不落盘** —— 别名候选仍按 Emby 名去查别名记忆，只有源站自己返回的别名照旧在写入成功后被记住。抓完面板会回显**本次实际用的搜索名**（不是输入框的当前值，两者抓完之后会不同）。
 - **标签不写 Emby 的 `Tags`**，而是并进简介最后一行 —— 这个构建对 `Person` 的 `Tags` 收下不保存，写了会「看起来成功、实际没有」还覆盖用户自己的标签。
 - 作品列表按 `PremiereDate` 倒序，库名由 `GET /Library/VirtualFolders` 的路径匹配条目 `Path` 得出（`Views` 接口**不返回 `Path`**，靠它拿不到库名），一屏 400 条，更多点「再加载」。
 
@@ -261,9 +262,9 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 单文件 exe：`web/` 用 `go:embed`、图标走 PE 资源（`rsrc_windows_amd64.syso`），拷走 exe 就能跑。`-buildvcs=false` 让构建**可复现** —— 照这条命令重建与仓库里的 `EmbyMetaEditor.exe` 逐字节一致（不加则 Go 会嵌当前 commit 的 VCS 信息，体积与哈希都会变，属正常）。
 
 > 仓库里的 exe **跟着 main 走**，下载链 `releases/latest/download/` 只在**发版时**更新，两者不一定同步。
-> 当前对齐 **v1.4.0**：Release 与 main 的 md5 同为 `771be1ab4eea249bff2912960785a8a0`（9,283,584 字节）。
+> 当前对齐 **v1.5.0**：Release 与 main 的 md5 同为 `7c5affda825e67dcb9c1af849e4796a2`（9,288,704 字节）。
 
-`go test ./...` 共 **237 个用例**，覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、作品列表与库名映射、gfriends 两层 CDN 容错，以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
+`go test ./...` 共 **239 个用例**，覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、**搜索用名字的回退与透传**（假源注入：查询词是手填名、`prof.Name` 仍是 Emby 名、手填名不进别名候选、抓取不落盘）、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、作品列表与库名映射、gfriends 两层 CDN 容错，以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
 > mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径 404）、写操作只认全局路径、`POST /Items/{id}` 整对象替换、图片上传只收 base64 文本、列表不返回 `SortName`、`/Persons` 传非法 GUID 会 500。线上踩过的坑因此能在单测里复现。
 >
@@ -283,7 +284,7 @@ EmbyMetaEditor.exe -port 8097 -open=false &  # 起应用，后面几个脚本共
 | `smoke_auth.py` | 访问认证 47 项：未登录 `/api/` 全 401、静态资源放行、跨站 Origin 被拒、密钥不下发、留空不清空、改密码踢会话、失败退避、环境变量指定密码 | 无（自建临时实例） |
 | `verify_emby_image.py` | Emby 图片**代取**链路（与直连 Emby 逐字节比对） | 真实 config |
 | `smoke_real.py` | 真实环境只读冒烟 43 项（含国产传媒四站搜索 / 批量 dry-run / 封面代理） | 起 exe + 真实 config |
-| `check_frontend.py` | HTML / JS / 后端路由静态对照；`<img>` 是否都走同源代理；剪贴板调用是否都走 `copyText` | 无 |
+| `check_frontend.py` | HTML / JS / 后端路由静态对照；`<img>` 是否都走同源代理；剪贴板调用是否都走 `copyText`；`profileBody` 是否带上了 `search_name` | 无 |
 | `verify_images.py` | 页面图片**真的渲染出来**（番号补全 / MetaTube / gfriends 三处） | 起 exe + 无头 Edge |
 | `verify_gfriends_pick.py` | 选图弹窗：候选全走 `/api/img`、`naturalWidth > 0`、那行「宽×高 · 体积」分档统计 | 起 exe + 无头 Edge |
 | `verify_person_lib.py` | 按媒体库 / **人物类型**筛选的**交互**（切库、总数、换批、切回；三档类型总数互不相同） | 起 exe + 无头 Edge |
@@ -291,7 +292,7 @@ EmbyMetaEditor.exe -port 8097 -open=false &  # 起应用，后面几个脚本共
 | `verify_clipboard_insecure.py` | **非安全上下文下的复制**（局域网地址 `isSecureContext === false`、回退生效、提示可见）—— Docker 的真实访问方式 | 起 exe（`-host 0.0.0.0`）+ 无头 Edge |
 | `verify_cn_view.py` | 国产传媒**选库 → 列表 → 单选/多选刮削 → 编辑元数据**（41 项，写路径全用假 `api()`） | 起 exe + 无头 Edge |
 | `smoke_profile.py` | 演员资料只读冒烟（源清单与说明 / 只填空白 / 预览无副作用 / 错误路径）；`PROFILE_LIVE=1` 加重 真实写入 → 回滚 → 校验还原，以及勾选覆盖 → 回滚 → 还原 | 起 exe + 真实 config |
-| `verify_profile_view.py` | 资料面板**渲染与抓取时机**（打开不抓、源分列与两处同步、对照表勾选态、作品区块、覆盖按钮文案与配色、与 emby 对照） | 起 exe + 无头 Edge |
+| `verify_profile_view.py` | 资料面板**渲染与抓取时机**（打开不抓、源分列与两处同步、对照表勾选态、作品区块、覆盖按钮文案与配色、与 emby 对照）；**手动改「搜索用名字」**（拦下 `/api/profile/preview` 读请求体：带的是手填名、`name` 仍是 Emby 名、预览与写入两条路径都有；回显实际搜索名、重画不退回原名） | 起 exe + 无头 Edge |
 | `mock_javbus.py` + `verify_javbus_probe.py` | 模拟站点 + 诊断按钮的界面交互 | 起 exe + 无头 Edge |
 | `extract_cn_fixtures.py` | 从 `cache/debug/` 的原始响应切测试夹具 | 落盘的原始 HTML |
 | `verify_docker_image.py` | 推上去的镜像**确实是这份代码**（匿名拉 manifest：多架构、`revision` = 本地 tag / HEAD、`source`、入口、非 root；**再解开层在二进制里实查内嵌前后端字面量**） | 能连 Docker Hub |
@@ -324,10 +325,10 @@ docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/
 `.github/workflows/docker.yml` 在**打 `v*` tag 时**自动构建 `linux/amd64` + `linux/arm64` 并推送，也可在 Actions 手动触发（改完 Dockerfile 想先验一次）。首次需配两个 secret：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（权限 Read & Write）。
 
 ```bash
-git tag v1.4.0 && git push origin v1.4.0
+git tag v1.5.0 && git push origin v1.5.0
 ```
 
-镜像标签由 tag 推导：`v1.4.0` → `1.4.0` / `1.4` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
+镜像标签由 tag 推导：`v1.5.0` → `1.5.0` / `1.5` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
 
 > **Docker Hub 用户名 `aag111` ≠ GitHub 用户名 `huangmoling`**，别照搬。手动触发构建的 `revision` = 触发时的 `main` HEAD，**之后再往 main 提交镜像就落后了** —— `verify_docker_image.py` 会如实报 FAIL，重新触发即可。dispatch 镜像的版本标签是 `latest`，所以那个脚本改从**镜像对应提交的 `version.go`** 取版本串来比，而不是拿 `latest` 拼 `vlatest`。
 >
@@ -351,7 +352,7 @@ javbus.go            javbus 抓取、HTML 解析、连通性诊断
 cnmedia.go           国产传媒四站抓取、番号归一化、精确匹配合并
 scrape.go            刮削编排、番号比对
 actorprofile.go      演员资料来源适配、姓名匹配、字段合并
-profile.go           演员资料编排：只填空白 / 按勾选覆盖、同步快照与回滚、别名记忆、作品列表
+profile.go           演员资料编排：只填空白 / 按勾选覆盖、搜索用名字、同步快照与回滚、别名记忆、作品列表
 api_profile.go       演员资料路由（sources / preview / apply / batch / history / rollback / aliases / works）
 jobs.go              后台任务与进度
 util.go              番号归一化、HTML 辅助、HTTP 客户端

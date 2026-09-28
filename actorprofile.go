@@ -963,6 +963,10 @@ type ActorProfile struct {
 	Fields   []ProfileField `json:"fields"`
 	Aliases  []string       `json:"aliases"`
 	Overview string         `json:"overview"`
+	// SearchName 是这次**实际发出去的查询词**，可能来自界面上手填的「搜索用名字」。
+	// 回显给界面，是为了让用户看得见「刚才到底按哪个名字搜的」——
+	// 面板上的输入框在抓完之后还能继续改，光看输入框分不清哪次是这次的。
+	SearchName string `json:"search_name,omitempty"`
 	// 注意：**没有 Tags**。这个构建对 Person 不保存标签，详情见 buildActorProfile
 	// 里把标签并进简介那段注释。
 	Sources  []string `json:"sources"`

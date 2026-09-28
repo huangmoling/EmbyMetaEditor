@@ -1,9 +1,12 @@
 """前端一致性自检：不打开浏览器，静态比对 HTML / JS / 后端路由。
 
-检查三件事：
+检查这几件事：
   1. web/app.js 语法（交给 node --check，本脚本只做正则层）
   2. app.js 里 $() 引用的元素 id 是否真的存在（静态 + JS 动态生成的都算）
   3. app.js 调用的 /api/... 路径是否都在 api.go 注册过
+  4. 自己插进页面的 <img> 是否都走同源地址（外链会破图 + 泄露 Referer）
+  5. 剪贴板是否统一走 copyText（非安全上下文没有 navigator.clipboard）
+  6. 资料面板的「搜索用名字」是否真的进了请求体
 
 用法： python tools/check_frontend.py
 退出码 0 = 全过。
@@ -177,6 +180,23 @@ def main():
         bad += 1
     else:
         print("PASS  剪贴板调用都走 copyText，且带回退")
+
+    # --- 7. 搜索用名字必须进请求体 ---
+    # 资料面板顶上的「搜索用名字」是个文本输入框，这类改动最容易出的错是
+    # **界面能改、请求里没带**：用户改完名字点「抓取资料」，发出去的还是 Emby 里的
+    # 原名，而界面上一点异常都看不出来（对照表照常渲染，只是命中的还是原来那个人）。
+    # 所以静态钉死：组装入参的 profileBody 里必须出现 search_name。
+    m = re.search(r"function profileBody\([\s\S]*?\n\}", code_only)
+    pb = m.group(0) if m else ""
+    print(f"      profileBody {'找到' if pb else '没找到'}，search_name 出现 {pb.count('search_name')} 次")
+    if not pb:
+        print("FAIL  app.js 里找不到 profileBody —— 抓取/写入入参的组装入口")
+        bad += 1
+    elif "search_name" not in pb:
+        print("FAIL  profileBody 没带 search_name：「搜索用名字」改了也发不出去，静默失效")
+        bad += 1
+    else:
+        print("PASS  搜索用名字进了请求体")
 
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0

@@ -173,6 +173,15 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.5.0：资料面板顶上的「搜索用名字」输入框。
+    for marker, what in [
+        ("pfName", "搜索用名字输入框（v1.5.0）"),
+        ("profileSearchName", "搜索名取值函数（v1.5.0）"),
+        ("不会被改", "「Emby 里的名字不会被改」说明（v1.5.0）"),
+        ("本次按", "对照表回显实际搜索名（v1.5.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -208,6 +217,11 @@ def check_embedded_backend(blob):
         ("Actor,Director", "人物类型默认值（v1.4.0）"),
         ("person_types", "批量接口的人物类型字段（v1.4.0）"),
         ("img-src 'self' data: blob: http: https:", "CSP 放开 img-src 外部图片（v1.4.0）"),
+        # v1.5.0：手动搜索名。函数名也在产物里（Go 的符号表没被 -s 完全剥掉），
+        # 所以能一起断言「effectiveSearchName 这条规则确实编进去了」。
+        ("search_name", "抓取/写入入参里的搜索名（v1.5.0）"),
+        ("effectiveSearchName", "搜索名回退规则（v1.5.0）"),
+        ("fetchActorProfileWith", "可注入资料源的抓取入口（v1.5.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 
