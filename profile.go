@@ -156,6 +156,43 @@ func (a *AliasStore) Count() int {
 	return len(a.Groups)
 }
 
+// rememberProfileAliases 把一个**已确认**的抓取结果里的旧艺名落盘到本地别名记忆。
+//
+// 两个触发点共用这一个函数，是故意的：
+//
+//	人工采用 —— 用户在面板上按「抓取资料」，等于亲手确认了这次的解析结果；
+//	成功同步 —— 写进 Emby 成功之后。
+//
+// 两处都要求「已确认」，所以两处都走这里：规则只写一份，免得两边慢慢跑偏。
+//
+// ⚠️ 它只**记**别名，一个阈值都不动：minMatchScore / minDetailMatchScore 原样不变。
+// 别名记忆的作用有两条，都在门槛之内：让别人已经确认过的写法在**以后**的搜索里
+// 被发出去（NamesFor → 各源的 aliases 候选），以及让源站返回的这些写法被判为
+// 「就是这个人」（nameMatchScore 命中别名记 95）。它不会放宽「谁才算同一个人」。
+//
+// 传进来的 prof.Aliases 已经是干净的：buildActorProfile 里去过重、也删掉了
+// 与本人同名的项；而且各源内部都按 minMatchScore=80 闸过姓名匹配才产出 facts，
+// 所以这里是「确认过的别名」，不是「源站随便返回的别名」。
+//
+// 返回这次记进去的条数（界面要显示「已记入别名记忆 N 条」）。
+func (a *App) rememberProfileAliases(prof *ActorProfile, src string) int {
+	if a.aliases == nil || prof == nil || len(prof.Aliases) == 0 {
+		return 0
+	}
+	names := append([]string(nil), prof.Aliases...)
+	a.aliases.Remember(prof.Name, names, src)
+	return len(names)
+}
+
+// aliasMemoSource 生成写进别名记忆 Sources 的标记，带上首个命中源便于回溯。
+// 后缀是给「以后想查这条别名是怎么来的」用的，不参与任何匹配。
+func aliasMemoSource(prefix string, prof *ActorProfile) string {
+	if prof != nil && len(prof.Sources) > 0 {
+		return prefix + ":" + prof.Sources[0]
+	}
+	return prefix
+}
+
 // ---------- 同步历史 ----------
 
 // SyncRecord 是一次写入的快照。Before/After 只存我们管内的那几个字段
@@ -404,8 +441,30 @@ func effectiveSearchName(name, searchName string) string {
 // 全程**只读**：不改 Emby、不落盘。界面点「抓取」走的也是这里。
 //
 // searchName 是界面上手动填的「搜索用名字」，空 = 用 Emby 里的人物名。
+// profileSourceList 返回本次要用的资料源清单。
+//
+// 正常是 actorSources()（顺序即优先级）；单测可以往 a.profileSrcs 里塞假源。
+// 抽这一层是为了让**抓取资料这个 HTTP 入口**也能被单测跑到 —— 光有
+// fetchActorProfileWith 能塞假源还不够，那只是纯函数；「抓完之后落盘别名」
+// 这条接线在入口那一层，不测就又是「helper 测得很足、调用点没接上」。
+//
+// 启用了离线资料库时它排在**最前面**：mergeFacts 是先到先得，所以等价于
+// 「离线库已确认过的字段先落，在线源只补它没有的」。这也就是需求里的
+// 「仅作为演员资料的第一优先级」。**头像不受影响** —— 头像走各自的头像源，
+// 和这张资料源清单根本不是一个列表（而且 ActorFacts 里没有图片字段）。
+func (a *App) profileSourceList() []ProfileSource {
+	if len(a.profileSrcs) > 0 {
+		return a.profileSrcs
+	}
+	srcs := actorSources()
+	if lib := a.offlineLib(); lib != nil {
+		srcs = append([]ProfileSource{lib}, srcs...)
+	}
+	return srcs
+}
+
 func (a *App) fetchActorProfile(ctx context.Context, personID, name, searchName string, opts FetchOptions) (*ActorProfile, error) {
-	return a.fetchActorProfileWith(ctx, actorSources(), personID, name, searchName, opts)
+	return a.fetchActorProfileWith(ctx, a.profileSourceList(), personID, name, searchName, opts)
 }
 
 // fetchActorProfileWith 是 fetchActorProfile 的可测版本：资料源清单当参数传进来。
@@ -726,15 +785,9 @@ func (a *App) applyProfileFacts(ctx context.Context, prof *ActorProfile, keys []
 		}
 	}
 	res.RecordID = a.sync.Add(rec)
-	// 抓到的别名进别名记忆，下次搜索命中率更高
-	if a.aliases != nil && len(prof.Aliases) > 0 {
-		src := "已同步"
-		if len(prof.Sources) > 0 {
-			src = "已同步:" + prof.Sources[0]
-		}
-		a.aliases.Remember(name, prof.Aliases, src)
-		res.AliasMemo = len(prof.Aliases)
-	}
+	// 「成功同步」：写进 Emby 之后，别名同样落盘。和「人工采用」共用同一个函数，
+	// 规则只写一份 —— 免得哪天有人只改了一处，两条路径的记忆内容就不一样了。
+	res.AliasMemo = a.rememberProfileAliases(prof, aliasMemoSource("已同步", prof))
 
 	res.Message = fmt.Sprintf("已写入 %d 个字段", len(res.Written))
 	if n := len(res.Overwritten); n > 0 {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -567,6 +568,9 @@ func newProfileTestApp(t *testing.T, m *mockEmby) *App {
 type fakeProfileSource struct {
 	key, label string
 	calls      []fakeSourceCall
+	// retAliases 是这次假源要「返回」的别名（默认空）。
+	// 别名落盘那两条用例靠它造出「源站确实返回了旧艺名」的场景。
+	retAliases []string
 }
 
 type fakeSourceCall struct {
@@ -579,7 +583,10 @@ func (s *fakeProfileSource) Label() string { return s.label }
 
 func (s *fakeProfileSource) Fetch(_ context.Context, _ *http.Client, name string, aliases []string) (*ActorFacts, error) {
 	s.calls = append(s.calls, fakeSourceCall{name: name, aliases: append([]string(nil), aliases...)})
-	return &ActorFacts{Source: s.key, SourceLabel: s.label, MatchScore: 100, BirthDate: "1993-08-16"}, nil
+	return &ActorFacts{
+		Source: s.key, SourceLabel: s.label, MatchScore: 100, BirthDate: "1993-08-16",
+		Aliases: append([]string(nil), s.retAliases...),
+	}, nil
 }
 
 // TestFetchActorProfileUsesSearchName 手动改的搜索名只当查询词，不碰身份。
@@ -635,7 +642,10 @@ func TestFetchActorProfileUsesSearchName(t *testing.T) {
 			t.Errorf("%s：手填的搜索名不许进别名候选（用户选的是「不记，每次手填」），实际 %q",
 				c.desc, src.calls[0].aliases)
 		}
-		// 抓取全程只读：不落盘、不动别名记忆（只有写入成功才 Remember）
+		// fetchActorProfileWith 是**纯函数，必须只读**：不落盘、不动别名记忆。
+		// 别把落盘塞进这一层 —— 塞进来之后「抓取」就成了有副作用的动作，既不能重放，
+		// 也没法在不联网的单测里验。落盘发生在两个**入口**：
+		// 人工采用的 handleProfilePreview、成功同步的 applyProfileFacts。
 		if after := a.aliases.Count(); after != before {
 			t.Errorf("%s：抓取不该动别名记忆，%d → %d 组", c.desc, before, after)
 		}
@@ -1040,5 +1050,124 @@ func TestRollbackClearsFieldsThatWereAbsent(t *testing.T) {
 	}
 	if pids, _ := m.items["p-1"]["ProviderIds"].(map[string]any); len(pids) != 0 {
 		t.Errorf("回滚后外部 ID 没被清掉：%v", m.items["p-1"]["ProviderIds"])
+	}
+}
+
+// ---------- 别名落盘：两个触发点各钉一条**接线**（v1.8.0） ----------
+//
+// 需求原文：「人工采用或成功同步后，把已确认的旧艺名别名持久化到本地：
+// 后续所有演员查询源共享使用，但不会降低身份自动绑定阀值。」
+//
+// 改动之前只有一个落盘点（写入 Emby 成功）。那个落点有个洞：Emby 里字段已经填满时
+// applyProfileFacts 会在「没有需要写入的字段」处提前返回 —— 用户明明抓到了、也认了，
+// 别名却一个字都没记下来。所以补了「人工采用」这个入口。
+//
+// 这类改动的典型故障是「规则写了、某条路径没接上」（本项目上一版刚栽过一次：
+// mergeMagnets 只被单测调用过）。所以下面断言的都是**接线**：走一遍入口，
+// 看别名记忆有没有真的多出来 —— 而不是只测那个 helper 本身。
+
+// TestProfilePreviewRemembersAliases 钉「人工采用」这条路径。
+func TestProfilePreviewRemembersAliases(t *testing.T) {
+	m := newMockEmby(t)
+	a := newProfileTestApp(t, m)
+	a.profileSrcs = []ProfileSource{&fakeProfileSource{
+		key: "Fake", label: "假源", retAliases: []string{"旧艺名A", "旧艺名B"},
+	}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/profile/preview",
+		strings.NewReader(`{"name":"测试演员"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleProfilePreview(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP %d：%s", w.Code, w.Body.String())
+	}
+
+	var env struct {
+		Data ActorProfile `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解响应失败：%v（%s）", err, w.Body.String())
+	}
+	if env.Data.AliasMemo != 2 {
+		t.Errorf("响应要回报「已记入 2 条别名」，实际 %d", env.Data.AliasMemo)
+	}
+	if n := a.aliases.Count(); n != 1 {
+		t.Fatalf("抓取成功后别名记忆应有 1 组，实际 %d 组", n)
+	}
+	got := a.aliases.NamesFor("测试演员")
+	for _, want := range []string{"旧艺名A", "旧艺名B"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("别名记忆里应有 %q，实际 %q", want, got)
+		}
+	}
+	// 需求里那句「不会降低身份自动绑定阀值」是可执行的断言，不是一句说明。
+	if minMatchScore != 80 || minDetailMatchScore != 95 {
+		t.Errorf("阈值被带着改了：minMatchScore=%d minDetailMatchScore=%d",
+			minMatchScore, minDetailMatchScore)
+	}
+}
+
+// TestProfilePreviewWithoutAliasesWritesNothing 反向那条：没抓到别名就一组都不许建。
+// 别小看它 —— 忘了判空的话，每次抓取都会凭「本人名字」建一个只有一项的组，
+// 别名记忆会被几百次抓取灌成几千个空组。
+func TestProfilePreviewWithoutAliasesWritesNothing(t *testing.T) {
+	m := newMockEmby(t)
+	a := newProfileTestApp(t, m)
+	a.profileSrcs = []ProfileSource{&fakeProfileSource{key: "Fake", label: "假源"}}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/profile/preview",
+		strings.NewReader(`{"name":"测试演员"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleProfilePreview(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP %d：%s", w.Code, w.Body.String())
+	}
+	if n := a.aliases.Count(); n != 0 {
+		t.Errorf("没抓到别名时不该写别名记忆，实际 %d 组", n)
+	}
+}
+
+// TestApplyProfileFactsRemembersAliases 钉「成功同步」这条路径。
+//
+// 它和上面那条**共用同一个 helper**（rememberProfileAliases），这里照样单独走一遍：
+// 共用不等于自动共享，改天有人在 applyProfileFacts 里把那行删了，只有这条用例会红。
+func TestApplyProfileFactsRemembersAliases(t *testing.T) {
+	m := newMockEmby(t)
+	m.items["p-1"] = map[string]any{"Id": "p-1", "Name": "星野テスト", "Type": "Person"}
+	a := newProfileTestApp(t, m)
+
+	prof := &ActorProfile{
+		Name: "星野テスト", PersonID: "p-1",
+		Aliases: []string{"旧艺名A"},
+		Sources: []string{"Fake"},
+		Facts: []ActorFacts{{
+			Source: "Fake", SourceLabel: "假源", MatchScore: 100, BirthDate: "1990-01-01",
+		}},
+		Fields: []ProfileField{{
+			Key: "premiere_date", Label: "出生日期", Value: "1990-01-01",
+			Source: "Fake", WillWrite: true,
+		}},
+	}
+	res, err := a.applyProfileFacts(context.Background(), prof, nil)
+	if err != nil {
+		t.Fatalf("applyProfileFacts: %v", err)
+	}
+	if res.AliasMemo != 1 {
+		t.Errorf("写入成功后要回报「已记入 1 条别名」，实际 %d", res.AliasMemo)
+	}
+	if n := a.aliases.Count(); n != 1 {
+		t.Fatalf("写入成功后别名记忆应有 1 组，实际 %d 组", n)
+	}
+	if got := a.aliases.NamesFor("星野テスト"); !slices.Contains(got, "旧艺名A") {
+		t.Errorf("别名记忆里应有「旧艺名A」，实际 %q", got)
+	}
+	// 记录里带上「已同步」前缀，以后想查这条别名怎么来的能对得上。
+	a.aliases.mu.RLock()
+	srcs := append([]string(nil), a.aliases.Groups[0].Sources...)
+	a.aliases.mu.RUnlock()
+	if len(srcs) == 0 || !strings.HasPrefix(srcs[0], "已同步") {
+		t.Errorf("Sources 应以「已同步」开头，实际 %q", srcs)
 	}
 }

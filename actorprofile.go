@@ -102,6 +102,9 @@ var actorSourceNotes = map[string]string{
 	"AvDataBank": "字段最全：简介、出生日期、出生地、身高、三围、罩杯、血型、出道日、经纪公司，外部 ID 也来自这里",
 	"AvLeague":   "日文站点：出生日期、出生地、身高、三围、出道日，以及读音别名",
 	"Wikipedia":  "日文维基：整段简介（通常最完整），兼出生日期、出生地与读音别名",
+	// 它不是在线源，是把本地那份加密资料库导出成 JSON 之后读出来的东西。
+	// 启用后它排在**最前面**（第一优先级），且不提供头像。
+	"OfflineDB": "本地只读的离线资料库（由 tools/export_offline_db.py 导出成 JSON）：排在最前面，已确认过的字段先落，不提供头像",
 }
 
 // actorSourceNote 取某个源的界面说明；没登记就返回空串（界面会少一行，不会报错）。
@@ -973,6 +976,10 @@ type ActorProfile struct {
 	Warnings []string `json:"warnings"`
 	// WriteCount 是本次「会真正写入」的字段数；0 表示 Emby 里该有的都有了。
 	WriteCount int `json:"write_count"`
+	// AliasMemo 是这次**当场记进本地别名记忆**的旧艺名条数。
+	// 两个触发点：人工采用（抓取资料成功）与成功同步（写入 Emby 之后）。
+	// 它是「记了几条」，不是「有几个别名」—— 别名记忆里去重合并后可能少一两条。
+	AliasMemo int `json:"alias_memo"`
 }
 
 // embyExisting 是 Emby 里当前的演员资料（只取我们要管的字段）。

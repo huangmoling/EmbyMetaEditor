@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -29,6 +30,17 @@ type App struct {
 	// 演员资料管理：别名记忆与同步历史，两者都落 cache/，重启后保留。
 	aliases *AliasStore
 	sync    *SyncStore
+
+	// profileSrcs 是资料源清单的可替换副本，正常为 nil（走 actorSources()）。
+	// 它存在的唯一理由，是让单测能塞假源进来验「抓取成功之后有没有真的落盘别名」
+	// 这条**接线** —— 真源要联网，没法在单测里稳定重放。
+	// （和 fetchActorProfileWith 把协作者提成参数是同一个套路。）
+	profileSrcs []ProfileSource
+
+	// 离线资料库源实例。缓存它是因为源内部有「按 mtime 失效的索引」，
+	// 每次新建等于每次都把整个导出文件重读一遍。
+	offlineMu  sync.Mutex
+	offlineSrc *offlineLibrarySource
 
 	// 国产传媒客户端按站点地址缓存：同一个批次里必须复用同一个实例，
 	// 否则每次请求都新建，限速器（按站点共享）就成了摆设。
@@ -203,12 +215,33 @@ func (a *App) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
-	var in Config
-	if err := decodeBody(r, &in); err != nil {
+	// 先读原始 body：除了反序列化，下面还要看一次**请求里到底出现过哪些键**。
+	//
+	// 为什么：这个接口会被两个地方调用，语义不一样 ——
+	//   设置页     发的是完整配置；
+	//   登录页的高级配置 只发其中一部分。
+	// 而对**布尔项**来说，「键不在」和「键在且为 false」反序列化后长得一模一样，
+	// 直接 `c.X = in.X` 就等于「登录页那份配置把用户的开关全关掉」。
+	// （magnet_sources 当初就是靠 nil 判断绕开这个坑的，这里把规则统一成「出现过才覆盖」。）
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	_ = r.Body.Close()
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	err := a.store.Update(func(c *Config) {
+	var in Config
+	if err := json.Unmarshal(raw, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	present := map[string]bool{}
+	if keys := map[string]json.RawMessage{}; json.Unmarshal(raw, &keys) == nil {
+		for k := range keys {
+			present[k] = true
+		}
+	}
+
+	err = a.store.Update(func(c *Config) {
 		if in.EmbyURL != "" {
 			c.EmbyURL = strings.TrimRight(in.EmbyURL, "/")
 		}
@@ -252,9 +285,26 @@ func (a *App) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		c.Proxy = in.Proxy
-		c.InsecureTLS = in.InsecureTLS
-		c.AutoRefresh = in.AutoRefresh
-		c.OverwriteImages = in.OverwriteImages
+		// 布尔项一律「请求里出现过这个键才覆盖」：登录页那份高级配置不带
+		// auto_refresh / overwrite_images，直接赋值会把用户已经打开的开关关掉。
+		if present["insecure_tls"] {
+			c.InsecureTLS = in.InsecureTLS
+		}
+		if present["auto_refresh"] {
+			c.AutoRefresh = in.AutoRefresh
+		}
+		if present["overwrite_images"] {
+			c.OverwriteImages = in.OverwriteImages
+		}
+		// 离线资料库：开关与路径都按「出现过才覆盖」。
+		// 关掉它 = 提交 offline_db_enabled:false（路径留着，下次开还认得），
+		// 或者把 offline_db_path 清空。
+		if present["offline_db_enabled"] {
+			c.OfflineDBEnabled = in.OfflineDBEnabled
+		}
+		if present["offline_db_path"] {
+			c.OfflineDBPath = strings.TrimSpace(in.OfflineDBPath)
+		}
 		if in.Concurrency > 0 {
 			c.Concurrency = in.Concurrency
 		}

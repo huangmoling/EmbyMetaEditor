@@ -363,6 +363,96 @@ def main():
     else:
         print("PASS  诊断包入口接通，且明确承诺脱敏")
 
+    # --- 13. 别名落盘：抓取（人工采用）之后必须把计数同步回界面 ---
+    # 需求是「人工采用或成功同步后，把已确认的旧艺名别名持久化到本地」。后端两个
+    # 入口都接了（单测盯着），界面这一层另有一个容易漏的点：抓完不刷新计数，用户会看到
+    # 面板上写着「已记入 N 条」而侧栏总数还是旧值 —— 看起来就像根本没生效。
+    # 这类「后端做了、界面没反映」和 §7/§11 的静默失效是同一族，一并静态钉死。
+    alias_problems = []
+    if "function refreshAliasCount" not in code_only:
+        alias_problems.append("app.js 缺少 refreshAliasCount —— 抓取后没法把别名组数同步回界面")
+    grab = re.search(r"async function fetchProfileInto\([\s\S]*?(?=\nasync function |\nfunction |\Z)",
+                     code_only)
+    grab_body = grab.group(0) if grab else ""
+    if not grab_body:
+        alias_problems.append("app.js 里找不到 fetchProfileInto —— 无法确认「抓取资料」这条路径")
+    elif "refreshAliasCount(" not in grab_body:
+        alias_problems.append("「抓取资料」成功后没调用 refreshAliasCount（人工采用这条路径的计数不会更新）")
+    if "alias_memo" not in code_only:
+        alias_problems.append("app.js 里没有 alias_memo —— 面板不会显示「已记入别名记忆」")
+    if "写入成功后会记进别名记忆" in code_only:
+        alias_problems.append("还留着旧文案「写入成功后会记进别名记忆」—— 抓取时就已经落盘了")
+    if 'id="pfAliasN"' not in html:
+        alias_problems.append("index.html 缺少 #pfAliasN —— 别名记忆组数没地方显示")
+    print(f"      别名落盘接线问题 {len(alias_problems)} 处")
+    if alias_problems:
+        for p in alias_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  别名落盘：抓取成功即落盘并把组数同步回界面")
+
+    # --- 14. 离线资料库接线（设置页的开关与路径必须真的进请求体） ---
+    # 需求是「离线资料库只读、启用后是演员资料第一优先级、不默认用它的头像」。
+    # 后端与单测盯着「只读」和「排最前」那两条；界面这层要守的仍是 §7 那个老坑：
+    # 设置页加了输入框、用户勾了也填了，但 saveSettings 没把它塞进 body ——
+    # 界面回一句「设置已保存」，下次打开却是关的。光看界面复现不出来，只能静态钉死。
+    off_problems = []
+    saver = re.search(r"async function saveSettings\(\)[\s\S]*?(?=\nasync function |\nfunction |\Z)",
+                      code_only)
+    saver_body = saver.group(0) if saver else ""
+    if not saver_body:
+        off_problems.append("app.js 里找不到 saveSettings —— 无法确认离线库配置会不会被提交")
+    else:
+        if "offline_db_enabled" not in saver_body:
+            off_problems.append("saveSettings 没提交 offline_db_enabled —— 开关保存不了")
+        if "offline_db_path" not in saver_body:
+            off_problems.append("saveSettings 没提交 offline_db_path —— 路径保存不了")
+        if "$('#stOffOn')" not in saver_body:
+            off_problems.append("saveSettings 读的不是 #stOffOn —— 提交的值和用户看到的开关无关")
+        if "$('#stOffPath')" not in saver_body:
+            off_problems.append("saveSettings 读的不是 #stOffPath —— 提交的路径和用户填的无关")
+        # 保存后必须**重画设置页**：loadConfig() 只回填登录页那几个字段，设置页是切到
+        # 「设置」时才画的。不重画的话，刚勾上「启用」+ 填了路径 + 点了保存，底下那行状态
+        # 还是「未启用。」—— 用户的第一反应是「没保存成功」，然后再点一次。
+        # （这条是 2026-09-28 由 tools/verify_offline_lib.py 抓出来的真缺陷。）
+        if "fillSettings(" not in saver_body:
+            off_problems.append("saveSettings 保存后没重画设置页 —— 开关/状态行会停在保存前的样子")
+    filler = re.search(r"(?:async )?function fillSettings\([\s\S]*?(?=\nasync function |\nfunction |\Z)",
+                       code_only)
+    fill_body = filler.group(0) if filler else ""
+    if not fill_body:
+        off_problems.append("app.js 里找不到 fillSettings —— 打开设置页回填不了")
+    else:
+        if "$('#stOffOn').checked" not in fill_body:
+            off_problems.append("fillSettings 没回填 #stOffOn —— 打开设置页开关永远是关的")
+        if "stOffPath" not in fill_body:
+            off_problems.append("fillSettings 没回填 #stOffPath —— 路径显示不出来")
+        if "refreshOfflineStat(" not in fill_body:
+            off_problems.append("fillSettings 没刷新状态行 —— 用户看不到读到几条、读不到是为什么")
+    for need in ('id="stOffOn"', 'id="stOffPath"', 'id="stOffStat"'):
+        if need not in html:
+            off_problems.append("index.html 缺少 " + need)
+    # 这个库是加密的、别人的、只读的，而且**不参与头像**（ActorFacts 里根本没有图片字段）。
+    # 卡片上必须把这两点说清楚：否则用户不敢开（怕我们改了他的 .db），
+    # 或者开了之后以为头像会从这里换掉。
+    off_card = re.search(r"<h3>\s*离线演员资料库\s*</h3>[\s\S]{0,1600}?</div>\s*</div>", html or "")
+    off_txt = off_card.group(0) if off_card else ""
+    if not off_txt:
+        off_problems.append("设置页找不到「离线演员资料库」卡片")
+    else:
+        if "只读" not in off_txt or "写入" not in off_txt:
+            off_problems.append("卡片没说清「只读、不写回原库」")
+        if "头像" not in off_txt:
+            off_problems.append("卡片没说清「不提供头像，头像走独立顺序」")
+    print(f"      离线资料库接线问题 {len(off_problems)} 处")
+    if off_problems:
+        for p in off_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  离线资料库：开关/路径进请求体、能回填，文案讲清只读与头像")
+
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0
 

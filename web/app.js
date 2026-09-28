@@ -930,6 +930,21 @@ async function loadProfileSources(force) {
   }
 }
 
+// refreshAliasCount 只把「别名记忆」的组数重新拉一次，不动源勾选状态。
+//
+// 抓取资料（人工采用）和写入 Emby（成功同步）都会让服务端当场把旧艺名记进本地记忆，
+// 所以这两个动作之后计数会变。不同步的话，面板上写着「已记入 3 条」而侧栏总数还是旧值，
+// 用户会以为没生效。不能只复用 loadProfileSources(true)：那会把源勾选框一并重画。
+async function refreshAliasCount() {
+  try {
+    const d = await api('/api/profile/sources');
+    S.prof.aliasN = d.alias_groups || 0;
+    if ($('#pfAliasN')) $('#pfAliasN').textContent = num(S.prof.aliasN);
+  } catch (e) {
+    // 计数刷新失败不该影响主流程（抓到的东西已经在面板上了）
+  }
+}
+
 function renderProfileSources() {
   const box = $('#pfSources');
   if (!box) return;
@@ -1171,7 +1186,11 @@ function renderProfilePanel(personId, name, prof) {
   const aliases = prof.aliases || [];
   const aliasLine = aliases.length
     ? '<div class="pf-alias">抓到的别名 ' + aliases.map((a) => '<span class="tag">' + esc(a) + '</span>').join('') +
-      '<span class="cnhint">写入成功后会记进别名记忆，下次各源搜索命中率更高</span></div>'
+      '<span class="cnhint">' + (prof.alias_memo > 0
+        // 服务端在「人工采用（这次抓取）」和「成功同步」两处都会落盘，抓完就已经记好了
+        ? '已记入本地别名记忆，之后所有资料源搜索都会带上它'
+        : '写入 Emby 成功后同样会记入本地别名记忆') +
+      '（只加搜索词与认可写法，不放宽身份匹配阈值）</span></div>'
     : '';
 
   body.innerHTML = warns +
@@ -1353,6 +1372,9 @@ async function fetchProfileInto() {
   try {
     const prof = await api('/api/profile/preview', { method: 'POST', body: profileBody(cur.personId, cur.name) });
     renderProfilePanel(cur.personId, cur.name, prof);
+    // 抓取成功 = 人工采用了这次解析结果，服务端会把旧艺名当场记进本地别名记忆。
+    // 这里把侧栏那个计数同步过来，让「记下来了」这件事看得见。
+    if (prof.alias_memo > 0) refreshAliasCount();
   } catch (e) {
     toast(e.message, 'err');
     renderProfileIdle();
@@ -2165,6 +2187,32 @@ async function rollbackItemWrite(id, btn) {
 }
 
 // ---------------- 设置 ----------------
+// refreshOfflineStat 把离线资料库「读到了几条 / 为什么读不到」显示在设置卡片里。
+//
+// 这个库是从另一个工具的**加密**资料库导出成 JSON 来的，失败原因往往很具体
+//（路径写错、还没导出、导出的是半截文件）。原样摆出来，比只留一个开关有用得多 ——
+// 开关打开了却什么都不生效，是最难自查的一种状态。
+async function refreshOfflineStat() {
+  const box = $('#stOffStat');
+  if (!box) return;
+  const on = $('#stOffOn');
+  if (!on || !on.checked) { box.textContent = '未启用。'; return; }
+  box.textContent = '正在读取…';
+  try {
+    const d = await api('/api/profile/sources');
+    const o = d.offline_db || {};
+    if (!o.enabled) { box.textContent = '未启用。'; return; }
+    // 服务端那句 error 本身已经是一句完整的话（「读不到导出文件 <路径>：<原因>
+    // （先用 tools/export_offline_db.py 导出）」），别再套一层「读不到：」——
+    // 套上去就成了「读不到：读不到导出文件…」，而且会把服务端那句提示挤到看不出来。
+    box.innerHTML = o.error
+      ? esc(o.error)
+      : esc('已载入 ' + num(o.entries || 0) + ' 条演员资料，排在所有在线源前面。');
+  } catch (e) {
+    box.textContent = '读取状态失败：' + e.message;
+  }
+}
+
 function fillSettings() {
   const c = S.cfg || {};
   const sec = c.secrets || {};
@@ -2179,6 +2227,9 @@ function fillSettings() {
   set('#stJbInterval', c.javbus_interval_ms); set('#stConc', c.concurrency);
   set('#stJdb', c.javdb_url);
   markSecret('#stJdbCookie', sec.javdb_cookie);
+  $('#stOffOn').checked = !!c.offline_db_enabled;
+  set('#stOffPath', c.offline_db_path);
+  refreshOfflineStat();
   // magnet_sources 为空数组 = 一个源都不启用；缺字段（老配置）后端会补成默认。
   const srcs = Array.isArray(c.magnet_sources) ? c.magnet_sources : ['javbus', 'javdb'];
   $('#stSrcJb').checked = srcs.indexOf('javbus') >= 0;
@@ -2222,6 +2273,10 @@ async function saveSettings() {
     concurrency: Number($('#stConc').value) || 4,
     javdb_url: $('#stJdb').value.trim(),
     javdb_cookie: $('#stJdbCookie').value.trim(),
+    // 离线资料库。开关发的是明确的 true/false，路径也总是发 ——
+    // 后端按「请求里出现过这个键才覆盖」处理，两个都发才能既开得起来也关得掉。
+    offline_db_enabled: $('#stOffOn').checked,
+    offline_db_path: $('#stOffPath').value.trim(),
     // 总是发这个数组（哪怕是空的）——「一个源都不启用」是一个明确的选择，
     // 不能靠「省略字段」表达，省略会被当成「没配置过」而被后端补回默认值。
     magnet_sources: [
@@ -2248,6 +2303,13 @@ async function saveSettings() {
   try {
     await api('/api/config', { method: 'POST', body });
     await loadConfig();
+    // 保存之后要把**设置页自己**按落盘后的配置重画一遍。
+    //
+    // loadConfig() 只回填登录页那几个字段，设置页是切到「设置」时才画的；不给它重画，
+    // 保存完这一页显示的还是保存前的样子 —— 离线资料库那行状态尤其明显：刚勾上「启用」、
+    // 填了路径、点了保存，底下仍写着「未启用。」，看着就像没保存成功。
+    // 这里是「界面说的」与「实际生效的」对不上，正是最难自查的那种状态。
+    fillSettings();
     toast('设置已保存', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 }

@@ -221,6 +221,21 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端已移除 %s" % what, marker.encode() not in blob, marker)
 
+    # v1.8.0：设置页的离线资料库卡片 + 两处「界面要跟上」的接线。
+    # 挑的都是产物里实查过的字面量；`refreshAliasCount` / `refreshOfflineStat` 两个函数名
+    # 也断言上，因为这两条正是「后端做了、界面没反映」的静默失效所在
+    #（抓完不刷新计数 / 保存完不刷新状态行）。
+    for marker, what in [
+        ("离线演员资料库", "设置页的离线资料库卡片（v1.8.0）"),
+        ("启用离线资料库", "离线库开关标签（v1.8.0）"),
+        ("排在所有在线源前面", "状态行写明第一优先级（v1.8.0）"),
+        ("refreshOfflineStat", "离线库状态行刷新（v1.8.0）"),
+        ("refreshAliasCount", "别名组数同步回界面（v1.8.0）"),
+        ("已记入本地别名记忆", "面板上的别名落盘提示（v1.8.0）"),
+        ("不提供头像", "离线库卡片说明「不提供头像」（v1.8.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     want, detail = expected_version_strings(version, revision)
     if not want:
         print("  提示：%s，跳过版本串检查" % detail)
@@ -294,6 +309,15 @@ def check_embedded_backend(blob):
         # 所以断言尽量挑**字符串字面量**（内联不了），而不是函数名。
         ("操作過於頻繁", "javdb 限频识别（v1.7.0）"),
         ("data-size", "javdb 体积取自 data-size 而非页面文本（v1.7.0）"),
+        # v1.8.0：离线资料库（本地只读、第一优先级）+ 别名落盘入口。
+        # 全部是先在产物里 grep 过一遍才写进来的（都是字符串字面量，内联不掉）：
+        # `OfflineDB` 会写进 ProviderIds，`export_offline_db.py` 在「读不到」的引导文案里，
+        # 这两个最值钱 —— 它们分别代表「这个源真的编进去了」和「读不到时的下一步」。
+        ("OfflineDB", "离线资料库源标识（v1.8.0）"),
+        ("offline_db_enabled", "离线资料库开关字段（v1.8.0）"),
+        ("export_offline_db.py", "读不到时的导出引导文案（v1.8.0）"),
+        ("alias_memo", "别名落盘条数的回显字段（v1.8.0）"),
+        ("rememberProfileAliases", "别名落盘入口（人工采用 / 写入成功共用，v1.8.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 

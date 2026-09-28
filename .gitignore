@@ -38,6 +38,8 @@ screenshots/*
 !screenshots/16-*.png
 # 磁力分页那张是 mock 数据（假番号 + 假磁力哈希），可以公开
 !screenshots/magnet_tabs.png
+# 离线资料库设置卡片：夹具是脚本自己造的假数据，路径也是临时文件，不含任何真实内容
+!screenshots/17-*.png
 
 # ===== 构建副产物 =====
 # 正式产物是 EmbyMetaEditor.exe（构建命令见 README）。

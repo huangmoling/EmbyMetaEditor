@@ -41,11 +41,22 @@ func (a *App) handleProfileSources(w http.ResponseWriter, r *http.Request) {
 		Note  string `json:"note"`
 	}
 	var out []srcView
-	for _, s := range actorSources() {
+	for _, s := range a.profileSourceList() {
 		out = append(out, srcView{Key: s.Key(), Label: s.Label(), Note: actorSourceNote(s.Key())})
+	}
+	// 离线资料库的状态单独回一份：它排在最前面（第一优先级），但只有启用了才存在。
+	// 把「载入了多少条」或「为什么读不到」直接摆到界面上，省得用户对着一个不生效的
+	// 开关猜 —— 这个库是加密导出的，读不到的原因值得原样显示。
+	offline := map[string]any{"enabled": false}
+	if lib := a.offlineLib(); lib != nil {
+		entries, errMsg := lib.Stats()
+		offline = map[string]any{
+			"enabled": true, "path": lib.Path(), "entries": entries, "error": errMsg,
+		}
 	}
 	writeOK(w, map[string]any{
 		"sources":       out,
+		"offline_db":    offline,
 		"alias_groups":  a.aliases.Count(),
 		"history_count": len(a.sync.List(0)),
 		// 批量（不带 keys）的默认策略。单卡面板上逐字段勾选时**以勾选为准**，
@@ -76,6 +87,11 @@ func (a *App) handleProfilePreview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	// 「人工采用」：用户亲手按的这一次「抓取资料」，就是对这次解析结果的确认 ——
+	// 把里面的旧艺名当场落盘，之后所有资料源搜索时都能共享（见 rememberProfileAliases）。
+	// 放在**入口**而不是 fetchActorProfileWith 里，是为了让那个纯函数保持只读：
+	// 有一条既有用例专门断言「抓取本身不碰别名记忆」。现在改成「抓取入口才碰」。
+	prof.AliasMemo = a.rememberProfileAliases(prof, aliasMemoSource("已采用", prof))
 	writeOK(w, prof)
 }
 

@@ -289,7 +289,7 @@
           </div>
           <div class="pf-actions">
             <label class="switch"><input type="checkbox" id="pfAlias" checked>
-              使用别名记忆（<span id="pfAliasN">0</span> 组同人写法，提高搜索命中率）</label>
+              使用别名记忆（<span id="pfAliasN">0</span> 组已确认的旧艺名，全部资料源共享；只加搜索词与认可写法，不放宽身份匹配阈值）</label>
             <div class="grow"></div>
             <input class="input" id="pfLimit" type="number" value="24" min="1" style="width:76px"
               title="当前筛选条件里，最多处理多少位演员">
@@ -403,6 +403,22 @@
             <label>Cookie</label>
             <input class="input" id="stJdbCookie">
             <div class="hint">javdb 有 Cloudflare 与 18 岁确认。默认匿名请求多数情况下够用；被拦时从浏览器复制完整 Cookie（<span class="mono">over18=1; cf_clearance=…</span>）填这里。留空表示不修改。</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>离线演员资料库</h3>
+          <div class="hint" style="margin-bottom:10px">
+            本地<b>只读</b>的资料源。原始资料库（<span class="mono">.db</span>）是加密的、归另一个工具所有，
+            我们既不解析也不写入它 —— 先用 <span class="mono">tools/export_offline_db.py</span> 导出成 JSON，
+            再把路径填在这里。启用后它排在所有在线资料源<b>最前面</b>（已确认过的字段先落，在线源只补它没有的）；
+            它<b>不提供头像</b>，头像仍走上面 gfriends 那条独立顺序。
+          </div>
+          <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stOffOn"> 启用离线资料库</label>
+          <div class="field">
+            <label>导出文件路径（JSON）</label>
+            <input class="input" id="stOffPath" placeholder="F:\桌面\offline_library.json" spellcheck="false">
+            <div class="hint" id="stOffStat">未启用。</div>
           </div>
         </div>
 
