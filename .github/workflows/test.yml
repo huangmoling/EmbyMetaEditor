@@ -97,7 +97,7 @@ jobs:
           fi
           # 内嵌的字面量必须在二进制里（源码改了没重建时这里最能说明问题）
           # -a：exe 是二进制，不加这个 grep 只会回一句 "Binary file matches"
-          for lit in "磁力搜索源" "预演" "离线资料库"; do
+          for lit in "磁力搜索源" "预演" "离线资料库" "资料完整度"; do
             if ! grep -aq "$lit" EmbyMetaEditor.exe; then
               echo "::error::产物里找不到内嵌前端字面量「$lit」—— //go:embed web 没打进去？"
               exit 1

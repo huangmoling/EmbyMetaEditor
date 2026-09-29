@@ -39,6 +39,11 @@ type mockEmby struct {
 	// lastPersonTypes 记录最近一次 /Persons 收到的 PersonTypes，
 	// 用来断言「界面选的类型真的传到了 Emby」，而不是只在我们这层过滤。
 	lastPersonTypes string
+	// lastPersonFields 记录最近一次 /Persons 收到的 Fields。
+	// 真实 Emby 不带 Fields 时**一个资料字段都不返回**，所以「忘了把新字段列进
+	// Fields」在线上表现为「所有人的资料完整度都是 0%」—— 不报错、不崩溃。
+	// 这条记录是唯一能拦住它的东西：mock 自己不做字段裁剪，光看返回值看不出来。
+	lastPersonFields string
 	// libFolders 模拟 /Library/VirtualFolders：媒体库登记信息（含磁盘路径）。
 	// 「这个演员在媒体库里有哪些作品」要靠它把作品归到某个库 —— 库名在
 	// 条目里是查不到的（条目的 ParentId 是库内部的中间文件夹）。
@@ -288,6 +293,7 @@ func newMockEmby(t *testing.T) *mockEmby {
 			}
 			items = filtered
 		}
+		m.lastPersonFields = r.URL.Query().Get("Fields")
 		types := r.URL.Query().Get("PersonTypes")
 		m.lastPersonTypes = types
 		if types != "" {

@@ -576,12 +576,26 @@ function renderPersonCard(p) {
   // 头像来源随时可能换（gfriends 收录了更清晰的版本），不必先去工具栏勾开关。
   const avLabel = p.has_image ? '重写头像' : '刮削头像';
   const avTitle = p.has_image ? '用 gfriends / MetaTube 的图替换掉当前头像' : '按当前来源设置抓一张头像';
+  // 资料完整度：Emby 里那 5 个资料字段填了几个。口径和后端 profileCompleteness 一致
+  // （简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID），**头像不计入** —— 头像那件事
+  // 上面那排标签已经说了，混在一起就分不清「资料不全」和「没头像」。
+  // 百分比直接用后端算好的 profile_percent，这里不重算一遍：口径只定义一次。
+  const pfFilled = Number(p.profile_filled) || 0;
+  const pfTotal = Number(p.profile_total) || 5;
+  const pfPct = Math.max(0, Math.min(100, Number(p.profile_percent) || 0));
+  const pfTitle = '演员资料：已填 ' + pfFilled + '/' + pfTotal +
+    ' 项（简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID）。头像是否已有见上方标签，不计入。';
   return '<div class="pcard" data-id="' + esc(p.Id) + '" data-name="' + esc(p.Name) + '">' +
     '<div class="av">' + img + '</div>' +
     '<div class="info"><b title="' + esc(p.Name) + '">' + esc(p.Name) + '</b>' +
     '<div class="sub">' + (p.has_image ? '<span class="tag tag-green">已有头像</span>'
       : (p.gfriends > 0 ? '<span class="tag tag-blue">gfriends 命中 ' + p.gfriends + '</span>' : '<span class="tag tag-amber">库中无记录</span>')) +
-    '</div></div>' +
+    '</div>' +
+    '<div class="pfbar' + (pfPct > 0 ? '' : ' zero') + '" title="' + esc(pfTitle) + '">' +
+    '<span class="track"><i style="width:' + pfPct + '%"></i></span>' +
+    '<span class="txt">资料 ' + pfPct + '%</span>' +
+    '</div>' +
+    '</div>' +
     '<div class="ops">' +
     '<button class="btn btn-sm btn-primary" data-act="av" title="' + esc(avTitle) + '">' + esc(avLabel) + '</button>' +
     '<button class="btn btn-sm" data-act="pick" title="从 gfriends 头像库里挑一张">选图</button>' +

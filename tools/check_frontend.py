@@ -420,6 +420,36 @@ def main():
     else:
         print("PASS  离线资料库：已内嵌，设置页不再有开关/路径，保存后仍会重画")
 
+    # --- 15. 资料完整度：头像卡片必须真的把那个百分数显示出来 ---
+    # 需求：「演员头像增加资料完整度显示，按百分比显示」。
+    # 守的是「算了 → 传了 → 画了」这条链的**最后一环**。本项目最容易犯的错就是
+    # 算出来却没接到界面上：接口 200、单测也过（因为单测只测到接口那一层），
+    # 用户却什么都看不到。所以这里要求三处同时存在 —— 接口字段被消费、
+    # 卡片里有渲染类名、样式表里有对应规则，缺一就算没接通。
+    pf_problems = []
+    for needle, what in (
+        ("profile_percent", "完整度百分比字段"),
+        ("profile_filled", "已填项数字段"),
+        ("profile_total", "总项数字段"),
+        ("pfbar", "卡片上的完整度区块"),
+    ):
+        if needle not in js:
+            pf_problems.append(f"app.js 里没有{what}（{needle}）")
+    if not re.search(r"资料 '\s*\+\s*pfPct\s*\+\s*'%", js):
+        pf_problems.append("app.js 里没把完整度按百分比渲染（找不到「资料 N%」那段文案）")
+    css = read("web/style.css")
+    if ".pcard .pfbar" not in css:
+        pf_problems.append("style.css 里没有 .pcard .pfbar 样式 —— 进度条会没样子")
+    if "profileCompleteness" not in api:
+        pf_problems.append("api.go 里没有调用 profileCompleteness —— 完整度根本没算")
+    print(f"      资料完整度接线问题 {len(pf_problems)} 处")
+    if pf_problems:
+        for p in pf_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  资料完整度：接口字段被消费，卡片按百分比渲染，样式齐备")
+
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0
 

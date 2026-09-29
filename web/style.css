@@ -298,6 +298,22 @@ table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .pcard .ops { display: flex; flex-direction: column; gap: 4px; flex: none; }
 /* 三个按钮竖排（重写/刮削头像、选图、资料），文案不能折行，否则卡片高度会跳 */
 .pcard .ops .btn { white-space: nowrap; }
+/* 资料完整度：紫色专门给「演员资料」，和头像那三个标签（绿=已有头像、
+   蓝=gfriends 命中、琥珀=库中无记录）分开，一眼能分清是哪一类信息。
+   百分比用等宽数字，翻页时数字不会因为字宽不同而左右抖。 */
+.pcard .pfbar { display: flex; align-items: center; gap: 6px; margin-top: 5px; }
+.pcard .pfbar .track {
+  width: 92px; height: 4px; border-radius: 2px; flex: none;
+  background: var(--border); overflow: hidden;
+}
+.pcard .pfbar .track i { display: block; height: 100%; background: var(--violet); border-radius: 2px; }
+.pcard .pfbar .txt {
+  font-size: 11px; color: var(--violet);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+/* 一个字段都没填：整条转灰，别用紫色假装「有进度」 */
+.pcard .pfbar.zero .track i { background: var(--muted); }
+.pcard .pfbar.zero .txt { color: var(--muted); }
 
 /* ---------- 番号结果 ---------- */
 .missgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }

@@ -339,6 +339,48 @@ func embyProfileSnapshot(item Item) map[string]any {
 	}
 }
 
+// profileCompleteness 数「演员资料的 5 个字段里，Emby 里已经填了几个」。
+//
+// 分母就是 buildActorProfile 里 add(...) 那五行：简介 / 出生日期 / 出生年份 /
+// 出生地 / 外部 ID。它和面板逐字段比对用的是**同一份口径** —— 都从
+// embyProfileSnapshot 取，将来加字段只改那一处。**头像不在其中**：头像页本来就有
+// 自己的「已有头像 / gfriends 命中」标签，混进来会让「资料不全」和「没头像」
+// 两件事分不清。
+func profileCompleteness(item Item) (filled, total int) {
+	snap := embyProfileSnapshot(item)
+	vals := []any{
+		snap["overview"],
+		snap["premiere_date"],
+		snap["production_year"],
+		snap["production_locations"],
+		snap["provider_ids"],
+	}
+	for _, v := range vals {
+		if profileValuePresent(v) {
+			filled++
+		}
+	}
+	return filled, len(vals)
+}
+
+// profileValuePresent 判 embyProfileSnapshot 出来的值算不算「已填」。
+//
+// 类型就那么固定几种；认不出的（含 nil）一律当**没填** —— 宁可少算也别虚高，
+// 完整度虚高比偏低更坏：用户会以为这个人不用补了。
+func profileValuePresent(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x) != ""
+	case int:
+		return x != 0
+	case []string:
+		return len(x) > 0
+	case map[string]string:
+		return len(x) > 0
+	}
+	return false
+}
+
 func itemStr(m Item, key string) string {
 	if v, ok := m[key].(string); ok {
 		return v

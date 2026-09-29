@@ -12,7 +12,7 @@ Go 写的 Emby 媒体库元数据编辑器。**单文件 exe + 内嵌 Web UI**�
 | **访问认证** | 保护界面本身：单密码、PBKDF2-SHA256 存储、按 IP 退避 |
 | **Emby 登录** | 用户名密码 / API Key 两种，凭据本地保存 |
 | **MetaTube 刮削** | 单个 / 批量刮元数据与图片（公共后端已下线，**自建必填**） |
-| **gfriends 头像** | 10 万+ 头像索引；人物列表按**媒体库 + 人物类型（演员 / 导演）**筛；索引与图片各带两层 CDN 容错 |
+| **gfriends 头像** | 10 万+ 头像索引；人物列表按**媒体库 + 人物类型（演员 / 导演）**筛，每张卡带**资料完整度百分比**；索引与图片各带两层 CDN 容错 |
 | **演员资料** | 简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID（多源合并 + **内嵌的离线资料库优先**、**抓取源分列可选**、**搜索用名字可临时改**），并列出该人物在本库的作品；**别名记忆在「人工采用 / 写入成功」时落盘、之后所有源共享**（只加搜索词，**不放宽身份阈值**）；**打开面板不联网**，写入默认「只填空白」、单卡可勾选覆盖、可回滚 |
 | **番号补全** | 按演员抓全部番号 → 与本地库比对找缺失 → 抓磁力列表（**javbus + javdb 双源并发**、按种子哈希去重、**按体积倒序**、**按番号并排分页**、每行标出来源） |
 | **国产传媒** | 选库列条目 → 单个 / 勾选批量刮削 / 直接编辑元数据；四站并发按 **封面 → 标题 → 标签 → 日期** 合并 |
@@ -150,6 +150,10 @@ API Key 在 Emby 后台「高级 → API 密钥」生成。**它是服务器级�
 ### 演员资料 / 人物列表
 
 「演员头像」页每张卡还能抓**人物本人的资料**（简介 / 出生日期 / 出生年份 / 出生地 / 外部 ID），并列出其在媒体库里的作品。
+
+每张卡还有一条**资料完整度**：`资料 60%` 配一根紫色进度条，分母就是上面那 5 个字段（Emby 里已经填了几个 ÷ 5）。它只统计**资料**，**不含头像** —— 头像那件事卡片上那排标签（已有头像 / gfriends 命中 / 库中无记录）已经说过了，混进来就分不清「资料不全」和「没头像」。0% 的卡片整条转灰，不用紫色假装有进度。悬停会写明「已填 N/5 项」以及是哪 5 项 —— 光给一个百分数，没人知道分母是什么。分母与判空口径都取自 `embyProfileSnapshot`，和「演员资料」面板逐字段比对的是**同一份**（将来加字段只改那一处）。
+
+> **为什么这 5 个字段必须显式列进 `/Persons` 的 `Fields`。** 实测 Emby 4.9：不带 `Fields` 时返回体只有 `BackdropImageTags / Id / ImageTags / Name / ServerId / Type` —— `Overview`、`PremiereDate`、`ProductionYear`、`ProductionLocations`、`ProviderIds` **一个都没有**；同一批 300 条，带上之后分别有 20 / 11 / 11 / 8 / 16 条有值。所以漏列字段不会报错，只会让**所有人的百分比静默偏低**。字段清单收在 `emby.go` 的 `personListFields` 常量（唯一出处），单测 `TestHandlePersonsRequestsProfileFields` 与 `tools/verify_profile_completeness.py` 各守一头。
 
 | 源 | 取什么 |
 |---|---|
@@ -414,9 +418,9 @@ go build -trimpath -buildvcs=false -ldflags "-s -w" -o EmbyMetaEditor.exe .
 单文件 exe：`web/` 与**整份演员资料库**（`data/actresses_export.csv`，约 9.5 MB）都用 `go:embed` 打进二进制，图标走 PE 资源（`rsrc_windows_amd64.syso`），拷走 exe 就能跑 —— 不需要额外放一个 CSV 在旁边。`-buildvcs=false` 让构建**可复现** —— 照这条命令重建与仓库里的 `EmbyMetaEditor.exe` 逐字节一致（不加则 Go 会嵌当前 commit 的 VCS 信息，体积与哈希都会变，属正常）。产物约 **19 MB**：约 9.6 MB 的程序 + 约 9.5 MB 的资料数据，CI 是按 15 MB 这条线守着「数据有没有真的进产物」的。
 
 > 仓库里的 exe **跟着 main 走**，下载链 `releases/latest/download/` 只在**发版时**更新，两者不一定同步。
-> 当前对齐 **v1.10.0**：Release 与 main 的 md5 同为 `4d95b9af3f2cf7c9ccc5c22bc27fffd0`（19,108,352 字节）。
+> 当前对齐 **v1.11.0**：Release 与 main 的 md5 同为 `6f46f8ea1b0afbd81ccc200ddd80cff8`（19,113,472 字节）。
 
-`go test ./...` 共 **277 个用例**（通过 271，跳过 6），覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、**搜索用名字的回退与透传**（假源注入：查询词是手填名、`prof.Name` 仍是 Emby 名、手填名不进别名候选、抓取不落盘）、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、作品列表与库名映射、gfriends 两层 CDN 容错、**预演与真实写入逐字段一致**（`TestScrapeMovieDryRunMatchesRealWrite` / `TestCNPlanMatchesRealWrite`，含「预演一个字节都不写」）、**条目写入快照与逐字段回滚**（清空数组要发 `[]` 而不是 `null`，否则字段静默还原不了）、**离线资料库**（内嵌的 27780 条真实数据解析得出来、索引键数多于记录数、并按数据里第一条带内容的记录真的查一次；CSV 列名映射、BOM 剥与不剥两种、重名告警、空壳条目不算命中、日期与数值收敛、与别名记忆联动的正反两面、导出文件里的头像 URL 有意不映射）、**javdb 真实夹具解析**（番号只在精确匹配时才认、体积取 `data-size` 而不是页面上那行文字、`&amp;` 要还原、没有 `data-size` 时回退到 `span.meta`）、**磁力多源合并**（按 btih 去重而不是整条链接、体积倒序、一个源挂了不影响另一个）、以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
+`go test ./...` 共 **281 个用例**（通过 275，跳过 6），覆盖访问认证、番号归一化（含 `91CM-014` 这类数字开头番号、以及「`.mp4` 被当成番号」的误报）、javbus 解析（备用结构 / 裸 `<tr>` 片段 / 真实详情页夹具）、磁力按体积倒序、连通性诊断五种失败形态、MetaTube 字段与 provider 结构兼容、Emby 身份多级回退、图片代理主机分类与缓存、图片尺寸体积探测、人物类型参数归一化、**搜索用名字的回退与透传**（假源注入：查询词是手填名、`prof.Name` 仍是 Emby 名、手填名不进别名候选、抓取不落盘）、国产传媒四站合并与只认精确匹配、元数据编辑的「只提交改动项」语义、演员资料字段合并与写入策略、**资料完整度**（分母固定 5 且与「演员资料」面板同源（`embyProfileSnapshot`）；判空口径：空白串 / 0 / 空数组 / 空 map 都不算已填；`Person → Item` 不漏字段；接口下发的百分比与「已填 N/5」逐档核对；以及**断言发出去的 `Fields` 含全部资料字段** —— 少了它真实 Emby 就不返回该字段，界面会「一致地错」）、作品列表与库名映射、gfriends 两层 CDN 容错、**预演与真实写入逐字段一致**（`TestScrapeMovieDryRunMatchesRealWrite` / `TestCNPlanMatchesRealWrite`，含「预演一个字节都不写」）、**条目写入快照与逐字段回滚**（清空数组要发 `[]` 而不是 `null`，否则字段静默还原不了）、**离线资料库**（内嵌的 27780 条真实数据解析得出来、索引键数多于记录数、并按数据里第一条带内容的记录真的查一次；CSV 列名映射、BOM 剥与不剥两种、重名告警、空壳条目不算命中、日期与数值收敛、与别名记忆联动的正反两面、导出文件里的头像 URL 有意不映射）、**javdb 真实夹具解析**（番号只在精确匹配时才认、体积取 `data-size` 而不是页面上那行文字、`&amp;` 要还原、没有 `data-size` 时回退到 `span.meta`）、**磁力多源合并**（按 btih 去重而不是整条链接、体积倒序、一个源挂了不影响另一个）、以及 mock Emby + mock MetaTube 跑通的完整刮削链路。
 
 > mock Emby 是**按真实 4.9 构建的行为建模**的，不是「理想 Emby」：读详情只认用户作用域路由（全局路径 404）、写操作只认全局路径、`POST /Items/{id}` 整对象替换、图片上传只收 base64 文本、列表不返回 `SortName`、`/Persons` 传非法 GUID 会 500。线上踩过的坑因此能在单测里复现。
 >
@@ -446,6 +450,7 @@ EmbyMetaEditor.exe -port 8097 -open=false &  # 起应用，后面几个脚本共
 | `verify_dry_run.py` | 批量刮削**预演真的不写**（29 项：预演按钮发出 `dry_run=true`、真写按钮发 `false`、抽屉写明「没有写入任何东西」、逐字段对照表与 `.same` 灰行、**抽屉里没有任何写入按钮**；国产传媒同一条链路） | 起 exe + 无头 Edge |
 | `verify_item_history.py` | 条目写入历史 / 回滚的界面（16 项：切到设置页自动拉取、列表四列、已回滚行置灰且**不再给回滚按钮**、回滚点两次才发 POST、请求体是 `{"id":…}`、写着「图片不可还原」） | 起 exe + 无头 Edge |
 | `verify_offline_lib.py` | 内嵌的离线资料库**端到端**（18 项：设置页没有那张作废的卡片、人物归并整页下线且 `/api/persons/merge` 回 404、离线源排第一、`offline_db` 状态字段不再下发；再拿 `data/actresses_export.csv` 里的**真实记录**查一次 —— 命中、来源标注、简介里的出生地与身高和数据一致、真实重名写法给出告警） | 起 exe + 无头 Edge |
+| `verify_profile_completeness.py` | 头像页的**资料完整度百分比**（8 项：每张卡都画了完整度区块、文案是「资料 N%」且只落在 20 的档位上、0% 与 `.zero` 类一一对应；再**直连 Emby 挑出资料最全的和中间档位的几位**，逐一在界面搜出来核对「界面显示 == Emby 原始数据」—— 全 0% 的抽样证明不了任何事） | 起 exe + 无头 Edge + 配好 Emby |
 | `verify_magnet_sources.py` | 磁力多源（16 项：诊断同时问各源、javdb 被限频的原因写出来、每行磁力标出来源与各源小结、磁力地址完整不截断、源开关与 `javdb_url` 真的进保存请求体） | 起 exe + 无头 Edge |
 | `smoke_profile.py` | 演员资料只读冒烟（源清单与说明 / 只填空白 / 预览无副作用 / 错误路径）；`PROFILE_LIVE=1` 加重 真实写入 → 回滚 → 校验还原，以及勾选覆盖 → 回滚 → 还原 | 起 exe + 真实 config |
 | `verify_profile_view.py` | 资料面板**渲染与抓取时机**（打开不抓、源分列与两处同步、对照表勾选态、作品区块、覆盖按钮文案与配色、与 emby 对照）；**手动改「搜索用名字」**（拦下 `/api/profile/preview` 读请求体：带的是手填名、`name` 仍是 Emby 名、预览与写入两条路径都有；回显实际搜索名、重画不退回原名） | 起 exe + 无头 Edge |
@@ -481,10 +486,10 @@ docker run --rm -p 8097:8097 -e EMBYME_AUTH_PASSWORD=你的密码 -v emby-data:/
 `.github/workflows/docker.yml` 在**打 `v*` tag 时**自动构建 `linux/amd64` + `linux/arm64` 并推送，也可在 Actions 手动触发（改完 Dockerfile 想先验一次）。首次需配两个 secret：`DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN`（权限 Read & Write）。
 
 ```bash
-git tag v1.10.0 && git push origin v1.10.0
+git tag v1.11.0 && git push origin v1.11.0
 ```
 
-镜像标签由 tag 推导：`v1.10.0` → `1.10.0` / `1.10` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
+镜像标签由 tag 推导：`v1.11.0` → `1.11.0` / `1.11` / `1` / `latest`（`latest` 跟最新正式版）。**手动触发没有 tag 可比，只推 `latest`**。镜像名固定 `<DOCKERHUB_USERNAME>/emby-meta-editor`，换 Docker Hub 用户名只动 secret。
 
 > **Docker Hub 用户名 `aag111` ≠ GitHub 用户名 `huangmoling`**，别照搬。手动触发构建的 `revision` = 触发时的 `main` HEAD，**之后再往 main 提交镜像就落后了** —— `verify_docker_image.py` 会如实报 FAIL，重新触发即可。dispatch 镜像的版本标签是 `latest`，所以那个脚本改从**镜像对应提交的 `version.go`** 取版本串来比，而不是拿 `latest` 拼 `vlatest`。
 >
@@ -628,6 +633,7 @@ Dockerfile           Docker 镜像定义（两阶段，静态链接）
 | javdb 的磁力排序和站点自己的「按大小排序」不一致 | 页面上那行「6.33GB, 1個文件」是**给人看的**（可能被截断、可能省略小数），而站点排序用的是条目容器上的 `data-size`（单位 **MB 的整数**）。照直觉取前者，得到的顺序和人家不一样 | 解析时**优先 `data-size`** 再回退那行文字；夹具是真实响应逐字节切的（`tools/fetch_javdb_fixture.py`），断言写死「`data-size="6480"` → `6.33GB`」，手写夹具测不出这个差异 |
 
 | 设置页点了「保存全部设置」，页面显示的还是保存**前**的样子 | `loadConfig()` 只回填**登录页**那几个字段，设置页是切到「设置」时才画的 —— 保存之后没有任何人重画它。用户的第一反应是「没保存成功」，然后再点一次 | `saveSettings()` 保存成功后补一次 `fillSettings()`；`check_frontend.py` 静态钉住「保存后必须重画」。这条是 `tools/verify_offline_lib.py` 抓出来的 —— 只读接口返回 200 是看不出来的。（现在它守的是另一件事：填了新密钥点保存，密钥框还留着刚输入的**明文**。） |
+| 给 `/Persons` 加字段时改了结构体，却忘了改 `Fields` | 结构体加了、JSON 标签也对、mock 照样把值返回给你 —— 单测全绿。但真实 Emby **只返回 `Fields` 里列出的字段**（实测不带 `Fields` 时返回体连 `ProviderIds` 都没有），线上表现为「所有人的资料完整度都是 0%」：不报错、不崩溃、界面也正常，只是没数 | 字段清单收进 `emby.go` 的 `personListFields` 常量（唯一出处，注释里写着实测数字）；mock 记下最近一次 `/Persons` 收到的 `Fields`，`TestHandlePersonsRequestsProfileFields` 断言含全体字段；`verify_profile_completeness.py` 再拿 Emby 条目做独立参照核对**非零档位** —— 全 0% 的抽样是「一致地错」，证明不了任何事 |
 | 从**登录页**的高级配置连一次 Emby，设置页里的「自动刷新」「覆盖已有图片」两个开关被静默关掉 | 登录页那份配置只发一部分键（不含这两项），而 `handleSaveConfig` 当时对布尔项是直接 `c.X = in.X` —— 布尔值反序列化后，「键不在」和「键在且为 false」**长得一模一样**，没提交的键被零值覆盖 | 改成「**请求里出现过这个键才覆盖**」：先读一遍原始 body 收集出现过的 key，再逐项覆盖。`TestSaveConfigKeepsAbsentKeys` 正反两面钉住：缺键不清空、显式 `false` 必须真的关掉 |
 | javdb 抓几次之后开始返回 403，但页面里没有 Cloudflare 的特征 | 那不是 Cloudflare 挑战，是 javdb **自己的限频**：响应体只有一句「操作過於頻繁，請等一会再試」。当挑战处理会去翻 Cookie，翻到天亮也没用 | `JavDB.get()` 单独识别这句话，提示「已自动放慢重试，一直如此就把请求间隔调大」；客户端**整批抓取只建一次**（限速器是实例级的，逐条新建等于每条都从零计时） |
 | 删掉「媒体库体检」之后，某个界面上还留着一个必然 404 的入口 | 删功能最典型的漏法是删一半：后端路由删了、前端导航和渲染函数还在（或者反过来）。两边都能编译通过、测试也能全绿 —— 只有用户点进去才发现 | 三层一起守：`check_frontend.py` 静态扫（导航、按钮、渲染函数、接口路径），CI 在**产物里反向 grep** 必须消失的字面量（v1.7.0 的「媒体库体检」「hchip」；v1.10.0 的「人物归并」「查找重复人物」「离线演员资料库」「stOffOn」），`verify_docker_image.py` 也对内嵌前后端做同样的反向断言 |

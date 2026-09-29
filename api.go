@@ -992,6 +992,13 @@ func (a *App) handlePersons(w http.ResponseWriter, r *http.Request) {
 		Person
 		HasImage bool `json:"has_image"`
 		GFriends int  `json:"gfriends"`
+		// 演员资料完整度（见 profileCompleteness）：头像页靠它告诉用户「这个人
+		// 还缺多少资料」。口径与「演员资料」面板逐字段比对的五行一致，头像不计入。
+		// 同时回 filled/total，是为了界面上能写清「3/5」而不是只给一个百分数 ——
+		// 光看 40% 没人知道分母是什么。
+		ProfileFilled  int `json:"profile_filled"`
+		ProfileTotal   int `json:"profile_total"`
+		ProfilePercent int `json:"profile_percent"`
 	}
 	out := make([]personView, 0, len(pr.Items))
 	for _, p := range pr.Items {
@@ -999,6 +1006,10 @@ func (a *App) handlePersons(w http.ResponseWriter, r *http.Request) {
 		pv := personView{Person: p, HasImage: has}
 		if !has {
 			pv.GFriends = len(a.gf.Lookup(p.Name))
+		}
+		pv.ProfileFilled, pv.ProfileTotal = profileCompleteness(p.profileItem())
+		if pv.ProfileTotal > 0 {
+			pv.ProfilePercent = pv.ProfileFilled * 100 / pv.ProfileTotal
 		}
 		out = append(out, pv)
 	}

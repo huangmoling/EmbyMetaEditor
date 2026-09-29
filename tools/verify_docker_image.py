@@ -11,12 +11,14 @@
 `check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复、v1.2.0 的资料面板
 「媒体库作品」区块与「将覆盖原值」文案、v1.3.0 的选图尺寸小字与源分列、v1.4.0 的复制回退与
 人物类型下拉、v1.5.0 的搜索用名字、v1.6.0 的预演抽屉 / 写入历史 / 诊断包三个面板，以及 v1.7.0 的
-磁力多源；**反向**断言则守着「下线的东西不能还留着入口」—— v1.7.0 删掉的体检页、
+磁力多源，v1.11.0 的资料完整度进度条（`pfbar`）与它消费的 `profile_percent`；**反向**断言则守着
+「下线的东西不能还留着入口」—— v1.7.0 删掉的体检页、
 v1.10.0 整块删掉的**人物归并**页（实测 Emby 不允许通过 API 删 Person，最后一步根本走不通）、
 以及 v1.10.0 因为改成内嵌而撤掉的**离线资料库设置卡片**（开关 / 路径 / 状态行）。
 `check_embedded_backend` 查 gfriends CDN 模板、`GET /api/profile/works`、`/Library/VirtualFolders`、
 磁力体积正则、v1.6.0 的路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`、v1.7.0 的
-磁力源路由与 javdb 解析特征串、v1.9.0 的离线资料库 CSV 列映射，以及 v1.10.0 里最硬的那一条 ——
+磁力源路由与 javdb 解析特征串、v1.9.0 的离线资料库 CSV 列映射、v1.11.0 的资料完整度算法
+（`profileCompleteness`）与 `/Persons` 的字段串，以及 v1.10.0 里最硬的那一条 ——
 **内嵌的 CSV 表头**（`id,name_original,name_ja,name_zh_cn`）：它是连续的一行，只可能来自
 `data/actresses_export.csv` 本身，匹配到它就等于「那 9.5 MB 数据真的在镜像里」，
 而不是「只有读它的代码在」。
@@ -219,6 +221,16 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.11.0：头像卡片上的资料完整度进度条。断言用**类名**而不是中文文案 ——
+    # 类名同时出现在 app.js（渲染）与 style.css（样式）里，命中它就等于
+    # 「界面这一层真的画了这条进度条」；再加上 profile_percent 说明后端算出来的
+    # 那个数真的被前端消费了（本项目最典型的坏法是「算了、传了、没画」）。
+    for marker, what in [
+        ("pfbar", "资料完整度进度条（v1.11.0）"),
+        ("profile_percent", "完整度百分比字段被前端消费（v1.11.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     # 反向断言：下线的东西不该还留在产物里。
     #
     # 这里特别值：删功能最典型的漏法是「后端删了、前端还留着入口」—— 用户会点进一个
@@ -340,6 +352,14 @@ def check_embedded_backend(blob):
         # 构建上下文时，正好会在这里被抓住。
         ("id,name_original,name_ja,name_zh_cn", "内嵌的演员资料库 CSV 表头（v1.10.0）"),
         ("data/actresses_export.csv", "数据源文件的出处说明（v1.10.0）"),
+        # v1.11.0：头像页的资料完整度。`profileCompleteness` 是算法本身；
+        # 字段清单只能断言那个**拼接好的字段串** —— 常量名 `personListFields`
+        # 被编译器内联掉了，在产物里 grep 不到（挑断言时踩过这个坑）。
+        # 这一条同时守着「真实 Emby 只返回 Fields 里列出的字段」那条静默失效：
+        # 少了任何一个，线上就是「所有人的完整度都偏低」而不报错。
+        ("profileCompleteness", "资料完整度算法（v1.11.0）"),
+        ("Overview,PremiereDate,ProductionYear,ProductionLocations",
+         "/Persons 请求的资料字段（v1.11.0）"),
     ]:
         check("后端含 %s" % what, marker.encode() in blob, marker)
 

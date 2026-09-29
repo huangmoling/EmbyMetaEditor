@@ -634,12 +634,42 @@ func (e *Emby) Refresh(ctx context.Context, itemID string, recursive bool) error
 }
 
 // Person 是 Emby 中的人物（演员/导演等）。
+// personListFields 是 /Persons 要 Emby 带回的字段。
+//
+// **实测（Emby 4.9）：不在这里列出来，它就一个都不返回。** 不带 Fields 时返回体
+// 只有 BackdropImageTags / Id / ImageTags / Name / ServerId / Type —— 连 ProviderIds
+// 都没有；同一批 300 条，带上 Fields 之后 Overview / PremiereDate / ProductionYear /
+// ProductionLocations / ProviderIds 分别有 20 / 11 / 11 / 8 / 16 条有值。
+//
+// 资料完整度就是数这几个字段里有几个非空，所以**漏掉任何一个都会让界面静默地少算
+// 一档**：不报错、不崩溃，只是百分比一律偏低。加字段时务必同步这里，
+// TestHandlePersonsRequestsProfileFields 守着这条。
+const personListFields = "ImageTags,ProviderIds,Overview,PremiereDate,ProductionYear,ProductionLocations"
+
 type Person struct {
 	Id           string            `json:"Id"`
 	Name         string            `json:"Name"`
 	ImageTags    map[string]string `json:"ImageTags"`
 	ProviderIds  map[string]string `json:"ProviderIds"`
 	PremiereDate string            `json:"PremiereDate"`
+	// 下面三个只为「资料完整度」而取，见 personListFields。
+	Overview            string   `json:"Overview"`
+	ProductionYear      int      `json:"ProductionYear"`
+	ProductionLocations []string `json:"ProductionLocations"`
+}
+
+// profileItem 把人物列表项包成 Item，好复用 embyProfileSnapshot 那一份字段口径。
+//
+// 为什么不另写一张「列表版字段表」：完整度必须和「演员资料」面板的看法完全一致，
+// 两处各写一份的话，将来加字段就会出现「面板里能勾选、完整度却不认它」。
+func (p Person) profileItem() Item {
+	return Item{
+		"Overview":            p.Overview,
+		"PremiereDate":        p.PremiereDate,
+		"ProductionYear":      p.ProductionYear,
+		"ProductionLocations": p.ProductionLocations,
+		"ProviderIds":         p.ProviderIds,
+	}
 }
 
 // PersonsResult 是人物分页结果。
@@ -667,7 +697,7 @@ func (e *Emby) Persons(ctx context.Context, start, limit int, search, parentID, 
 	if limit > 0 {
 		q.Set("Limit", itoa(limit))
 	}
-	q.Set("Fields", "ImageTags,ProviderIds")
+	q.Set("Fields", personListFields)
 	if search != "" {
 		q.Set("SearchTerm", search)
 	}
