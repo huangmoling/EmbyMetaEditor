@@ -64,23 +64,76 @@ def check(name, cond, detail=""):
         FAILED.append(name)
 
 
+UA = "verify-docker-image/1.0"
+
+# 两级 opener：默认那个会吃 Windows 注册表里的系统代理（`NO_PROXY` 拦不住），
+# 另一个显式不用代理。
+_OPENERS = (
+    ("urllib（系统代理）", urllib.request.build_opener()),
+    ("urllib（直连）", urllib.request.build_opener(urllib.request.ProxyHandler({}))),
+)
+
+
+def _via_urllib(opener, url, headers, timeout):
+    req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": UA}))
+    with opener.open(req, timeout=timeout) as r:
+        return r.read(), r.headers
+
+
+def _via_curl(direct, url, headers, timeout):
+    cmd = ["curl", "-sS", "-L", "--max-time", str(timeout)]
+    if direct:
+        cmd += ["--noproxy", "*"]
+    for k, v in headers.items():
+        cmd += ["-H", "%s: %s" % (k, v)]
+    p = subprocess.run(cmd + [url], capture_output=True, timeout=timeout + 15)
+    if p.returncode != 0 or not p.stdout:
+        raise RuntimeError(p.stderr.decode("utf-8", "replace").strip()[:200] or "curl 返回空")
+    return p.stdout, {}
+
+
+def _fetch(url, headers, timeout, tries=3):
+    """取一个 URL，返回 (bytes, headers)。
+
+    为什么要一条四级兜底链（实测 2026-11，本机 Windows）：
+      · urllib 在 Windows 上会从**注册表**读系统代理，环境变量里的 `NO_PROXY` 管不到它，
+        而本机那个系统代理不转发 registry（走它访问 auth.docker.io 直接 TLS 断开）
+        → 先用一个 `ProxyHandler({})` 的直连 opener 兜一层。
+      · 但连 `auth.docker.io` / `registry-1.docker.io` 本身也**间歇性**被 reset
+        （`WinError 10054` / `curl: (35) Connection was reset`，同一秒里换成 curl 又 200），
+        换 ALPN、换 CA 包、换 User-Agent 都不影响 —— 这是链路上的 RST，不是脚本的问题。
+      · 所以：urllib 两条 + curl 一条轮着试，整轮再重试。curl 在 Windows 10+ 自带、
+        Linux / macOS 也都有，留作最后一级不会有额外依赖。
+    """
+    last = None
+    for _ in range(tries):
+        for name, opener in _OPENERS:
+            try:
+                return _via_urllib(opener, url, headers, timeout)
+            except Exception as e:  # noqa: BLE001
+                last = "%s: %s" % (name, e)
+        for direct in (True, False):
+            try:
+                return _via_curl(direct, url, headers, timeout)
+            except Exception as e:  # noqa: BLE001
+                last = "curl（%s）: %s" % ("直连" if direct else "系统代理", e)
+        time.sleep(1.5)
+    raise RuntimeError("拉取 %s 失败：%s" % (url, last))
+
+
 def token():
     url = ("https://auth.docker.io/token?service=registry.docker.io"
            "&scope=repository:%s:pull" % REPO)
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return json.loads(r.read())["token"]
+    body, _ = _fetch(url, {}, 30)
+    return json.loads(body)["token"]
 
 
 def get(url, tok, accept=ACCEPT, tries=4):
-    """带重试：blob 会 302 到 CDN（Cloudflare / CloudFront），国内直连时握手偶发超时。"""
+    """带重试：blob 会 302 到 CDN（Cloudflare / CloudFront），国内连的时候握手偶发被 reset。"""
     last = None
     for _ in range(tries):
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", "Bearer " + tok)
-        req.add_header("Accept", accept)
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return r.read(), r.headers
+            return _fetch(url, {"Authorization": "Bearer " + tok, "Accept": accept}, 60, tries=1)
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(1.5)
