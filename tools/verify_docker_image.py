@@ -11,17 +11,20 @@
 `check_embedded_frontend` 查 `pickAvatar` 那条 gfriends 修复、v1.2.0 的资料面板
 「媒体库作品」区块与「将覆盖原值」文案、v1.3.0 的选图尺寸小字与源分列、v1.4.0 的复制回退与
 人物类型下拉、v1.5.0 的搜索用名字、v1.6.0 的预演抽屉 / 写入历史 / 诊断包三个面板，以及 v1.7.0 的
-磁力多源，v1.11.0 的资料完整度进度条（`pfbar`）与它消费的 `profile_percent`；**反向**断言则守着
+磁力多源，v1.11.0 的资料完整度进度条（`pfbar`）与它消费的 `profile_percent`，
+v1.12.0 设置页的姓名映射表卡片（`stMapStatus` / `refreshMapping`）与资料面板上的「映射表」标签；**反向**断言则守着
 「下线的东西不能还留着入口」—— v1.7.0 删掉的体检页、
 v1.10.0 整块删掉的**人物归并**页（实测 Emby 不允许通过 API 删 Person，最后一步根本走不通）、
 以及 v1.10.0 因为改成内嵌而撤掉的**离线资料库设置卡片**（开关 / 路径 / 状态行）。
 `check_embedded_backend` 查 gfriends CDN 模板、`GET /api/profile/works`、`/Library/VirtualFolders`、
 磁力体积正则、v1.6.0 的路由与 `imageSlotsToWrite` / `planCN` / `rollbackItemSync`、v1.7.0 的
 磁力源路由与 javdb 解析特征串、v1.9.0 的离线资料库 CSV 列映射、v1.11.0 的资料完整度算法
-（`profileCompleteness`）与 `/Persons` 的字段串，以及 v1.10.0 里最硬的那一条 ——
+（`profileCompleteness`）与 `/Persons` 的字段串、v1.12.0 的两条映射表路由与
+`resolveSearchName` / `mappingNameCandidates`，以及 v1.10.0 里最硬的那一条 ——
 **内嵌的 CSV 表头**（`id,name_original,name_ja,name_zh_cn`）：它是连续的一行，只可能来自
 `data/actresses_export.csv` 本身，匹配到它就等于「那 9.5 MB 数据真的在镜像里」，
-而不是「只有读它的代码在」。
+而不是「只有读它的代码在」。v1.12.0 的姓名映射表同理，查的是第一条记录的属性
+（`zh_cn="阿比盖尔·迈克"`），只在 `data/actor_mapping.xml` 里出现过。
 **加新断言前先在本地产物里 `grep` 一遍**（拼出来的字符串在二进制里根本不存在，会误报 FAIL；
 被编译器内联掉的函数名也一样 —— `mergeMagnets` 和 `sortMagnetsBySize` 就是这么消失的，
 所以优先挑字符串字面量）。断言里凡是「v1.4.0 做过、v1.6.0 又改回来」的地方，按**当前**形态写。
@@ -231,6 +234,16 @@ def check_embedded_frontend(blob, version, revision=""):
     ]:
         check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
 
+    # v1.12.0：姓名映射表。设置页的新卡片 + 资料面板上那个「映射表」标签。
+    # 标签查的是它的 title 文案而不是「映射表」三个字 —— 后者在设置卡片里也出现，
+    # 命中它证明不了「面板上真的打了这个标签」。三处都先在产物里 grep 过。
+    for marker, what in [
+        ("stMapStatus", "设置页的姓名映射表卡片（v1.12.0）"),
+        ("refreshMapping", "「从上游更新」按钮的处理函数（v1.12.0）"),
+        ("日文站只认日文写法", "资料面板上的「映射表」标签（v1.12.0）"),
+    ]:
+        check("内嵌前端含 %s" % what, marker.encode() in blob, marker)
+
     # 反向断言：下线的东西不该还留在产物里。
     #
     # 这里特别值：删功能最典型的漏法是「后端删了、前端还留着入口」—— 用户会点进一个
@@ -302,9 +315,15 @@ def check_embedded_backend(blob):
         ("person_types", "批量接口的人物类型字段（v1.4.0）"),
         ("img-src 'self' data: blob:; connect-src 'self'", "CSP img-src 收紧回同源（v1.6.0）"),
         # v1.5.0：手动搜索名。函数名也在产物里（Go 的符号表没被 -s 完全剥掉），
-        # 所以能一起断言「effectiveSearchName 这条规则确实编进去了」。
+        # 所以能一起断言「搜索名裁决这条规则确实编进去了」。
+        # v1.12.0 起改名为 resolveSearchName —— 它多了一层「映射表给日文名」的来源，
+        # 名字一起换，免得读代码的人以为还是「留空退原名」那两条分支。
         ("search_name", "抓取/写入入参里的搜索名（v1.5.0）"),
-        ("effectiveSearchName", "搜索名回退规则（v1.5.0）"),
+        ("resolveSearchName", "搜索名裁决规则（v1.12.0）"),
+        ("actor_mapping.xml", "内嵌姓名映射表（v1.12.0）"),
+        ("GET /api/profile/mapping", "映射表状态路由（v1.12.0）"),
+        ("POST /api/profile/mapping/refresh", "映射表在线更新路由（v1.12.0）"),
+        ("mappingNameCandidates", "头像链的映射表补名（v1.12.0）"),
         ("fetchActorProfileWith", "可注入资料源的抓取入口（v1.5.0）"),
         # v1.6.0：预演 / 条目快照回滚 / 诊断包三条后端链路。
         # 断言的都是**源码里真实存在的字面量**（加之前先在产物里 grep 过一遍）。

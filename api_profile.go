@@ -17,7 +17,7 @@ type profileRequest struct {
 	Name     string `json:"name"`
 	// SearchName 是界面上手填的「搜索用名字」，**只当查询词**：
 	// 留空 = 用 Emby 里的人物名。Emby 里的名字、写入字段的归属、
-	// 同步历史里的名字全都仍按 Name 走（见 effectiveSearchName）。
+	// 同步历史里的名字全都仍按 Name 走（见 resolveSearchName）。
 	SearchName   string   `json:"search_name"`
 	Sources      []string `json:"sources"`
 	Keys         []string `json:"keys"`           // 只写这些字段；空 = 全部可写的
@@ -338,4 +338,28 @@ func (a *App) handleProfileAliases(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeOK(w, map[string]any{"total": len(a.aliases.Groups), "groups": out})
+}
+
+// handleMappingStatus 姓名映射表当前用的是哪一份、多少条、有没有回退。
+//
+// 这条接口会触发一次解析（首次调用约几百毫秒），所以**不**塞进
+// /api/profile/sources —— 那个接口是打开演员资料抽屉时调的，不该为了显示
+// 一个数字就让抽屉慢一截。设置页是主动打开的，等得起。
+func (a *App) handleMappingStatus(w http.ResponseWriter, r *http.Request) {
+	writeOK(w, a.mappingStatus())
+}
+
+// handleMappingRefresh 从上游拉最新映射表，校验通过后落盘并立即生效。
+//
+// 一次性动作（不是定时任务）：上游随时会变，自动拉取等于每隔几天悄悄换一份数据，
+// 而数据一换，同样的名字就可能搜出不同的结果 —— 那必须由人按下去。
+func (a *App) handleMappingRefresh(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+	st, err := a.refreshActorMapping(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err)
+		return
+	}
+	writeOK(w, st)
 }

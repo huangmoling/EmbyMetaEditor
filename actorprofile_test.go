@@ -205,25 +205,40 @@ func TestConfirmDetailName(t *testing.T) {
 	}
 }
 
-// TestEffectiveSearchName 搜索名的回退规则。
+// TestResolveSearchName 搜索名的裁决规则（手填 > 映射表 > 原名）。
 //
-// 「留空 = 用 Emby 里的原名」这条规则只在这一个函数里定义，前端发空串、后端
-// 回退，两边都不做第二份判断 —— 所以这条纯函数就是它的全部行为边界。
-func TestEffectiveSearchName(t *testing.T) {
+// 这条规则只在这一个函数里定义，前端发它手里的值、后端统一裁决 ——
+// 所以这条纯函数就是它的全部行为边界。
+//
+// 特别留意「手填 == Emby 名」那几档：界面把输入框预填成 Emby 名，用户不改就会
+// 原样发回来，如果只认「空串 = 没填」，映射表永远没有生效的机会。
+func TestResolveSearchName(t *testing.T) {
 	cases := []struct {
-		name, search, want string
+		name, search, mapped, want, from string
 	}{
-		{"三上悠亚", "三上悠亜", "三上悠亜"},         // 手填优先
-		{"三上悠亚", "", "三上悠亚"},             // 空 → 用 Emby 名
-		{"三上悠亚", "   ", "三上悠亚"},          // 只有空白 → 也算空
-		{"三上悠亚", "\t三上悠亜 ", "三上悠亜"},      // 前后空白修掉
-		{"  三上悠亚  ", "", "三上悠亚"},         // Emby 名自己也 trim
-		{"三上悠亚", "三上悠亜 みかみ", "三上悠亜 みかみ"}, // 中间的空格要留着（有些艺名带空格）
-		{"", "", ""}, // 两边都空 → 空（上层会按「缺少演员名」拦掉）
+		// 手填优先：只要和 Emby 名不是同一个写法，就用它
+		{"三上悠亚", "三上悠亜 みかみ", "三上悠亜", "三上悠亜 みかみ", searchNameFromInput},
+		{"三上悠亚", "  三上悠亜 ", "三上悠亜", "三上悠亜", searchNameFromInput},
+		// 没手填（空 / 只有空白）→ 映射表
+		{"三上悠亚", "", "三上悠亜", "三上悠亜", searchNameFromMapping},
+		{"三上悠亚", "  \t ", "三上悠亜", "三上悠亜", searchNameFromMapping},
+		// 手填的正是 Emby 名（界面预填后没改）→ 也算没手填，映射表照样生效
+		{"三上悠亚", "三上悠亚", "三上悠亜", "三上悠亜", searchNameFromMapping},
+		// 全角 / 空格 / 标点差异不算「改过」
+		{"三上 悠亜", "三上悠亜", "三上悠亜", "三上悠亜", searchNameFromMapping},
+		// 表里没这个人 → 回退原名
+		{"三上悠亚", "", "", "三上悠亚", searchNameFromEmby},
+		{"三上悠亚", "三上悠亚", "   ", "三上悠亚", searchNameFromEmby},
+		// Emby 名自己也要 trim
+		{"  三上悠亚  ", "", "", "三上悠亚", searchNameFromEmby},
+		// 两边都空 → 空（上层会按「缺少演员名」拦掉）
+		{"", "", "", "", searchNameFromEmby},
 	}
 	for _, c := range cases {
-		if got := effectiveSearchName(c.name, c.search); got != c.want {
-			t.Errorf("effectiveSearchName(%q, %q) = %q，期望 %q", c.name, c.search, got, c.want)
+		got, from := resolveSearchName(c.name, c.search, c.mapped)
+		if got != c.want || from != c.from {
+			t.Errorf("resolveSearchName(%q, %q, %q) = (%q, %q)，期望 (%q, %q)",
+				c.name, c.search, c.mapped, got, from, c.want, c.from)
 		}
 	}
 }
@@ -589,36 +604,44 @@ func (s *fakeProfileSource) Fetch(_ context.Context, _ *http.Client, name string
 	}, nil
 }
 
-// TestFetchActorProfileUsesSearchName 手动改的搜索名只当查询词，不碰身份。
+// TestFetchActorProfileUsesSearchName 查询词的来源与别名候选，身份不被搜索词顶掉。
 //
-// 三件事要一起验，因为它们很容易只做对其中两个：
-//  1. 发给各源的查询词是**手填的搜索名**（功能本身）；
+// 四件事要一起验，因为它们很容易只做对其中三个：
+//  1. 发给各源的查询词按「手填 > 映射表 > Emby 名」裁决；
 //  2. `prof.Name` 仍是 **Emby 里的人物名** —— 它要进同步历史、要给回滚认人，
 //     还得当别名记忆的 canonical；被搜索词顶掉的话，「同步历史」里会记成源站的
 //     名字，回滚时也对不上是谁；
-//  3. 别名候选仍按 Emby 名从别名记忆里取，**手填的搜索名不许混进去** ——
-//     用户明确选的是「不记，每次手填」，混进去就等于偷偷记住了。
+//  3. 别名候选仍按 Emby 名从别名记忆里取，**手填的搜索名不许混进来** ——
+//     用户明确选的是「不记，每次手填」，混进去就等于偷偷记住了；
+//  4. 映射表的写法要作为**别名候选**出现在每个源的入参里 —— 「算出来了、
+//     没用上」是这类改动最典型的错法（查询词换了、确认阶段却仍认不出日文名）。
 func TestFetchActorProfileUsesSearchName(t *testing.T) {
 	m := newMockEmby(t)
 	a := newProfileTestApp(t, m)
-	// 预置一条别名记忆：Emby 里的中文名 ↔ 日文写法
+	// 预置一条别名记忆：Emby 里的中文名 ↔ 用户自己确认过的读音写法
 	a.aliases.Remember("三上悠亚", []string{"みかみゆあ"}, "测试")
 
 	cases := []struct {
 		desc         string
+		name         string
 		searchName   string
 		wantQuery    string
-		wantNotAlias string
+		wantFrom     string
+		wantAlias    string // 必须出现在别名候选里（空 = 不查）
+		wantNotAlias string // 不许出现在别名候选里（空 = 不查）
 	}{
-		{"手填的搜索名优先", "三上悠亜", "三上悠亜", "三上悠亜"},
-		{"留空用 Emby 里的原名", "", "三上悠亚", ""},
-		{"只有空白也算留空", "  \t ", "三上悠亚", ""},
+		// 手填一个映射表里没有的写法：必须原样发出去，且不许被当成别名记住
+		{"手填的搜索名优先", "三上悠亚", "三上悠亜 みかみ", "三上悠亜 みかみ", searchNameFromInput, "みかみゆあ", "三上悠亜 みかみ"},
+		{"留空时映射表给出日文名", "三上悠亚", "", "三上悠亜", searchNameFromMapping, "三上悠亜", ""},
+		// 界面把输入框预填成 Emby 名，用户不改就原样发回来 —— 这一档必须照样生效
+		{"预填的原名不算手填，映射表照样生效", "三上悠亚", "三上悠亚", "三上悠亜", searchNameFromMapping, "三上悠亜", ""},
+		{"映射表里没有这个人就用原名", "查无此人測試名", "", "查无此人測試名", searchNameFromEmby, "", ""},
 	}
 	for _, c := range cases {
 		src := &fakeProfileSource{key: "Fake", label: "假源"}
 		before := a.aliases.Count()
 		prof, err := a.fetchActorProfileWith(context.Background(), []ProfileSource{src},
-			"", "三上悠亚", c.searchName, FetchOptions{UseAliasMemo: true})
+			"", c.name, c.searchName, FetchOptions{UseAliasMemo: true})
 		if err != nil {
 			t.Fatalf("%s：fetchActorProfileWith: %v", c.desc, err)
 		}
@@ -632,11 +655,15 @@ func TestFetchActorProfileUsesSearchName(t *testing.T) {
 			t.Errorf("%s：prof.SearchName = %q，期望 %q（界面要回显它）",
 				c.desc, prof.SearchName, c.wantQuery)
 		}
-		if prof.Name != "三上悠亚" {
+		if prof.SearchNameFrom != c.wantFrom {
+			t.Errorf("%s：prof.SearchNameFrom = %q，期望 %q（界面据此标出名字哪来的）",
+				c.desc, prof.SearchNameFrom, c.wantFrom)
+		}
+		if prof.Name != c.name {
 			t.Errorf("%s：prof.Name 必须是 Emby 里的人名，实际 %q", c.desc, prof.Name)
 		}
-		if !slices.Contains(src.calls[0].aliases, "みかみゆあ") {
-			t.Errorf("%s：别名记忆里的写法要作为候选传给源，实际 %q", c.desc, src.calls[0].aliases)
+		if c.wantAlias != "" && !slices.Contains(src.calls[0].aliases, c.wantAlias) {
+			t.Errorf("%s：别名候选里应当有 %q，实际 %q", c.desc, c.wantAlias, src.calls[0].aliases)
 		}
 		if c.wantNotAlias != "" && slices.Contains(src.calls[0].aliases, c.wantNotAlias) {
 			t.Errorf("%s：手填的搜索名不许进别名候选（用户选的是「不记，每次手填」），实际 %q",

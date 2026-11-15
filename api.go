@@ -43,6 +43,12 @@ type App struct {
 	offlineMu  sync.Mutex
 	offlineSrc *offlineLibrarySource
 
+	// 姓名映射表索引（//go:embed data/actor_mapping.xml，见 actormapping.go）。
+	// 同样是懒创建 + 单实例；与离线资料库分开一把锁，两者生命周期无关，
+	// 共用一个只会在解析期互相阻塞。
+	mappingMu  sync.Mutex
+	mappingSrc *actorMappingIndex
+
 	// 国产传媒客户端按站点地址缓存：同一个批次里必须复用同一个实例，
 	// 否则每次请求都新建，限速器（按站点共享）就成了摆设。
 	cnMu sync.Mutex
@@ -160,6 +166,12 @@ func (a *App) route() *http.ServeMux {
 	mux.HandleFunc("POST /api/profile/rollback", a.handleProfileRollback)
 	mux.HandleFunc("GET /api/profile/aliases", a.handleProfileAliases)
 	mux.HandleFunc("GET /api/profile/works", a.handleProfileWorks)
+	// 姓名映射表（中文名 ↔ 繁体名 ↔ 日文名 ↔ 旧艺名）的状态与更新。
+	// 数据出厂内嵌一份基线，cache/ 里那份是「用户主动更新过」的覆盖版本。
+	// 更新是**手动**动作：上游随时会变，自动拉取等于每隔几天就换一份数据，
+	// 而换数据会改变抓取结果 —— 那不该悄悄发生。
+	mux.HandleFunc("GET /api/profile/mapping", a.handleMappingStatus)
+	mux.HandleFunc("POST /api/profile/mapping/refresh", a.handleMappingRefresh)
 
 	// ---- MetaTube ----
 	mux.HandleFunc("GET /api/metatube/providers", a.handleMTProviders)
@@ -1250,6 +1262,23 @@ func (a *App) handleGfSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	found := a.gf.Fuzzy(keyword, 30)
+	// 映射表补几个写法一起搜：用户是按卡片上的中文名点的，而索引里是日文写法。
+	// 只补**映射表确认过的写法**，不做相似度扩展 —— 那条路会把同名不同人一起捞进来，
+	// 而选头像的对话框里「多一个陌生的候选」比「少一个」更容易点错。
+	// 候选列表第一个就是 keyword 本身（已经搜过了），从第二个开始。
+	if cands := a.mappingNameCandidates(keyword); len(cands) > 1 {
+		for _, alt := range cands[1:] {
+			remain := 30 - len(found)
+			if remain <= 0 {
+				break
+			}
+			for k, v := range a.gf.Fuzzy(alt, remain) {
+				if _, ok := found[k]; !ok {
+					found[k] = v
+				}
+			}
+		}
+	}
 	type hit struct {
 		Name    string         `json:"name"`
 		Entries []GfriendEntry `json:"entries"`

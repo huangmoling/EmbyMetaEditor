@@ -450,6 +450,57 @@ def main():
     else:
         print("PASS  资料完整度：接口字段被消费，卡片按百分比渲染，样式齐备")
 
+    # --- 16. 姓名映射表：从「算出来了」到「用户看得见、能更新」的整条链 ---
+    # 这张表解决的是「Emby 里是中文名、日文站只认日文写法」，所以有三条链要一起守：
+    #   后端把它用起来（查询词 + 认可的写法）、头像链也用起来、设置页能看见并能更新。
+    # 本项目最常见的错法是其中一条没接上：单测全绿、接口 200，而用户那边行为没变。
+    map_problems = []
+    for needle, what in (
+        ('id="stMapStatus"', "状态行"),
+        ('id="stMapRefresh"', "更新按钮"),
+        ('id="stMapMsg"', "更新结果提示"),
+    ):
+        if needle not in html:
+            map_problems.append(f"index.html 缺少{what}（{needle}）")
+    for needle, what in (
+        ("function loadMappingStatus", "状态加载函数"),
+        ("function refreshMapping", "更新函数"),
+        ("/api/profile/mapping/refresh", "更新接口"),
+        ("search_name_from", "「名字哪来的」字段"),
+    ):
+        if needle not in js:
+            map_problems.append(f"app.js 里没有{what}（{needle}）")
+    if "loadMappingStatus()" not in js:
+        map_problems.append("app.js 里没有任何地方调用 loadMappingStatus —— 设置页永远不会显示映射表状态")
+    # 更新成功后必须**重新读状态**，不能按钮自己报一句「已更新」就算完：
+    # 后端在校验不通过时是拒绝覆盖的，界面得拿新状态去证明。
+    refresh_body = re.search(r"async function refreshMapping\([\s\S]*?(?=\nasync function |\nfunction |\Z)",
+                             js)
+    if not refresh_body:
+        map_problems.append("app.js 里找不到 refreshMapping —— 无法确认更新后有没有回读状态")
+    elif "loadMappingStatus()" not in refresh_body.group(0):
+        map_problems.append("refreshMapping 成功后没回读状态 —— 界面无法证明真的换了数据")
+    # 勾选框/按钮 id 存在但没绑定，是另一个经典漏法
+    if "$('#stMapRefresh').onclick" not in js:
+        map_problems.append("app.js 里没有绑定 #stMapRefresh —— 按钮点不动（元素 id 检查查不出这种）")
+    # 后端：设置页两条接口都在
+    if "/api/profile/mapping" not in api or "/api/profile/mapping/refresh" not in api:
+        map_problems.append("api.go 里缺少映射表的状态 / 更新路由")
+    # 抓取链：资料那边要用到映射（查询词或别名），头像那边要用到多写法匹配
+    prof_go = read("profile.go")
+    if "mappingLookup(" not in prof_go:
+        map_problems.append("profile.go 没查映射表 —— 中文名永远不会换成日文名")
+    scrape_go = read("scrape.go")
+    if "LookupNames(" not in scrape_go:
+        map_problems.append("scrape.go 的头像链没用多写法匹配 —— 中文名在 gfriends 里依旧查不到")
+    print(f"      姓名映射表接线问题 {len(map_problems)} 处")
+    if map_problems:
+        for p in map_problems:
+            print("FAIL  " + p)
+        bad += 1
+    else:
+        print("PASS  姓名映射表：查询词/别名/头像三处接通，设置页能看状态也能更新")
+
     print(f"\n{'全部通过' if bad == 0 else str(bad) + ' 项未通过'}")
     return 1 if bad else 0
 

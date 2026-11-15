@@ -368,6 +368,24 @@
         </div>
 
         <div class="card">
+          <h3>姓名映射表</h3>
+          <div class="hint" style="margin-bottom:10px">
+            把同一个人的<b>中文名 / 繁体名 / 日文名 / 旧艺名</b>连成一条。抓演员资料时，Emby 里是「三上悠亚」就自动按「三上悠亜」去搜日文站，其它写法作为<b>认可的写法</b>参与身份确认；查头像时也会拿这些写法去 gfriends 索引里找。
+            <b>只改查询词与认可的写法，Emby 里的名字一个字都不改</b>，身份阈值也不放宽。
+          </div>
+          <div id="stMapStatus" style="color:var(--muted);margin-bottom:10px">加载中…</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn" id="stMapRefresh">从上游更新</button>
+            <span id="stMapMsg" class="hint" style="margin:0"></span>
+          </div>
+          <div class="hint" style="margin-top:8px">
+            出厂自带一份基线（离线可用，不联网也能工作）。更新会把最新数据写到
+            <span class="mono">cache/actor_mapping.xml</span> 并<b>立即生效</b>，不需要重启；拉回来的内容校验不通过时一律拒绝覆盖，继续用当前这份。
+            数据来自 <a href="https://github.com/li-peifeng/Jav-Actors-Mapping" target="_blank" rel="noreferrer noopener">Jav-Actors-Mapping</a>（上游声明该数据仅适用于 AVdb，此处按「随产物分发」使用，详见 README）。
+          </div>
+        </div>
+
+        <div class="card">
           <h3>磁力搜索源</h3>
           <div class="hint" style="margin-bottom:10px">抓磁力时会<b>同时并发</b>问下面这些站点，结果按磁力哈希去重、按体积从大到小合并。某一个源挂了或没有收录，其余源的结果照常返回。</div>
           <label class="switch" style="margin-bottom:10px"><input type="checkbox" id="stSrcJb"> javbus</label>

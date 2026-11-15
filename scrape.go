@@ -662,7 +662,10 @@ func (a *App) ScrapePersonAvatar(ctx context.Context, personID, name string, opt
 		if err := a.gf.EnsureLoaded(ctx, false); err != nil {
 			lastErr = err
 		} else {
-			entries := a.gf.Lookup(res.Name)
+			// 先用原名查，命中不了再用姓名映射表补的写法（日文名/繁体名/旧艺名）。
+			// gfriends 索引里的文件名是日文写法，Emby 里常是中文名 —— 不补这一步，
+			// 卡片上会写「库中无记录」，而库里其实有这个人。
+			entries := a.gf.LookupNames(a.mappingNameCandidates(res.Name))
 			if opts.File != "" {
 				// 用户手动选中的那张必须精确命中。前端传回的 file 是搜索接口给的
 				// **完整 URL**（handleGfSearch 会把 File 覆写成 URL），而索引里的

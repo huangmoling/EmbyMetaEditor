@@ -251,6 +251,34 @@ func (g *Gfriends) Lookup(name string) []GfriendEntry {
 	return nil
 }
 
+// LookupNames 按**多个写法**查头像，把各写法的命中合并去重。
+//
+// 为什么需要它：gfriends 索引里的文件名是日文写法，而 Emby 里的人物名多半是
+// 刮削器写的中文简体。单看 Lookup(「三上悠亚」) 一条都命不中，卡片上写着
+// 「库中无记录」，可库里明明有这个人 —— 这跟资料源那边是同一个病。
+//
+// 调用方传入的列表来自姓名映射表（见 App.mappingNameCandidates），原名排在前面：
+// **原名命中优先**，映射表的写法只补它没有的。去重按 File，因为同一个人在不同
+// 分组里可能有同一张图（索引里见过重复文件名）。
+func (g *Gfriends) LookupNames(names []string) []GfriendEntry {
+	var out []GfriendEntry
+	seen := map[string]bool{}
+	for _, n := range names {
+		for _, e := range g.Lookup(n) {
+			key := e.File
+			if key == "" {
+				key = e.Group + "\x00" + e.GroupZh
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // Fuzzy 模糊搜索演员，返回 key -> 候选，最多 limit 个演员。
 func (g *Gfriends) Fuzzy(keyword string, limit int) map[string][]GfriendEntry {
 	q := normName(keyword)

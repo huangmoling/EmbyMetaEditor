@@ -342,6 +342,11 @@ func TestOfflineLibraryIsFirstPriorityForProfiles(t *testing.T) {
 // 这些候选写法 → 离线库按旧艺名命中。也就是「用户确认过一次的写法，之后不用再手输」。
 //
 // 反证同样重要：**关掉别名记忆就该查不到**，否则这个测试证明不了是别名记忆起的作用。
+//
+// Emby 名故意用一个**映射表里不存在**的假名。v1.12.0 加了姓名映射表之后，真实演员名
+// （比如「水野朝陽」）的别名会由映射表独立提供 —— 那会让这条反证失效：关掉别名记忆
+// 照样命中，但命中的不是它要验的那条链路。所以隔离用假名，映射表自己能不能提供写法
+// 另有一条用例（TestFetchActorProfileUsesSearchName）。
 func TestOfflineLibrarySharesAliasMemory(t *testing.T) {
 	m := newMockEmby(t)
 	a := newProfileTestApp(t, m)
@@ -359,7 +364,7 @@ func TestOfflineLibrarySharesAliasMemory(t *testing.T) {
 	// 1) 别名记忆是空的：Emby 里的名字在库里查不到。
 	off := only
 	off.UseAliasMemo = false
-	prof, err := a.fetchActorProfileWith(ctx, a.profileSourceList(), "", "水野朝陽", "", off)
+	prof, err := a.fetchActorProfileWith(ctx, a.profileSourceList(), "", "测试用假名甲乙丙", "", off)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
@@ -368,11 +373,11 @@ func TestOfflineLibrarySharesAliasMemory(t *testing.T) {
 	}
 
 	// 2) 把「本多翼」记进别名记忆（等价于上次采用/同步时确认过）。
-	a.aliases.Remember("水野朝陽", []string{"本多翼"}, "测试")
+	a.aliases.Remember("测试用假名甲乙丙", []string{"本多翼"}, "测试")
 
 	on := only
 	on.UseAliasMemo = true
-	prof, err = a.fetchActorProfileWith(ctx, a.profileSourceList(), "", "水野朝陽", "", on)
+	prof, err = a.fetchActorProfileWith(ctx, a.profileSourceList(), "", "测试用假名甲乙丙", "", on)
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}

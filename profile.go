@@ -445,20 +445,42 @@ type FetchOptions struct {
 	UseAliasMemo bool     // 是否用别名记忆扩展搜索词
 }
 
-// effectiveSearchName 决定这次去外部源搜索时**用哪个名字**。
+// 搜索名的三个来源。回显给界面，是为了让用户看懂「输入框里是中文名、
+// 实际却按日文名搜」不是 bug —— 那是映射表在起作用。
+const (
+	searchNameFromInput   = "input"   // 用户手填的「搜索用名字」，优先级最高
+	searchNameFromMapping = "mapping" // 映射表按 Emby 名查到的日文写法
+	searchNameFromEmby    = "emby"    // 原样用 Emby 里的人物名
+)
+
+// resolveSearchName 决定这次去外部源搜索时**用哪个名字**，并说明来源。
 //
-// 界面上的「搜索用名字」优先；留空（或只有空白）就退回 Emby 里的人物名。
-// 为什么需要这个开关：Emby 里的人物名多半是刮削器写进去的，常常和源站的写法
-// 对不上（中文「三上悠亚」vs 日文「三上悠亜」、缺空格、用了艺名），而三个资料源
-// 全是日文站 —— 拿对不上的名字去搜就是一条不中，用户手里明明有正确写法却没处填。
+// 优先级：
+//  1. 界面上手填的「搜索用名字」（只要它和 Emby 名不一样）—— 用户明确指定了写法；
+//  2. 姓名映射表给出的日文名 —— Emby 里是「三上悠亚」时，日文站用的是「三上悠亜」，
+//     拿中文名去搜一条都不中；这是**默认就应该发生**的事，不该要求用户自己去改；
+//  3. Emby 里的人物名 —— 表里没有这个人时的回退。
+//
+// 为什么把「手填 == Emby 名」也当成没手填：界面把这个输入框**预填成 Emby 名**
+// （见 web/app.js 的 openProfilePanel），所以「没改过」和「改了但改回一样」在请求体里
+// 长得一模一样 —— 都是原名的字符串。如果只认「空串 = 没填」，映射表就永远不会生效，
+// 因为前端从来不会发空串。判据用归一化后的相等，全角/空格/标点差异不算「改了」。
+//
+// 这条规则**只在这里定义一次**：前端发它手里的那个值、后端统一裁决，
+// 界面不做第二份判断（否则两处一旦分叉，就会出现「输入框显示日文名、请求带中文名」）。
 //
 // 注意它**只影响查询词**：Emby 里的人物名、写入的字段归属、同步历史里的名字
-// 全都仍按 `name` 走（见 fetchActorProfile 里 prof.Name 那段注释）。
-func effectiveSearchName(name, searchName string) string {
-	if s := strings.TrimSpace(searchName); s != "" {
-		return s
+// 全都仍按 `name` 走（见 fetchActorProfileWith 里 prof.Name 那段注释）。
+func resolveSearchName(name, searchName, mapped string) (search, from string) {
+	base := strings.TrimSpace(name)
+	typed := strings.TrimSpace(searchName)
+	if typed != "" && normName(typed) != normName(base) {
+		return typed, searchNameFromInput
 	}
-	return strings.TrimSpace(name)
+	if m := strings.TrimSpace(mapped); m != "" {
+		return m, searchNameFromMapping
+	}
+	return base, searchNameFromEmby
 }
 
 // fetchActorProfile 并发跑各源，合并成一份可供界面比对的资料。
@@ -513,21 +535,32 @@ func (a *App) fetchActorProfileWith(ctx context.Context, srcs []ProfileSource, p
 		}
 	}
 
-	// 本次实际的查询词：界面手填的搜索名优先，留空用 Emby 里的人名。
-	// 它和下面的 aliases 是两个不同的东西，别混：
-	//   search  —— 发给源站当**关键字**的
+	// 姓名映射表：中文名 / 繁体名 / 日文名 / 旧艺名之间的对照（内嵌，见 actormapping.go）。
+	// 查不到不算错 —— 表里没这个人只是回退到原行为；**表本身读不出来**才是错，
+	// 那种情况必须留一条告警，否则表现只是「永远搜不到人」，界面看着一切正常。
+	mapEntry, mapErr := a.mappingLookup(name)
+
+	// 本次实际的查询词。它和下面的 aliases 是两个不同的东西，别混：
+	//   search  —— 发给源站当**关键字**的（每个源只收一个词）
 	//   aliases —— 用来**认可**源站返回的其他写法的（命中别名记 95 分）
-	search := effectiveSearchName(name, searchName)
+	// 优先级：手填（且与 Emby 名不同）> 映射表给的日文名 > Emby 名，
+	// 裁决只在 resolveSearchName 一处，见那里的注释。
+	search, searchFrom := resolveSearchName(name, searchName, mapEntry.preferredSearchName())
 
 	// 别名候选：一律以 **Emby 里的名字** 去查别名记忆 —— 那是这条人物的身份，
 	// 和这次临时改的搜索词无关。手填的搜索名不进这个列表：用户明确说过
 	// 「不记，每次手填」，把它塞进别名记忆等于偷偷记住了。
 	// （源站自己返回的别名照旧会被记，那是另一回事，见 applyProfileFacts。）
 	names := []string{name}
-	var aliases []string
 	if opts.UseAliasMemo && a.aliases != nil {
 		names = append(names, a.aliases.NamesFor(name)...)
 	}
+	// 映射表的写法**不受「用别名记忆」开关影响**：它是编译进程序的静态事实，
+	// 不是用户确认过的记忆。关掉记忆的人不该因此丢掉「中文名 → 日文名」这对写法 ——
+	// 否则关一个选项，抓取能力跟着掉一截，而界面上看不出原因。
+	// 这些写法只用于**认可**（95 分档），身份阈值一分都不放宽。
+	names = append(names, mapEntry.aliasesFor(name)...)
+	var aliases []string
 	for _, n := range names[1:] {
 		if strings.TrimSpace(n) != "" {
 			aliases = append(aliases, strings.TrimSpace(n))
@@ -585,7 +618,12 @@ func (a *App) fetchActorProfileWith(ctx context.Context, srcs []ProfileSource, p
 	// 也是别名记忆的 canonical，必须是这条人物的身份，不能是临时的搜索词。
 	built := buildActorProfile(name, personID, facts, ex)
 	built.SearchName = search
+	built.SearchNameFrom = searchFrom
 	built.Warnings = append(prof.Warnings, built.Warnings...)
+	if mapErr != nil {
+		// 表读不出来时抓取照常进行（只是少了一层写法），但这句必须让它露出来。
+		built.Warnings = append(built.Warnings, "姓名映射表不可用："+mapErr.Error())
+	}
 	return built, nil
 }
 
@@ -658,7 +696,7 @@ type ApplyResult struct {
 // **无论哪种，最终写什么值由服务端重新抓取后决定**，不接受前端传来的值 ——
 // 避免把任意内容写进用户的 Emby。
 //
-// searchName 只当查询词（见 effectiveSearchName）：写入的字段归属、同步历史里的
+// searchName 只当查询词（见 resolveSearchName）：写入的字段归属、同步历史里的
 // 名字仍是 Emby 里的人物名。批量路径传空串 —— 一批人共用一个手填的搜索名没有意义。
 func (a *App) applyActorProfile(ctx context.Context, personID, name, searchName string, keys []string, opts FetchOptions) (*ApplyResult, error) {
 	if personID == "" {

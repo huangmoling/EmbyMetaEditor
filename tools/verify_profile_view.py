@@ -653,7 +653,7 @@ def main():
             window.__pfCaptured = (init && init.body) || '';
             let req = {};
             try { req = JSON.parse(window.__pfCaptured) || {}; } catch (e) {}
-            // 回显的搜索名照 effectiveSearchName 的规则算（手填优先、留空退原名），
+            // 回显的搜索名照 resolveSearchName 的规则算（手填优先、然后映射表、最后原名），
             // 这样下面那条回显断言验的才是界面有没有用服务端的答案。
             const sn = String(req.search_name || '').trim() || String(req.name || '');
             return Promise.resolve(new Response(JSON.stringify({

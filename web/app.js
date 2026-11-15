@@ -322,7 +322,7 @@ function switchView(v) {
   if (v === 'library') { ensureLibs(); loadItems(0); }
   if (v === 'persons') { ensureLibs(); loadPersons(0); refreshGfState(); loadProfileSources(); }
   if (v === 'cn') { ensureLibs(); cnSyncSelUI(); }
-  if (v === 'settings') { fillSettings(); loadItemHistory(); }
+  if (v === 'settings') { fillSettings(); loadItemHistory(); loadMappingStatus(); }
 }
 
 // ---------------- 概览 ----------------
@@ -861,8 +861,8 @@ function bindProfileSourcePicker() {
 // 只能跑去 Emby 里改人名（那会牵动别的地方）。
 //
 // 它**只当搜索词**：Emby 里的人物名一个字都不改，写进去的字段也仍然归属当前
-// 打开的这条人物（服务端 effectiveSearchName 那段注释是同一个保证）。
-// 留空 = 用 Emby 里的原名。
+// 打开的这条人物（服务端 resolveSearchName 那段注释是同一个保证）。
+// 留空 = 交给服务端裁决：映射表有这个人就用它的日文写法，否则用 Emby 里的原名。
 function profileNameField() {
   const cur = S.prof.cur || {};
   const emby = cur.name || '';
@@ -872,7 +872,7 @@ function profileNameField() {
     '<input class="input" id="pfName" spellcheck="false" autocomplete="off" ' +
     'placeholder="' + esc(emby) + '" value="' + esc(v) + '">' +
     '<span class="cnhint">只在去资料站搜索时用它，<strong>Emby 里的名字不会被改</strong>' +
-    '（' + esc(emby) + '）；留空 = 用原名</span>' +
+    '（' + esc(emby) + '）；留空 = 用原名（有姓名映射表时自动换成日文写法）</span>' +
     '</div>';
 }
 
@@ -887,8 +887,9 @@ function bindProfileNameField() {
   el.oninput = () => { if (S.prof.cur) S.prof.cur.searchName = el.value; };
 }
 
-// profileSearchName 取当前要发出去的搜索名；空串照发，由服务端回退成 Emby 里的名字 ——
-// 「留空 = 用原名」这条规则只在有效的那个地方定义一次（effectiveSearchName）。
+// profileSearchName 取当前要发出去的搜索名；原样照发，由服务端裁决 ——
+// 「手填 > 映射表 > 原名」这条规则只在有效的那个地方定义一次（resolveSearchName），
+// 界面不复制一份判断，否则两处一旦分叉就会出现「输入框显示日文名、请求带中文名」。
 function profileSearchName() {
   const el = $('#pfName');
   return el ? el.value.trim() : '';
@@ -1035,7 +1036,12 @@ function renderProfilePanel(personId, name, prof) {
     '<div class="pf-srcbar">命中来源：' + (srcTags || '<span class="cnhint">无</span>') +
     // 回显服务端**实际发出去**的查询词，而不是输入框当前的值：抓完之后用户还能
     // 接着改输入框，光看输入框分不清哪次是这次的。
-    '<span class="cnhint">本次按「' + esc(prof.search_name || name) + '」搜索</span>' +
+    // 「映射表」标签：这种情况下输入框里是中文名、实际发的是日文名，不打标签
+    // 用户只会以为程序把名字弄错了。
+    '<span class="cnhint">本次按「' + esc(prof.search_name || name) + '」搜索' +
+    (prof.search_name_from === 'mapping'
+      ? '<span class="tag tag-violet" style="margin-left:6px" title="Emby 里是中文名，日文站只认日文写法 —— 这个名字取自内嵌的姓名映射表；Emby 里的名字不会被改">映射表</span>'
+      : '') + '</span>' +
     '<span class="grow"></span>' +
     '<span class="cnhint">Emby 里为空的字段 ' + (prof.write_count || 0) + ' 个</span></div>' +
     '<div class="scroll-x"><table class="tbl pf-tbl"><thead><tr>' +
@@ -2065,6 +2071,57 @@ function fillSettings() {
   }
 }
 
+// ---------------- 姓名映射表 ----------------
+
+// loadMappingStatus 拉一次映射表状态（多少条 / 用的是内嵌基线还是更新过的 cache）。
+//
+// 单独一条接口、而不是塞进 /api/config：读它要解析 2.6 万条数据（首次几百毫秒），
+// 不该让设置页其它字段跟着等。
+async function loadMappingStatus() {
+  const box = $('#stMapStatus');
+  if (!box) return;
+  box.textContent = '正在读取…';
+  try {
+    box.innerHTML = mappingStatusHTML(await api('/api/profile/mapping'));
+  } catch (e) {
+    box.textContent = '读取失败：' + e.message;
+  }
+}
+
+function mappingStatusHTML(d) {
+  if (!d) return '—';
+  const src = d.source === 'cache' ? '在线更新（cache）' : '内嵌基线';
+  const parts = [num(d.entries) + ' 条', num(d.keys) + ' 个写法', src];
+  if (d.updated_at) parts.push('更新于 ' + fmtTime(d.updated_at));
+  if (d.ambiguous) parts.push(d.ambiguous + ' 个重名写法已跳过');
+  let html = '<span>' + parts.map(esc).join(' · ') + '</span>';
+  if (d.note) html += '<div style="color:var(--warn);margin-top:4px">' + esc(d.note) + '</div>';
+  if (d.error) html += '<div style="color:var(--danger);margin-top:4px">' + esc(d.error) + '</div>';
+  return html;
+}
+
+// refreshMapping 从上游拉最新映射表。
+//
+// 落盘与换索引都在服务端做，这里成功后**重新读一次状态** —— 「已更新到 N 条」
+// 必须由新状态证明，不能靠按钮自己报个数（那样万一后端拒绝覆盖，界面照样说成功）。
+async function refreshMapping(btn) {
+  const msg = $('#stMapMsg');
+  btn.disabled = true;
+  if (msg) { msg.style.color = 'var(--muted)'; msg.textContent = '正在从上游拉取…'; }
+  try {
+    const d = await api('/api/profile/mapping/refresh', { method: 'POST', body: {} });
+    if (msg) {
+      msg.style.color = 'var(--success)';
+      msg.textContent = '已更新到 ' + num(d.entries) + ' 条，立即生效';
+    }
+    loadMappingStatus();
+  } catch (e) {
+    if (msg) { msg.style.color = 'var(--danger)'; msg.textContent = '更新失败：' + e.message; }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function saveSettings() {
   const body = {
     emby_url: $('#stUrl').value.trim(),
@@ -2441,6 +2498,8 @@ function bind() {
       $('#stMtProviders').textContent = '可用：' + list.join(' / ');
     } catch (e) { $('#stMtProviders').textContent = '失败：' + e.message; }
   };
+  // 姓名映射表：更新是一次性手动动作，所以要有明确的按钮与结果回显
+  $('#stMapRefresh').onclick = () => refreshMapping($('#stMapRefresh'));
 }
 
 // ---------------- 启动 ----------------

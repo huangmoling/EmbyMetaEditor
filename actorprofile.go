@@ -977,10 +977,15 @@ type ActorProfile struct {
 	Fields   []ProfileField `json:"fields"`
 	Aliases  []string       `json:"aliases"`
 	Overview string         `json:"overview"`
-	// SearchName 是这次**实际发出去的查询词**，可能来自界面上手填的「搜索用名字」。
+	// SearchName 是这次**实际发出去的查询词**，可能来自界面上手填的「搜索用名字」，
+	// 也可能来自姓名映射表（Emby 里是中文名时自动换成日文写法）。
 	// 回显给界面，是为了让用户看得见「刚才到底按哪个名字搜的」——
 	// 面板上的输入框在抓完之后还能继续改，光看输入框分不清哪次是这次的。
 	SearchName string `json:"search_name,omitempty"`
+	// SearchNameFrom 说明这个查询词是哪来的：input（手填）/ mapping（映射表）/
+	// emby（原名）。界面据此在回显后面加一个标签 —— 输入框里明明是「三上悠亚」、
+	// 实际却按「三上悠亜」搜，没有这个字段就只能靠用户自己猜。
+	SearchNameFrom string `json:"search_name_from,omitempty"`
 	// 注意：**没有 Tags**。这个构建对 Person 不保存标签，详情见 buildActorProfile
 	// 里把标签并进简介那段注释。
 	Sources  []string `json:"sources"`
